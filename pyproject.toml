@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-    { name = "HomoeoGWAS authors" },
+    { name = "Shipeng Yang", email = "qhyysp@gmail.com" },
 ]
 keywords = [
     "GWAS",
@@ -69,10 +69,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/U7-GWAS/homoeogwas"
-Documentation = "https://u7-gwas.github.io/homoeogwas"
-Repository = "https://github.com/U7-GWAS/homoeogwas"
-Issues = "https://github.com/U7-GWAS/homoeogwas/issues"
+Homepage = "https://github.com/Shipeng-Yang/HomoeoGWAS"
+Documentation = "https://shipeng-yang.github.io/HomoeoGWAS"
+Repository = "https://github.com/Shipeng-Yang/HomoeoGWAS"
+Issues = "https://github.com/Shipeng-Yang/HomoeoGWAS/issues"
 
 [project.scripts]
 homoeogwas = "homoeogwas.cli:main"

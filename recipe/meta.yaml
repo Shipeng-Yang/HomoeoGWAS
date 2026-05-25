@@ -1,0 +1,72 @@
+{% set name = "homoeogwas" %}
+{% set version = "0.1.0.dev0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # For a bioconda/conda-forge submission, point at the GitHub release tarball:
+  #   url: https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v{{ version }}.tar.gz
+  #   sha256: <filled at release time>
+  # For local `conda build recipe/` from a checkout, use the working tree:
+  path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - homoeogwas = homoeogwas.cli:main
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61
+  run:
+    - python >=3.10
+    - numpy >=1.24
+    - scipy >=1.10
+    - pandas >=2.0
+    - scikit-learn >=1.3
+    - matplotlib-base >=3.7
+    - bed-reader >=1.0
+    - pyyaml >=6.0
+    - pydantic >=2.5
+    - joblib >=1.3
+    - pysam >=0.22
+
+test:
+  imports:
+    - homoeogwas
+    - homoeogwas.cli
+    - homoeogwas.lmm
+    - homoeogwas.kernel
+  commands:
+    - homoeogwas --help
+
+about:
+  home: https://github.com/Shipeng-Yang/HomoeoGWAS
+  license: MIT
+  license_family: MIT
+  license_file: ../LICENSE
+  summary: "Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS"
+  description: |
+    HomoeoGWAS is a GWAS framework for allopolyploid crops (wheat AABBDD,
+    cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It pairs
+    subgenome-partitioned random-effect LMMs (per-logical-chromosome LOCO),
+    an optional scope-conditional homoeolog Hadamard kernel, and a zero-shot
+    PlantCaduceus + AgroNT deep-learning prior for re-ranking suggestive hits.
+
+    GPU extras (per-SNP dual-GPU scan + DL-prior inference) are NOT pulled in
+    by this conda package — they require torch >=2.4 and transformers ==4.46.3
+    and are best installed into a dedicated env:
+        pip install "homoeogwas[gpu]"
+    or follow docs/getting_started.md for the PlantCaduceus / mamba-ssm setup.
+  doc_url: https://shipeng-yang.github.io/HomoeoGWAS
+  dev_url: https://github.com/Shipeng-Yang/HomoeoGWAS
+
+extra:
+  recipe-maintainers:
+    - Shipeng-Yang
