@@ -74,12 +74,17 @@ def known_qtl_for_snp(cand_df: pd.DataFrame, qtls: pd.DataFrame,
     if within ±window_bp.
     """
     out = cand_df.copy()
+    # Normalise chrom to str on BOTH sides: a panel with purely numeric chrom
+    # names ("1".."12", e.g. rice) is read as int64, so the previous
+    # str(cand) == int64(qtl) comparison silently matched nothing → 0 recoverable.
+    qtls = qtls.copy()
+    qtls["_chrom_s"] = qtls["chrom"].astype(str)
     near: list[str | None] = []
     inwin: list[bool] = []
     for _, r in out.iterrows():
         ch = str(r["chrom"])
         pos = int(r["pos"])
-        sub = qtls[qtls["chrom"] == ch]
+        sub = qtls[qtls["_chrom_s"] == ch]
         if len(sub) == 0:
             near.append(None); inwin.append(False); continue
         d = (sub["qtl_pos"] - pos).abs()

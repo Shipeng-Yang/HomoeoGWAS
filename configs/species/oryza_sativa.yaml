@@ -1,0 +1,36 @@
+# HomoeoGWAS species config — Oryza sativa (Asian rice, DIPLOID 2n=2x=24)
+#
+# First diploid config: exercises the genome_type=diploid / n_sub=1 path.
+# For a diploid the framework degenerates gracefully — a single whole-genome
+# GRM, no homoeolog Hadamard kernel (build_homoeolog_kernel returns "none" for
+# n_sub<=1). Used to validate that the DL-prior conditional-lift result
+# generalises beyond allopolyploids (most crops are diploid).
+
+id: oryza_sativa
+latin: Oryza sativa
+common_name: Asian rice
+genome_type: diploid
+ploidy: 2
+
+subgenomes:
+  # A diploid has one "subgenome" = the whole genome. All 12 chromosomes route
+  # into this single partition; K_hom is skipped automatically.
+  - id: ALL
+    copy: 1
+    donor: Oryza sativa (Nipponbare reference)
+    chroms: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
+
+fasta: /mnt/nvme/rice_ref/Oryza_sativa.IRGSP-1.0.dna.toplevel.fa
+gff: /mnt/nvme/rice_ref/Oryza_sativa.IRGSP-1.0.57.gff3.gz   # RAP-DB gene models
+chrom_map: data/reference/rice/chrom_map_rice.tsv           # identity 1..12 (BIM chrom == fasta chrom)
+
+geno:
+  bed_root: data/processed/rice    # has ALL/ subdir with all.{bed,bim,fam}
+
+pheno: data/processed/rice/pheno_clean.tsv
+sample_map: ~
+
+dosage_model: diploidized          # true diploid, 0/1/2
+loco_unit: chrom                    # LOCO per-chrom (12 leave-one-out)
+dl_model_window: 6144
+dl_candidate_window: 100000

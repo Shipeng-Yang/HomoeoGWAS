@@ -1,0 +1,39 @@
+# fit_rice_Grain_width_loco.yaml — RiceVarMap2 diploid panel (n=529), LOCO.
+# Diploid (n_sub=1): single whole-genome GRM, no K_hom. Tests DL-prior
+# conditional-lift generalisation beyond allopolyploids.
+fit_version: 1
+panel:
+  name: rice_ricevarmap2
+  subgenomes: [ALL]
+phenotype:
+  path: data/processed/rice/pheno_clean.tsv
+  sample_col: IID
+  trait: Grain_width
+genotype:
+  scan_bed_prefix_template: data/processed/rice/{subgenome}/all
+  grm:
+    source: bed
+    bed_prefix_template: data/processed/rice/{subgenome}/all
+    maf_min: 0.05
+kernels:
+  normalize: trace
+  include_hadamard: false
+  hadamard_name: hom
+reml:
+  n_starts: 10
+  seed: 2026
+scan:
+  mode: auto
+  backend: auto
+  batch_size: 20000
+  maf_min: 0.05
+  call_rate_min: 0.9
+  loco:
+    enabled: true
+    fallback: error
+    min_denominator_fraction: 1.0e-6
+plots:
+  enabled: true
+outputs:
+  out_dir: results/phase5e/rice_ricevarmap2/Grain_width
+  prefix: Grain_width

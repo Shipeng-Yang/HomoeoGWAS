@@ -322,6 +322,13 @@ def main():
     ap.add_argument("--p-max", type=float, default=P_MAX_DEFAULT)
     ap.add_argument("--ld-leads-tier", default="ALL",
                     choices=["STRICT_HIGH_CONFIDENCE","HIGH_CONFIDENCE","ALL"])
+    ap.add_argument("--ld-window-kb", type=int, default=LD_WINDOW_KB,
+                    help="LD-partner window (±kb) around each lead. Tighten for "
+                         "dense WGS panels (e.g. rice 4.7M SNP) to keep the "
+                         "candidate set tractable/comparable. Default 1000.")
+    ap.add_argument("--ld-min-r2", type=float, default=LD_MIN_R2,
+                    help="LD-partner r² threshold. Default 0.20; raise (e.g. 0.5) "
+                         "for dense panels.")
     ap.add_argument("--pilot", action="store_true",
                     help="pilot mode: skip p<p_max stream + LD expansion")
     args = ap.parse_args()
@@ -369,9 +376,10 @@ def main():
         ld_partners = pd.DataFrame()
         print("[4] (pilot or no LD leads) skipping LD expansion")
     else:
-        print(f"[4] LD expansion (r²≥{LD_MIN_R2}, ±{LD_WINDOW_KB}kb) for {len(ld_leads)} leads")
+        print(f"[4] LD expansion (r²≥{args.ld_min_r2}, ±{args.ld_window_kb}kb) for {len(ld_leads)} leads")
         ld_partners = expand_ld_partners(
-            ld_leads, bed_root, args.plink2, out_dir / "ld_cache")
+            ld_leads, bed_root, args.plink2, out_dir / "ld_cache",
+            ld_window_kb=args.ld_window_kb, min_r2=args.ld_min_r2)
         print(f"  {len(ld_partners)} partner pairs")
 
     # 5. merge
