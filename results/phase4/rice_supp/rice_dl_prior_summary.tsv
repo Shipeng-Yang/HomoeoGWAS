@@ -1,0 +1,5 @@
+trait	n_candidates	n_anchor	chosen_beta	recall_gwas	recall_fused	lift	framing
+Heading_date	1058	12	5.0	0.0833	0.3333	0.25	DL-enhanced
+Grain_length	4929	5	0.25	0.2	0.2	0.0	flat
+Grain_width	2634	5	5.0	0.2	0.4	0.2	DL-enhanced
+Plant_height	750	3	0.25	0.3333	0.3333	0.0	flat
