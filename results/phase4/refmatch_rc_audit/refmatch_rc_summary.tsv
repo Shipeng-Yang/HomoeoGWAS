@@ -1,0 +1,9 @@
+panel	trait	ref_match_before	ref_match_after	lift_before	lift_after	note
+rapeseed_horvath2020	bloom_50pct	0.459	0.850	0.70	0.80	RC fix; lift up
+rapeseed_horvath2020	plant_height	0.464	0.856	0.30	0.30	stable
+cotton_hebau	fiber_length_BLUE	0.503	0.928	0.20	0.20	stable
+cotton_hebau	lint_percentage_BLUE	0.473	0.939	0.20	0.20	stable
+oat_old_rahman2025	BIO6	0.80	0.983	0.058	0.058	stable
+oat_old_rahman2025	SOC	0.79	0.982	-0.087	-0.092	negative, stable
+oat_old_rahman2025	BIO12	0.80	0.983	0.117	0.105	positive, stable
+wheat_watkins	days_to_emerg	1.00	1.00	0.0	0.0	v1 path, no RC needed
