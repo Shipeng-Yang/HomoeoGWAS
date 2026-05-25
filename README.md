@@ -17,6 +17,24 @@ HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton
 3. **Zero-shot DL prior re-ranking** — PlantCaduceus + AgroNT log-likelihood fused with GWAS p-value as `z(-log10 p) + β · z(|LLR|)` over suggestive hits + LD blocks (~10⁵ SNPs); per-panel β chosen by LOQO grid.
 4. **Dual-GPU native stack** — per-SNP LMM scan on 2× RTX 3080 20 GB (~90 min for wheat 83.3M markers × 827 samples LOCO);ablation evidence + scalable workflow as the engineering contribution.
 
+## Release status & known limitations
+
+**v1.0.0 is a software + analysis-code release; the associated manuscript is
+unpublished (in preparation, target Nature Communications). A Zenodo DOI is
+pending the first GitHub release.** Please treat the loci below as illustrative
+of the pipeline, not as validated discoveries.
+
+Known limitations a reviewer should be aware of:
+- **Reference-match rate 45–50%** for the Horvath2020 and cotton hebau DL-prior
+  subset analyses (REF-allele agreement on the FASTA windows). Current results
+  are PASS-REF-subset; a Darmor v4.1 original-FASTA re-run + cotton SNP-call
+  audit is a planned follow-up.
+- The homoeolog Hadamard kernel `K_hom` is a **scope-conditional, transparent
+  negative finding** (variance component at the REML boundary in all four GBLUP
+  panels), not a headline result.
+- Oat and strawberry are **validation / sanity panels**; their anchors are not
+  independent of the source studies.
+
 ## Status (2026-05-25)
 
 | Phase | Status |
@@ -34,12 +52,12 @@ HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton
 Five panels spanning ploidy 2n→8n run through the same framework with zero
 core-code change per species (subgenome-aware LMM universality).
 
-**Real-data novel / recovered loci (charter §3.3 hard gate ≥1; we have ≥4 panels)**:
-- Wheat *Triticum aestivum* Watkins, days_to_emerg: `chr6D:142021157 p=4.9e-12`, near *TaCAD-D1* (cinnamyl alcohol dehydrogenase, ~90 kb)
-- Cotton *Gossypium hirsutum* hebau, fiber_length: `chrD11:21714989 p=5.3e-14` (novel; ortholog-coordinate-corrected anchor set)
-- Rapeseed *Brassica napus* Horvath2020, bloom_50pct: `chrA10` near *BnaA10.FT* (14 kb recovery)
-- Strawberry Pincot 2018, mean_score: `chr2A:28339895 p=8.5e-153` (Fw1 *Fusarium oxysporum* race 1 resistance, paper replication; 87% subgenome-A marker bias caveat)
-- Oat *Avena sativa* Rahman 2025 OLD: D-subgenome-localized association signals for environmental-differentiation traits (31 novel candidates; sanity/robustness panel, not a main figure)
+**Recovered known loci and candidate associations (illustrative, not independently validated):**
+- Wheat *Triticum aestivum* Watkins, days_to_emerg: `chr6D:142021157 p=4.9e-12`, candidate locus near *TaCAD-D1* (cinnamyl alcohol dehydrogenase, ~90 kb)
+- Cotton *Gossypium hirsutum* hebau, fiber_length: `chrD11:21714989 p=5.3e-14`, candidate locus on an ortholog-coordinate-corrected anchor set (putative; not independently replicated)
+- Rapeseed *Brassica napus* Horvath2020, bloom_50pct: `chrA10`, recovery of canonical *BnaA10.FT* (lead 14 kb away)
+- Strawberry Pincot 2018, mean_score: `chr2A:28339895 p=8.5e-153`, recovery of the published *Fw1* (*Fusarium oxysporum* race 1) signal (87% subgenome-A marker bias caveat)
+- Oat *Avena sativa* Rahman 2025 OLD: D-subgenome-localized association signals for environmental-differentiation traits (candidate loci; sanity/robustness panel, not a main figure, and anchors come from the same study so this is a pipeline sanity check rather than independent replication)
 
 ## Quick start
 
