@@ -10,7 +10,15 @@
 <!-- DOI badge added after the first Zenodo release: -->
 <!-- [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
-HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It combines:
+HomoeoGWAS is a GWAS framework for **any allopolyploid crop**. A new species is
+added through a single YAML config — no framework code changes (see
+[Adding a new species](#adding-a-new-species)). The five panels validated so far
+span ploidy 2n–8n and are illustrative, **not** an exhaustive list of supported
+species: wheat AABBDD, cotton AADD, rapeseed AACC, oat AACCDD, strawberry
+octoploid. The method requires distinguishable subgenomes (a homoeologous
+chromosome naming or `chrom_map`) and, for the DL-prior step, a reference FASTA.
+
+It combines:
 
 1. **Subgenome-partitioned random effects LMM** — `y = Xβ + u_A + u_B [+ u_D ...] + ε`, fit per-subgenome GRM under REML, with LOCO option per logical chromosome.
 2. **Optional homoeolog Hadamard kernel** (`K_hom = K_A ⊙ K_B [⊙ K_D]`) as **scope-conditional** epistasis term — currently treated as transparent negative finding pending synteny-aware revival (see [charter §2.1](docs/00_charter.md)).
@@ -79,7 +87,29 @@ homoeogwas split --species configs/species/myspecies.yaml --vcf in.vcf.gz --out-
 
 The CLI exposes **≤ 5 flags** (`--config`, `--out-dir`, `--backend`, `--dry-run`, `--force`) per charter §3.3 release item.
 
-## Supported species (Phase 5d milestone)
+## Adding a new species
+
+The framework is **not limited to the validated panels below** — any
+allopolyploid is supported through configuration alone:
+
+1. Copy an existing `configs/species/*.yaml` and edit `subgenomes`, the
+   chromosome-naming prefix / `chrom_map`, the reference assembly path, and
+   `ploidy`. The schema (`src/homoeogwas/species_config.py`) validates it.
+2. `homoeogwas split --species <yaml> --vcf <in.vcf.gz> --out-dir ...` splits
+   markers into per-subgenome genotype sets. `K_hom` auto-selects the right
+   form for the subgenome count (2/3-way Hadamard; pairwise-mean for 4 sub to
+   stay full-rank).
+3. `homoeogwas fit --config <run.yaml>` runs the LMM scan; the optional DL-prior
+   step additionally needs the species reference FASTA.
+
+No Python is edited at any step. The oat panel (the 5th species) was added this
+way as a zero-code-change test of the schema.
+
+Requirements: distinguishable subgenomes (homoeologous chromosome naming or a
+`chrom_map`); a reference FASTA for the DL-prior re-ranking. Diploids can run
+the LMM, but the homoeolog Hadamard kernel `K_hom` is not meaningful for them.
+
+## Validated species panels (Phase 5d milestone)
 
 | Species | Genome | Panel | Samples | SNPs | Reference | Status |
 |---|---|---|---|---|---|---|
