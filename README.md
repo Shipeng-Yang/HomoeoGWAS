@@ -5,7 +5,10 @@
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-260%20passed-brightgreen.svg)](#testing)
+<!-- DOI badge added after the first Zenodo release: -->
+<!-- [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
 HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It combines:
 
