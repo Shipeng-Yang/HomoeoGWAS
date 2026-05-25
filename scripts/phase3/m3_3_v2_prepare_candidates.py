@@ -223,6 +223,13 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
         # FASTA. ref stays = fasta_base (+ strand, so seq[center]==ref holds);
         # the + strand alt is the complement of the OTHER VCF allele. beta/se/p
         # are untouched — this is allele-frame harmonisation, not an effect flip.
+        # NOTE (Codex review Q1): beta stays tied to the ORIGINAL GWAS effect
+        # allele. This is safe because the only downstream consumer (the DL-prior
+        # fusion m3_3_fuse_and_evaluate.py) ranks by |z(-log10 p)| + beta_w*z(|LLR|),
+        # which is sign-agnostic in the GWAS term and uses |LLR| — neither
+        # reinterprets beta as the (RC-harmonised) ALT effect. Any future code
+        # that reads beta as an allele-specific effect MUST re-derive the effect
+        # allele from ref_fasta/alt_fasta, not assume a1.
         elif both_acgt and COMP[fasta_base] == a1u:
             refs.append(fasta_base); alts.append(COMP[a2u]); matches.append("A1_IS_REF_RC")
         elif both_acgt and COMP[fasta_base] == a2u:
