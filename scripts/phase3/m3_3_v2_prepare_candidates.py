@@ -184,12 +184,14 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
     """
     import pysam
     fa = pysam.FastaFile(str(fasta_path))
-    refs, alts, matches = [], [], []
+    refs, alts, matches, palindromes = [], [], [], []
     n_pos_disagree = 0
+    COMP = {"A": "T", "T": "A", "C": "G", "G": "C"}
     for _, r in cand.iterrows():
         sid = str(r["snp_id"])
         if sid not in allele_map:
-            refs.append(None); alts.append(None); matches.append("BIM_MISSING"); continue
+            refs.append(None); alts.append(None); matches.append("BIM_MISSING")
+            palindromes.append(False); continue
         panel_ch, a1, a2, pos = allele_map[sid]
         # Sanity: cand and BIM should agree on (chrom, pos) for this snp_id
         cand_ch = str(r["chrom"])
@@ -197,26 +199,43 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
         if cand_ch != panel_ch or (cand_pos > 0 and cand_pos != pos):
             n_pos_disagree += 1
             refs.append(None); alts.append(None); matches.append("BIM_CAND_DISAGREE")
-            continue
+            palindromes.append(False); continue
         fasta_ch = chrom_map.get(panel_ch, panel_ch)
         try:
             fasta_base = fa.fetch(fasta_ch, pos - 1, pos).upper()
         except (KeyError, ValueError):
-            refs.append(None); alts.append(None); matches.append("FASTA_KEYERR"); continue
+            refs.append(None); alts.append(None); matches.append("FASTA_KEYERR")
+            palindromes.append(False); continue
         if fasta_base not in ("A","C","G","T"):
-            refs.append(None); alts.append(None); matches.append("FASTA_NON_ACGT"); continue
+            refs.append(None); alts.append(None); matches.append("FASTA_NON_ACGT")
+            palindromes.append(False); continue
         a1u, a2u = a1.upper(), a2.upper()
-        if fasta_base == a1u and a2u in ("A","C","G","T"):
+        both_acgt = a1u in COMP and a2u in COMP
+        is_pal = both_acgt and ({a1u, a2u} == {"A", "T"} or {a1u, a2u} == {"C", "G"})
+        # Direct match (priority): FASTA + strand base equals one VCF allele.
+        # Palindromic A/T or C/G SNPs always resolve here (ref=fasta_base is
+        # correct for scoring even though the design strand is unknowable).
+        if fasta_base == a1u and a2u in COMP:
             refs.append(a1u); alts.append(a2u); matches.append("A1_IS_REF")
-        elif fasta_base == a2u and a1u in ("A","C","G","T"):
+        elif fasta_base == a2u and a1u in COMP:
             refs.append(a2u); alts.append(a1u); matches.append("A2_IS_REF")
+        # Reverse-complement: array allele recorded on the strand opposite the
+        # FASTA. ref stays = fasta_base (+ strand, so seq[center]==ref holds);
+        # the + strand alt is the complement of the OTHER VCF allele. beta/se/p
+        # are untouched — this is allele-frame harmonisation, not an effect flip.
+        elif both_acgt and COMP[fasta_base] == a1u:
+            refs.append(fasta_base); alts.append(COMP[a2u]); matches.append("A1_IS_REF_RC")
+        elif both_acgt and COMP[fasta_base] == a2u:
+            refs.append(fasta_base); alts.append(COMP[a1u]); matches.append("A2_IS_REF_RC")
         else:
             refs.append(fasta_base); alts.append(None); matches.append("REF_MISMATCH")
+        palindromes.append(is_pal)
     fa.close()
     cand = cand.copy()
     cand["ref_fasta"] = refs
     cand["alt_fasta"] = alts
     cand["ref_match_status"] = matches
+    cand["is_palindromic"] = palindromes
     cand["fasta_chrom"] = cand["chrom"].map(lambda c: chrom_map.get(str(c), str(c)))
     if n_pos_disagree:
         print(f"  WARN: {n_pos_disagree} candidates dropped (BIM_CAND_DISAGREE) — "
@@ -392,9 +411,15 @@ def main():
         print(f"  ERR: fasta missing: {args.fasta}")
         return 2
     final = harmonize_with_fasta(agg, Path(args.fasta), allele_map, chrom_map)
-    n_match = int(final["ref_match_status"].isin(["A1_IS_REF","A2_IS_REF"]).sum())
-    print(f"  REF match: {n_match}/{len(final)} ({100*n_match/max(len(final),1):.1f}%)")
-    print(f"  mismatch breakdown: {final['ref_match_status'].value_counts().to_dict()}")
+    SCORABLE = ["A1_IS_REF", "A2_IS_REF", "A1_IS_REF_RC", "A2_IS_REF_RC"]
+    n_direct = int(final["ref_match_status"].isin(["A1_IS_REF", "A2_IS_REF"]).sum())
+    n_match = int(final["ref_match_status"].isin(SCORABLE).sum())
+    n_rc = n_match - n_direct
+    n_pal = int(final.get("is_palindromic", pd.Series(dtype=bool)).sum())
+    print(f"  REF match (scorable): {n_match}/{len(final)} "
+          f"({100*n_match/max(len(final),1):.1f}%)  "
+          f"[direct {n_direct} + RC {n_rc}; palindromic {n_pal}]")
+    print(f"  status breakdown: {final['ref_match_status'].value_counts().to_dict()}")
 
     # 7. save
     out_path = out_dir / "candidates.tsv.gz"
@@ -413,6 +438,9 @@ def main():
         "n_ld_partners": int(len(ld_partners)),
         "ref_match_breakdown": final["ref_match_status"].value_counts().to_dict(),
         "n_ref_matched": n_match,
+        "n_ref_matched_direct": n_direct,
+        "n_ref_matched_rc": n_rc,
+        "n_palindromic": n_pal,
         "source_breakdown": final["source"].value_counts().head(20).to_dict(),
         "runtime_sec": round(time.time() - t0, 1),
         "outputs": {"candidates": str(out_path)},

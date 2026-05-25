@@ -211,7 +211,12 @@ def main():
     import pysam
     print(f"=== M3.3 score DL prior — model={args.model} device={args.device} ===")
     cand = pd.read_csv(args.candidates, sep="\t", compression="gzip")
-    cand = cand[cand["ref_match_status"].isin(["A1_IS_REF","A2_IS_REF"])].reset_index(drop=True)
+    # Scorable = direct + reverse-complement (strand-flipped) REF matches. For
+    # RC rows ref_fasta is still the + strand FASTA base, so seq[center]==ref
+    # holds and the alt is already complemented to the + strand frame.
+    cand = cand[cand["ref_match_status"].isin(
+        ["A1_IS_REF", "A2_IS_REF", "A1_IS_REF_RC", "A2_IS_REF_RC"]
+    )].reset_index(drop=True)
     if args.max_snps:
         cand = cand.head(args.max_snps).reset_index(drop=True)
     # Shard for multi-GPU split
