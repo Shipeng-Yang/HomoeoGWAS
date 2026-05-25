@@ -1,0 +1,56 @@
+# HomoeoGWAS species config — Triticum aestivum (bread wheat, AABBDD hexaploid)
+#
+# Replaces hardcoded paths in src/homoeogwas/io.py & scripts/phase3 for wheat.
+# Phase 5a Hybrid schema: 10 required + dosage_model/loco_unit/dl_window optional with default.
+
+id: wheat_aestivum
+latin: Triticum aestivum
+common_name: Bread wheat
+genome_type: allopolyploid
+ploidy: 6
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Triticum urartu
+    chroms: [chr1A, chr2A, chr3A, chr4A, chr5A, chr6A, chr7A]
+  - id: B
+    copy: 1
+    donor: Aegilops speltoides-like
+    chroms: [chr1B, chr2B, chr3B, chr4B, chr5B, chr6B, chr7B]
+  - id: D
+    copy: 1
+    donor: Aegilops tauschii
+    chroms: [chr1D, chr2D, chr3D, chr4D, chr5D, chr6D, chr7D]
+
+fasta: /mnt/nvme/wheat_ref/iwgsc_refseqv1.0_all_chromosomes/iwgsc_refseqv1.0_all_chromosomes.fa
+gff: data/reference/wheat/iwgsc_refseqv1.1_HC.gff3   # IWGSC v1.1 HC annotation
+chrom_map: data/reference/wheat/chrom_map_identity.tsv   # IWGSC v1.0 BIM chrom == fasta chrom
+
+geno:
+  bed_root: data/processed/wheat_bed   # has A/, B/, D/ subdir with all.{bed,bim,fam}
+  # vcf alternative: data/raw/wheat/vcf/  (cohort VCFs by chrom)
+
+pheno: data/processed/wheat/pheno_clean.tsv
+sample_map: ~                          # null = use VCF/BIM sample IDs directly
+
+dosage_model: diploidized              # WGS-called 0/1/2 dosage on inbred landrace
+loco_unit: chrom                       # LOCO per-chrom (21 leave-one-out)
+dl_model_window: 6144                  # AgroNT max context
+dl_candidate_window: 100000            # ±100kb DL prior candidate radius
+
+qc:
+  maf_min: 0.01
+  hwe_min_p: ~                         # null = HWE filter off (inbred landrace)
+  missingness_max: 0.1
+
+known_qtl_tsv: data/reference/wheat/known_qtl_wheat.tsv    # 13 anchor IWGSC v1.1 HC
+homoeolog_map: ~                       # not yet built; v1.5+ syntenic
+
+# Provenance / paper citation
+provenance:
+  panel_name: Watkins
+  panel_source: ENA PRJEB71453
+  panel_n_sample: 1051
+  reference_assembly: IWGSC RefSeq v1.0
+  reference_doi: 10.1126/science.aar7191

@@ -1,0 +1,124 @@
+# =============================================================================
+# HomoeoGWAS .gitignore
+# =============================================================================
+# Strict exclusion of large data + intermediate artifacts.
+# data/ alone is ~950 GB (raw VCFs, references, BLAST DBs).
+# results/ is ~19 GB (Phase 1-5 outputs; reproducible via Snakemake).
+# benchmarks/ is ~590 MB (8 baseline tool source trees; clone per
+# scripts/reproduce_baselines.sh).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Data and large reproducible outputs
+# ---------------------------------------------------------------------------
+data/
+benchmarks/
+
+# results/ excluded except results/phase4/ (release artifacts: reproducibility
+# fingerprints, paper_figures DAG receipt — part of the published package).
+results/*
+!results/phase4/
+
+# ---------------------------------------------------------------------------
+# Snakemake metadata + DAG caches
+# ---------------------------------------------------------------------------
+.snakemake/
+*.snakemake.log
+
+# ---------------------------------------------------------------------------
+# Tool / state caches not part of the package
+# ---------------------------------------------------------------------------
+.codex_state/
+.codex_logs/
+.claude/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.cache/
+
+# ---------------------------------------------------------------------------
+# Run logs (large, per-host)
+# ---------------------------------------------------------------------------
+logs/
+*.log
+nohup.out
+
+# ---------------------------------------------------------------------------
+# Local conda/venv envs (should never be in repo)
+# ---------------------------------------------------------------------------
+envs/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Python build / install artifacts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------------------------
+# Notebooks / editors
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+# OS junk
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Genomics intermediates that should never be tracked
+# ---------------------------------------------------------------------------
+*.bgen
+*.bgi
+*.sample
+*.pgen
+*.pvar
+*.psam
+*.bed
+*.bim
+*.fam
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.csi
+*.bcf
+*.bam
+*.cram
+*.cram.crai
+*.sam
+*.fa
+*.fasta
+*.fa.gz
+*.fasta.gz
+*.fai
+*.gff
+*.gff3
+*.gff3.gz
+
+# ---------------------------------------------------------------------------
+# plink2/bcftools/regenie scratch
+# ---------------------------------------------------------------------------
+plink2.log
+plink.log
+*.regenie.log
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+/tmp/

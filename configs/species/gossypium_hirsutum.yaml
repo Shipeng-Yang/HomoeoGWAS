@@ -1,0 +1,50 @@
+# HomoeoGWAS species config — Gossypium hirsutum (upland cotton, AADD tetraploid)
+#
+# hebau panel + HBAU NDM8 ASM1899796v1 reference assembly (M3.4 v2 setup).
+
+id: gossypium_hirsutum
+latin: Gossypium hirsutum
+common_name: Upland cotton
+genome_type: allopolyploid
+ploidy: 4
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Gossypium arboreum
+    chroms: [A01, A02, A03, A04, A05, A06, A07, A08, A09, A10, A11, A12, A13]
+  - id: D
+    copy: 1
+    donor: Gossypium raimondii
+    chroms: [D01, D02, D03, D04, D05, D06, D07, D08, D09, D10, D11, D12, D13]
+
+fasta: /mnt/nvme/cotton_hbau/GCA_018997965.1_ASM1899796v1_genomic.fa
+gff: /mnt/nvme/cotton_hbau/cottongen/NDM8.gff3.gz       # cottongen HEAU official
+chrom_map: data/reference/cotton/chrom_map_hebau_to_ncbi.tsv  # A01 → CM032202.1 etc.
+
+geno:
+  bed_root: data/processed/cotton                # A/, D/ subdir with all.{bed,bim,fam}
+
+pheno: data/processed/cotton/pheno_m3_4_blue.tsv
+sample_map: ~
+
+dosage_model: diploidized
+loco_unit: chrom
+dl_model_window: 6144
+dl_candidate_window: 100000
+
+qc:
+  maf_min: 0.01
+  hwe_min_p: ~
+  missingness_max: 0.1
+
+known_qtl_tsv: data/reference/cotton/known_qtl_cotton.tsv  # M3.4 v2 NDM8 coords + paper_grade
+homoeolog_map: ~
+
+provenance:
+  panel_name: hebau
+  panel_source: data/raw/cotton/snp/genotype-data.zip
+  panel_n_sample: 419
+  reference_assembly: HBAU NDM8 ASM1899796v1 (GCA_018997965.1)
+  reference_paper: He et al. 2021 Nat Genet
+  cottongen_gff_doi: 10.1093/database/baw010

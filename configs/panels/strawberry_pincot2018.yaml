@@ -1,0 +1,56 @@
+# strawberry_pincot2018.yaml — Phase 5b Week 2 panel manifest
+# Pincot 2018 iStraw90 Axiom 50K SNP array remapped to NIHHS Seolhyang octoploid.
+
+panel: strawberry_pincot2018
+species: fragaria_ananassa
+species_latin: Fragaria × ananassa (cultivated strawberry, octoploid AABBCCDD)
+ploidy: 8
+subgenomes: [A, B, C, D]
+
+reference:
+  name: NIHHS Seolhyang ASM5004357v1
+  accession: GCA_050043575.1
+  bioproject: PRJNA1203581
+  chrom_style_native: "1A..7D (7 chr × 4 sub = 28)"
+  notes: "Subgenome assignment per Edger 2019 (A=F.vesca, B=F.iinumae, C=F.nilgerrensis, D=F.nubicola)"
+
+geno:
+  source: "Pincot et al. 2018 G3 (doi:10.1534/g3.118.200129) — Fw1 GWAS"
+  figshare: "doi:10.25387/g3.6007715"
+  raw_genotype: data/raw/strawberry/Supplemental_Data_File_1_genotypes_germplasm.txt
+  raw_nomenclature: data/raw/strawberry/Supplemental_Data_File_3_SNP_nomenclature.xlsx
+  vcf_remapped: /mnt/nvme/strawberry_panel/pincot2018/pincot2018_octoploid_remap.vcf.gz
+  remap_method: "BLAST iStraw90 probe flanking (megablast pident≥90) → NIHHS Seolhyang 28-chrom fasta; highest-scoring subgenome per probe"
+  remap_audit: /mnt/nvme/strawberry_panel/pincot2018/probe_subgenome_assignment.tsv
+  processed_dir: data/processed/fragaria_ananassa
+  processed_layout: "{A,B,C,D}/all.{bed,bim,fam,pgen,pvar,psam}"
+  n_samples: 564
+  n_snp_total_raw: 30393
+  n_snp_A_qc: 14638
+  n_snp_B_qc: 1066
+  n_snp_C_qc: 609
+  n_snp_D_qc: 404
+
+pheno:
+  raw: data/raw/strawberry/Supplemental_Data_File_4_phenotypes.xlsx
+  primary_traits: [mean_score]    # mean Fusarium wilt severity across timepoints/reps/years
+  secondary_traits: [max_score, median_score]
+  trait_unit: "1-5 ordinal disease score (1=symptomless, 5=severe wilt)"
+  known_qtl:
+    - {name: Fw1, chrom_candidates: ["2A","2D"], notes: "Fusarium wilt resistance, Pincot 2018 mapped to chr2; subgenome via remap"}
+
+qc:
+  maf_min: 0.05
+  missing_max: 0.10
+  hwe_pmin: ~
+  bi_allelic_only: true
+  snps_only: true
+
+v1_role: tier1_octoploid_anchor
+notes: |
+  - Phase 5b Week 2 Step 1 deliverable: octoploid VCF + 4-sub BED.
+  - Subgenome distribution heavily A-biased (87%) because iStraw90 array was
+    designed against F. vesca diploid reference. Phase 5a K_hom auto-fallback
+    selects pairwise_mean for n_sub=4 (Hadamard would be too sparse).
+  - Fw1 chr2 subgenome assignment depends on probe remap — paper Methods
+    should note which sub it falls under.

@@ -1,0 +1,62 @@
+# fit_oat_old_BIO6_loco.yaml — HomoeoGWAS `fit` run-config.
+# Phase 5d Step 6 — first oat AACCDD blind-run trait.
+#
+# Trait: BIO6 = Minimum Temperature of Coldest Month (BIO* = WorldClim bioclim).
+# Paper File S3 top hit for BIO6: chr3D:154518113 p=5.86e-12 (-log10p=11.23).
+# Charter §2.1: K_hom currently scope-conditional supplementary, scan uses
+# additive K_pool only (include_hadamard: false).
+#
+# Run:
+#   homoeogwas fit --config configs/runs/fit_oat_old_BIO6_loco.yaml --backend auto
+
+fit_version: 1
+
+panel_manifest: ../panels/oat_old_rahman2025.yaml
+
+panel:
+  name: oat_old_rahman2025
+  subgenomes: [A, C, D]    # AACCDD, NOT ABD — Phase 5a generic + Step 0 verified
+
+phenotype:
+  path: data/processed/oat/pheno_clean.tsv
+  sample_col: sample_id
+  trait: BIO6
+
+genotype:
+  scan_bed_prefix_template: data/processed/avena_sativa/{subgenome}/all
+  grm:
+    source: bed                # LOCO requires per-chrom partials
+    bed_prefix_template: data/processed/avena_sativa/{subgenome}/all
+    maf_min: 0.01
+
+kernels:
+  normalize: trace
+  include_hadamard: false      # K_hom scope-conditional, off for Phase 5d baseline scan
+  hadamard_name: hom
+
+reml:
+  n_starts: 10
+  seed: 2026
+
+scan:
+  mode: auto
+  backend: auto                # auto picks GPU if available (polygwas-gpu env)
+  batch_size: 20000
+  maf_min: 0.01
+  call_rate_min: 0.9
+  loco:
+    enabled: true
+    fallback: error
+    min_denominator_fraction: 1.0e-6
+    # NOTE: oat VCF uses segment-based chrom names (1A_0, 1A_1, ..., 7D_0, 7D_1),
+    # so loco_unit "chrom" leaves 42 segments out one at a time (not 21 logical
+    # chroms). Step 6 first run accepts this resolution; if λ_GC inflates due to
+    # residual proximal LD between segments of the same logical chrom, add
+    # segment→logical chrom grouping in species_config.py (future enhancement).
+
+plots:
+  enabled: true
+
+outputs:
+  out_dir: results/phase5d/m3_1_loco/oat_old_rahman2025
+  prefix: BIO6

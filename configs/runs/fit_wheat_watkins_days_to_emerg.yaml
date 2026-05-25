@@ -1,0 +1,56 @@
+# fit_wheat_watkins_days_to_emerg.yaml — HomoeoGWAS `fit` run-config.
+# Scale-anchor run: wheat Watkins (AABBDD, n~827), trait days_to_emerg.
+# ~83M markers -> scan.mode stream (scan_bed_stream, never materialised).
+# GRM is built from LD-pruned per-subgenome BEDs; the scan reads the full
+# pgen->bed converted genotypes.
+#
+#   homoeogwas fit --config configs/runs/fit_wheat_watkins_days_to_emerg.yaml \
+#                  --out-dir results/phase2/cli/wheat_watkins --backend gpu
+#
+# Run under the GPU env for the GPU backend:
+#   ~/miniconda3/envs/polygwas-gpu/bin/python -m homoeogwas fit --config ...
+
+fit_version: 1
+
+panel_manifest: ../panels/wheat_watkins.yaml
+
+panel:
+  name: wheat_watkins
+  subgenomes: [A, B, D]
+
+phenotype:
+  path: data/processed/wheat/pheno_clean.tsv
+  sample_col: sample
+  trait: days_to_emerg
+
+genotype:
+  # full converted BEDs for the per-SNP scan
+  scan_bed_prefix_template: data/processed/wheat_bed/{subgenome}/all
+  grm:
+    source: bed                # GRM from LD-pruned per-subgenome BEDs
+    bed_prefix_template: results/phase2/m2_4_5/wheat_watkins/pruned/{subgenome}
+    maf_min: 0.01
+
+kernels:
+  normalize: trace
+  include_hadamard: false
+  hadamard_name: hom
+
+reml:
+  n_starts: 10
+  seed: 2026
+
+scan:
+  mode: stream                 # wheat-scale: streaming, chunked I/O
+  backend: auto
+  chunk_size: 200000
+  maf_min: 0.01
+  call_rate_min: 0.9
+  gzip: true
+
+plots:
+  enabled: true
+
+outputs:
+  out_dir: results/phase2/cli/wheat_watkins
+  prefix: days_to_emerg

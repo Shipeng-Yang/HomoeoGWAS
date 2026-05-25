@@ -1,0 +1,54 @@
+# fit_strawberry_pincot2018_mean_score_loco.yaml — Phase 5b Week 2 Step 2c
+# Octoploid strawberry Fusarium wilt severity GWAS with LOCO.
+# Expected hit: Fw1 on chr2 (subgenome assigned by probe BLAST remap).
+
+fit_version: 1
+
+panel_manifest: ../panels/strawberry_pincot2018.yaml
+
+panel:
+  name: strawberry_pincot2018
+  subgenomes: [A, B, C, D]
+
+phenotype:
+  path: data/processed/strawberry/pheno_clean.tsv
+  sample_col: sample_id
+  trait: mean_score
+
+genotype:
+  scan_bed_prefix_template: data/processed/fragaria_ananassa/{subgenome}/all
+  grm:
+    source: bed
+    bed_prefix_template: data/processed/fragaria_ananassa/{subgenome}/all
+    maf_min: 0.05
+
+kernels:
+  normalize: trace
+  # n_sub=4 → Phase 5a Step 3 auto-fallback picks pairwise_mean (Hadamard
+  # 4-way is too sparse). Start with include_hadamard:false to keep this
+  # first fit purely additive; once Phase 5c GBLUP wrapper lands we'll
+  # re-fit with hom_mode=auto and report drop_reason transparency.
+  include_hadamard: false
+  hadamard_name: hom
+
+reml:
+  n_starts: 10
+  seed: 2026
+
+scan:
+  mode: auto
+  backend: auto
+  batch_size: 20000
+  maf_min: 0.05
+  call_rate_min: 0.9
+  loco:
+    enabled: true
+    fallback: error
+    min_denominator_fraction: 1.0e-6
+
+plots:
+  enabled: true
+
+outputs:
+  out_dir: results/phase5/fragaria_ananassa/mean_score
+  prefix: mean_score

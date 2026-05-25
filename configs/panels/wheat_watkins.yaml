@@ -1,0 +1,63 @@
+# wheat_watkins.yaml — Phase 1 frozen manifest (2026-05-20)
+# Watkins landrace + modern wheat panel, ENA PRJEB71453 / ERZ22157275
+# 作 v1 规模锚点 (scale anchor).
+
+panel: wheat_watkins
+species: wheat
+species_latin: Triticum aestivum
+ploidy: hexaploid
+subgenomes: [A, B, D]
+
+reference:
+  name: IWGSC RefSeq v1.0
+  path: data/reference/wheat/iwgsc_refseqv1.0_all_chromosomes.zip
+  chrom_style: "chr{1-7}{A,B,D}"   # 21 染色体 chr1A..chr7D
+
+geno:
+  source: ENA PRJEB71453 / analysis ERZ22157275
+  raw_dir: data/raw/wheat/vcf
+  pattern: "chr{1A,1B,1D,...,7A,7B,7D}.SNP.Missing-unphasing.ID.ann.finalSID.allele2_retain.hard_retain.InbreedingCoeff_retain.missing_retain.maf_retain.vcf.gz"
+  total_size_gb: 340
+  n_chrom_files: 21
+  processed_dir: data/processed/wheat
+  processed_layout: "{A,B,D}/all.{vcf.gz,pgen,pvar,psam}"
+  n_samples: 1035
+  # 注: 数据下载完整性问题: 5/21 文件有 bgzf 损坏块, 已 rename .bad + 重下中
+  download_integrity_check: "bgzip -t 全检 21 个 vcf.gz, 任何非零退出为损坏"
+
+pheno:
+  source: WWWG2B / WISP / DFW
+  dir: data/raw/wheat/phenotype
+  files:
+    - WISP_WGIN_Watkins_JIC_2006_2010_2011_Field_Data.xlsx   # 多年 JIC Church Farm
+    - JIC_Wheat_Pre-Breeding_WISP_Watkins_Whole_Collection.xlsx
+    - DFW_phenotype_data_CF_{2011..2017}.xlsx                # 7 年 DFW
+    - DFW_ParWat_RIL_phenotype_data_for_Watseq/              # RIL 子目录
+  trait_dictionary:
+    - {abbrev: Ht,      name: plant_height,    unit: cm}
+    - {abbrev: GRYLD,   name: grain_yield,     unit: t/ha}
+    - {abbrev: EM,      name: ear_emergence,   unit: date}
+    - {abbrev: DTEM,    name: days_to_emerg,   unit: day}    # heading date 等价
+    - {abbrev: TGRWT,   name: tgw_1000_grain,  unit: g}
+    - {abbrev: GRSA,    name: grain_surface,   unit: sqmm}
+    - {abbrev: GRWD,    name: grain_width,     unit: mm}
+  primary_traits:    [days_to_emerg]            # heading date (DTEM), 已知 Vrn/Ppd QTL 可回收
+  secondary_traits:  [tgw_1000_grain, plant_height]
+  id_mapping_note: |
+    Watkins ID 形如 1190xxx (e.g. 1190002 W002.1 = Crete);
+    VCF sample IDs 待 join 时 cross-check;
+    Watkins core = 119 个核心, whole = 1062 个全集;
+    最终 join 后 effective N 取决于 trait × VCF 交集.
+
+qc:
+  maf_min: 0.01
+  missing_max: 0.10
+  hwe_pmin: 1e-6
+  bi_allelic_only: true
+  snps_only: true
+
+v1_role: tier1_scale_anchor
+notes: |
+  - 1035 样本是异源六倍体最大公开 panel 之一, scale benchmark 必备.
+  - Watkins 是 1930s landrace 集合, 跨 32 国, genetic diversity 比 modern panel 大.
+  - heading date (DTEM) 是首选 — Vrn / Ppd 是教科书 QTL.

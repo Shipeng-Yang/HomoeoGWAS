@@ -1,0 +1,54 @@
+# HomoeoGWAS species config — Brassica napus (rapeseed/canola, AACC tetraploid)
+#
+# Horvath2020 panel (Zenodo 4302088) + NCBI Bra_napus_v2.0 reference.
+
+id: brassica_napus
+latin: Brassica napus
+common_name: Rapeseed / canola
+genome_type: allopolyploid
+ploidy: 4
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Brassica rapa
+    chroms: [chrA01, chrA02, chrA03, chrA04, chrA05, chrA06, chrA07, chrA08, chrA09, chrA10]
+  - id: C
+    copy: 1
+    donor: Brassica oleracea
+    chroms: [chrC01, chrC02, chrC03, chrC04, chrC05, chrC06, chrC07, chrC08, chrC09]
+
+fasta: data/reference/rapeseed/GCF_000686985.2_Bra_napus_v2.0_genomic.fa
+gff: data/reference/rapeseed/GCF_000686985.2_Bra_napus_v2.0_genomic.gff.gz
+chrom_map: data/reference/rapeseed/chrom_map_horvath_to_ncbi.tsv  # chrA01 → NC_027757.2
+
+geno:
+  bed_root: data/processed/rapeseed/horvath
+
+pheno: data/processed/rapeseed/horvath/pheno_clean.tsv
+sample_map: ~
+
+dosage_model: diploidized
+loco_unit: chrom
+dl_model_window: 6144
+dl_candidate_window: 100000
+
+qc:
+  maf_min: 0.05               # smaller panel (n=297-380), stricter MAF
+  hwe_min_p: 1e-6
+  missingness_max: 0.1
+
+known_qtl_tsv: data/reference/rapeseed/known_qtl_rapeseed.tsv  # 10 anchor flowering/dev QTL
+homoeolog_map: ~
+
+provenance:
+  panel_name: Horvath2020
+  panel_source: Zenodo 4302088
+  panel_n_sample: 428
+  reference_assembly: Bra_napus_v2.0 (NCBI GCF_000686985.2, ex Darmor v4.1 renamed)
+  reference_paper: Chalhoub et al. 2014 Science
+  notes: |
+    REF-match against Bra_napus_v2.0 fasta is 45-50% (sequence drift between
+    Darmor v4.1 source and v2.0 polish); only REF-validated subset goes to
+    DL prior scoring. Future option = use original Darmor v4.1 fasta + own
+    chrom_map (see docs/06 Phase 5/Codex finding #2).

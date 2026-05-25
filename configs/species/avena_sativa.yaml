@@ -1,0 +1,90 @@
+# HomoeoGWAS species config — Avena sativa (cultivated oat, AACCDD hexaploid)
+#
+# Reference: OT3098 v2 (NCBI GCA_916181665.1, PepsiCo/Corteva, Nature Genetics 2022)
+#   - 21 chromosomes labelled 1A..7A / 1C..7C / 1D..7D
+#   - Allohexaploid 2n=6x=42; cultivated since ~Neolithic
+#
+# Phase 5d blind-run panel: Rahman et al. 2025 G3 "Oat Landrace Diversity (OLD)"
+#   - 737 post-QC sample × 393,962 SNP (Beagle-imputed, diploid-called GBS via
+#     DeepVariant + GLNexus). Ag Data Commons / figshare 27095383.
+#   - CHROM in VCF uses segment format: 1A_0, 1A_1 (each logical chrom split
+#     into two pseudomolecule segments). chrom_map_oat.tsv carries the
+#     segment → logical_chrom (1A_0 + 1A_1 → 1A) mapping for LOCO grouping.
+#
+# Phase 5d Step 0 verified: Phase 5a is generic — no A/B/D hardcoding in
+# kernel.py / species_config.py / grm.py / lmm.py / scan.py / cli.py (only
+# docstring example in grm.py:371). K_hom n=3 → 3-way Hadamard auto-fallback.
+
+id: avena_sativa
+latin: Avena sativa
+common_name: Cultivated oat (hexaploid AACCDD)
+genome_type: allopolyploid
+ploidy: 6
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Avena longiglumis (Kamal 2022 A-donor candidate)
+    # 7 logical chroms × 2 segments = 14 entries
+    chroms: [1A_0, 1A_1, 2A_0, 2A_1, 3A_0, 3A_1, 4A_0, 4A_1, 5A_0, 5A_1, 6A_0, 6A_1, 7A_0, 7A_1]
+  - id: C
+    copy: 1
+    donor: Avena insularis (Kamal 2022 C-donor candidate)
+    chroms: [1C_0, 1C_1, 2C_0, 2C_1, 3C_0, 3C_1, 4C_0, 4C_1, 5C_0, 5C_1, 6C_0, 6C_1, 7C_0, 7C_1]
+  - id: D
+    copy: 1
+    donor: unknown extant species (extinct or unsampled D-donor; per Kamal 2022)
+    chroms: [1D_0, 1D_1, 2D_0, 2D_1, 3D_0, 3D_1, 4D_0, 4D_1, 5D_0, 5D_1, 6D_0, 6D_1, 7D_0, 7D_1]
+
+# Ensembl Plants release-62 OT3098 v2 (Step 2 finalized 2026-05-24)
+# NCBI GCA_916181665.1 fasta was 10.9 GB but used ENA accessions (OV702279.1…)
+# WITHOUT subgenome mapping AND shipped no GFF. Ensembl release-62 uses the
+# canonical 1A/1C/1D nomenclature (Kamal 2022 Nat Genet) and ships GFF +
+# matching fasta. ~2.9 GB gz fasta + 46 MB gz GFF.
+fasta: /mnt/nvme/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
+gff: /mnt/nvme/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
+chrom_map: data/reference/oat/chrom_map_oat.tsv   # fasta_chrom col filled with 1A/1C/1D
+
+geno:
+  # Step 3 (post ref unzip): bcftools reheader (no ##contig in raw VCF) +
+  # plink2 --vcf --make-pgen --maf 0.01 --geno 0.1 → split into A/C/D pgens.
+  vcf: /mnt/nvme/oat_raw/figshare/nsgc.gdv.gln.cohort.clean.maf01maxmiss75diploid.beagle_sorted_filt.gt.vcf.gz
+  layout: single
+
+pheno: data/processed/oat/pheno_clean.tsv
+sample_map: ~                          # null = use VCF/BIM sample IDs directly
+
+# diploid-called VCF on hexaploid — paper Methods note: dosage information
+# lost in GBS DeepVariant strict-diploid mode, but allele positions remain
+# valid for GWAS; consistent with HomoeoGWAS diploidized assumption.
+dosage_model: diploidized
+loco_unit: chrom                       # LOCO per logical chrom; segment grouping handled by chrom_map_oat.tsv (TBD: confirm species_config supports group LOCO)
+dl_model_window: 6144                  # AgroNT max context
+dl_candidate_window: 100000            # ±100kb DL prior candidate radius
+
+qc:
+  maf_min: 0.01                        # already applied in OLD VCF
+  hwe_min_p: ~                         # null = HWE off (landrace + diploid-call)
+  missingness_max: 0.1
+
+known_qtl_tsv: data/reference/oat/known_qtl_oat.tsv    # 594 sentinels × 31 traits
+homoeolog_map: ~                       # not built; v1.5+ syntenic
+
+# Provenance / paper citation
+provenance:
+  panel_name: Oat Landrace Diversity (OLD) panel
+  panel_source: Ag Data Commons figshare 27095383
+  panel_n_sample: 737   # Step 4 reconciled: raw VCF 737 + pheno had 738 (Sd, no genotype, dropped)
+  panel_doi: 10.15482/USDA.ADC/27095383.v1
+  panel_license: CC BY 4.0
+  panel_paper: "Rahman et al. 2025 G3 jkaf093 — A global assembly of landrace oat accessions"
+  reference_assembly: OT3098 v2
+  reference_doi: 10.1038/s41588-022-01127-7
+  reference_paper: "Kamal et al. 2022 Nature Genetics — Reference genome assemblies reveal the origin and evolution of allohexaploid oat"
+  reference_accession: GCA_916181665.1
+  notes: |
+    First climate-adaptation GWAS panel in HomoeoGWAS (other 4 panels are morphology / disease).
+    Phenotypes are 36 environmental/climatic/soil variables of accession origin location, NOT
+    individual measured traits — paper framing must be "landrace origin/environment association",
+    never causal adaptation. Known QTL anchor (594 SNPs from paper File S3) is same-data
+    self-replication sanity gate, NOT independent replication.

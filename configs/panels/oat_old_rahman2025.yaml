@@ -1,0 +1,76 @@
+# HomoeoGWAS panel manifest — Oat Landrace Diversity (OLD) panel
+#
+# Rahman A, Sapkota S, Ajayi-Moses O, Nandety RS, Fiedler JD, Mohajeri Naraghi S,
+# McMullen MS, Bockelman HE, Esvelt Klos K, Carlson CH (2025). A global assembly
+# of landrace oat (Avena sativa L.) accessions is a discovery resource for
+# adaptive variation, association mapping, and trait deployment. G3 jkaf093.
+# DOI: 10.1093/g3journal/jkaf093
+#
+# Data DOI: 10.15482/USDA.ADC/27095383.v1 (Ag Data Commons / figshare 27095383)
+# Data license: CC BY 4.0  (no contact-author gate; full public deposit)
+
+id: oat_old_rahman2025
+species: avena_sativa     # → configs/species/avena_sativa.yaml
+
+# Panel composition
+n_samples_raw_vcf: 739    # bcftools query -l on raw VCF
+n_samples_post_qc: 737    # paper-reported (2-sample reconciliation TBD)
+n_samples_with_pheno: 738 # File_S1 Table C row count
+n_snp_post_qc: 393962     # paper-reported; equals VCF row count (~387k assigned + 1887 UN)
+n_segments: 42            # 21 logical chroms × 2 pseudomolecule segments per chrom
+n_unassigned_snp: 1887    # CHROM "UN"
+
+# Trait list — 36 environmental/climatic/soil vars (NOT individual phenotypes)
+# Source: File_S1 Table C; pheno_clean.tsv
+traits:
+  climate_bioclim:
+    - BIO1   # Annual Mean Temperature
+    - BIO6   # Min Temperature of Coldest Month (paper top hit: chr3D 127.9 Mb -log10p=13.84)
+    - BIO11  # Mean Temperature of Coldest Quarter
+    - BIO12  # Annual Precipitation
+    - BIO13  # Precipitation of Wettest Month
+    - BIO15  # Precipitation Seasonality
+  elevation_atmos:
+    - ELEV   # Elevation
+    - FD     # Frost Days  (paper trait label: "FROST_DAYS" — alias resolved in M3.2)
+    - RH2M   # Relative humidity at 2m
+    - WS2M   # Wind speed at 2m
+  soil:
+    - SOC    # Soil Organic Carbon (paper top hit: chr7A 78.4 Mb -log10p=16.70)
+    - CEC    # Cation Exchange Capacity
+    - CLAY   # Clay content
+    - SAND   # Sand content
+    - PHH2O  # pH in H2O
+    - NITRO  # Nitrogen
+    - BDOD   # Bulk density
+    - CFVO   # Coarse fragment volume
+    - SILT   # Silt content
+
+# Phase 5d M3.1 LOCO blind-run trait selection (3 primary)
+phase5d_primary_traits:
+  - BIO6    # climate, paper top hit chr3D 127.9 Mb
+  - SOC     # soil,    paper top hit chr7A 78.4 Mb
+  - BIO12   # precip,  paper top hit chr4D 332.4 Mb
+
+# Geographic coverage — see Rahman_et_al_2024_Metadata.geojson
+# Worldwide landrace + founder accessions, lat -42.65 to 65.00, lon -153.00 to 174.89
+
+# Known QTL anchor for M3.2 self-replication sanity gate (NOT independent replication)
+known_qtl_tsv: data/reference/oat/known_qtl_oat.tsv          # 594 sentinels × 31 traits
+candidate_genes_tsv: data/reference/oat/candidate_genes_oat.tsv  # 191 genes + Arabidopsis homologs
+
+# Raw data paths (NVMe staging)
+raw_vcf: /mnt/nvme/oat_raw/figshare/nsgc.gdv.gln.cohort.clean.maf01maxmiss75diploid.beagle_sorted_filt.gt.vcf
+raw_meta:
+  s1_metadata: /mnt/nvme/oat_raw/figshare/File_S1.xlsx
+  s2_admixture: /mnt/nvme/oat_raw/figshare/File_S2.xlsx
+  s3_gwas_results: /mnt/nvme/oat_raw/figshare/File_S3.xlsx
+  geojson: /mnt/nvme/oat_raw/figshare/Rahman_et_al_2024_Metadata.geojson
+
+# Caveats (paper Methods must include)
+caveats:
+  - "VCF is diploid-called from GBS DeepVariant + GLNexus strict-diploid; hexaploid dosage information lost. Allele positions remain valid for GWAS; consistent with HomoeoGWAS diploidized assumption."
+  - "Phenotypes are 36 environmental/climatic/soil variables of accession origin location, NOT individual measured traits. Framing must be 'landrace origin/environment association', never causal adaptation."
+  - "Known QTL anchor (594 SNPs from paper File S3) is same-data self-replication sanity gate, NOT independent replication. Recovery rate ≥80% would only confirm pipeline integrity."
+  - "Subgenome composition is A+C+D (Avena longiglumis + A. insularis + unknown extinct/unsampled D-donor per Kamal 2022); naming differs from wheat AABBDD. Phase 5a code-level grep verified no A/B/D hardcoding."
+  - "VCF CHROM uses segment format (1A_0, 1A_1); paper File S3 uses logical chrom (1A); chrom_map_oat.tsv handles the mapping. LOCO grouping (segments → logical chrom) confirmation pending in Step 6."

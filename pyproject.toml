@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "homoeogwas"
+version = "0.1.0.dev0"
+description = "Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "HomoeoGWAS authors" },
+]
+keywords = [
+    "GWAS",
+    "allopolyploid",
+    "mixed model",
+    "LMM",
+    "deep learning prior",
+    "PlantCaduceus",
+    "AgroNT",
+    "wheat",
+    "cotton",
+    "rapeseed",
+    "oat",
+    "strawberry",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "matplotlib>=3.7",
+    "bed-reader>=1.0",
+    "PyYAML>=6.0",
+    "pydantic>=2.5",
+    "joblib>=1.3",
+    "pysam>=0.22",
+]
+
+[project.optional-dependencies]
+# GPU per-SNP scan + DL prior inference; CPU installs do not need torch.
+gpu = [
+    "torch>=2.4",
+    "transformers==4.46.3",   # locked: 5.x breaks torch 2.4 (mamba/moe.py incompat)
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-xdist>=3.5",
+    "ruff>=0.4",
+    "openpyxl>=3.1",          # xlsx parsing for OLD panel S1/S2/S3
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/U7-GWAS/homoeogwas"
+Documentation = "https://u7-gwas.github.io/homoeogwas"
+Repository = "https://github.com/U7-GWAS/homoeogwas"
+Issues = "https://github.com/U7-GWAS/homoeogwas/issues"
+
+[project.scripts]
+homoeogwas = "homoeogwas.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["homoeogwas*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "gpu: requires CUDA-enabled GPU (skipped in CI smoke)",
+    "slow: long-running test (>30s) — skipped in CI smoke",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["benchmarks", "data", "logs", "results", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function call in default arg
+]

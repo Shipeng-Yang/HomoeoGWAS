@@ -1,0 +1,65 @@
+# cotton_hebau.yaml — Phase 1 frozen manifest (2026-05-20)
+# hebau cotton panel (upland cotton G. hirsutum).
+# 实际数据观察: 高密度 SNP (498k 过 QC), 13 trait × 2 年 (2014/2015), 适合做开发候选锚点之一.
+
+panel: cotton_hebau
+species: cotton
+species_latin: Gossypium hirsutum
+ploidy: tetraploid
+subgenomes: [A, D]
+
+reference:
+  name: NCBI GCF_000987745.1 (TM-1 NAU v1.1)
+  path: data/reference/cotton/GCF_000987745.1_ASM98774v1_genomic.fna.gz
+  chrom_style: "{A,D}{01..13}"     # 26 染色体, CSV 内裸名 "A01".."D13"
+
+geno:
+  source: hebau cotton panel (release date 2026-04-30)
+  raw: data/raw/cotton/snp/genotype-data.zip
+  raw_format: CSV (per-chromosome chr_*.csv.gz inside zip)
+  raw_columns: "CHROM,POS,REF,ALT,maf,sample1,sample2,..."
+  processed_dir: data/processed/cotton
+  processed_layout: "{A,D}/all.{vcf.gz,pgen,pvar,psam}"
+  n_samples: 419
+  n_snp_total: 498106
+  n_snp_A: 329560
+  n_snp_D: 168546
+  csv_to_vcf_helper: scripts/preprocess/_cotton_csv_to_vcf.py
+
+pheno:
+  raw: data/raw/cotton/phenotype/phenotypic-data.zip
+  extracted: data/raw/cotton/phenotype/phenotypic data.xlsx
+  format: "13 个 sheet, 每个一个 trait, 列: Code | <trait>-14 | <trait>-15 (两年 BLUE)"
+  trait_dictionary:
+    - {sheet: "1-FL",   name: fiber_length,            unit: mm}
+    - {sheet: "2-FS",   name: fiber_strength,          unit: cN/tex}
+    - {sheet: "3-M",    name: micronaire,              unit: ""}
+    - {sheet: "4-E",    name: elongation,              unit: "%"}
+    - {sheet: "5-LU",   name: length_uniformity,       unit: "%"}
+    - {sheet: "6-MAT",  name: maturity,                unit: ""}
+    - {sheet: "7-SCI",  name: spinning_consistency,    unit: ""}
+    - {sheet: "8-BW",   name: boll_weight,             unit: g}
+    - {sheet: "9-LP",   name: lint_percentage,         unit: "%"}
+    - {sheet: "10-SI",  name: seed_index,              unit: g}
+    - {sheet: "11-LI",  name: lint_index,              unit: g}
+    - {sheet: "12-FWPB",name: fiber_weight_per_boll,   unit: g}
+    - {sheet: "13-FD",  name: fiber_density,           unit: ""}
+  primary_traits:    [fiber_length]    # hebau 原文主性状
+  secondary_traits:  [fiber_strength, lint_percentage]
+  id_mapping_note: |
+    pheno Code 形如 L044 / F016;
+    VCF samples 形如 B001..B419;
+    需要 join key 文件 (找 hebau 原 supplementary 或问作者).
+
+qc:
+  maf_min: 0.01
+  missing_max: 0.10
+  hwe_pmin: 1e-6
+  bi_allelic_only: true
+  snps_only: true
+
+v1_role: tier1_developer_candidate
+notes: |
+  - 498k SNP / 419 sample 是 hebau panel 公开数据中密度最高的 G. hirsutum 数据集.
+  - 13 trait × 2 年 (2014, 2015) 提供多环境重复, 有助 BLUE/BLUP 和多年一致性测试.
+  - 待落实: VCF B001..B419 与 pheno Code L044/F016 的 ID join.

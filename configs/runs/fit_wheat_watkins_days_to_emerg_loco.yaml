@@ -1,0 +1,60 @@
+# fit_wheat_watkins_days_to_emerg_loco.yaml — HomoeoGWAS `fit` run-config.
+# Phase 3 M3.1 LOCO variant of fit_wheat_watkins_days_to_emerg.yaml.
+#
+# GRM source is the LD-pruned per-subgenome BED produced in M2.4.5
+# (results/phase2/m2_4_5/wheat_watkins/pruned/{A,B,D}); the scan reads the
+# full pgen->bed converted genotypes (83.3M markers). Streaming mode is
+# required at this scale.
+#
+# Run under the GPU env so torch is importable:
+#   ~/miniconda3/envs/polygwas-gpu/bin/python -m homoeogwas fit \
+#       --config configs/runs/fit_wheat_watkins_days_to_emerg_loco.yaml \
+#       --backend gpu
+
+fit_version: 1
+
+panel_manifest: ../panels/wheat_watkins.yaml
+
+panel:
+  name: wheat_watkins
+  subgenomes: [A, B, D]
+
+phenotype:
+  path: data/processed/wheat/pheno_clean.tsv
+  sample_col: sample
+  trait: days_to_emerg
+
+genotype:
+  scan_bed_prefix_template: data/processed/wheat_bed/{subgenome}/all
+  grm:
+    source: bed
+    bed_prefix_template: results/phase2/m2_4_5/wheat_watkins/pruned/{subgenome}
+    maf_min: 0.01
+
+kernels:
+  normalize: trace
+  include_hadamard: false
+  hadamard_name: hom
+
+reml:
+  n_starts: 10
+  seed: 2026
+
+scan:
+  mode: stream
+  backend: auto
+  chunk_size: 200000
+  maf_min: 0.01
+  call_rate_min: 0.9
+  gzip: true
+  loco:
+    enabled: true
+    fallback: error
+    min_denominator_fraction: 1.0e-6
+
+plots:
+  enabled: true
+
+outputs:
+  out_dir: results/phase3/m3_1_loco/wheat_watkins
+  prefix: days_to_emerg

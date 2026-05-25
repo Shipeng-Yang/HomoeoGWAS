@@ -1,0 +1,114 @@
+# HomoeoGWAS species config — Fragaria x ananassa (cultivated strawberry, octoploid)
+#
+# Reference: GCA_050043575.1 ASM5004357v1 (NIHHS, cultivar Seolhyang, 2025)
+#   - 28 chromosomes labelled 1A..7D (7 chr × 4 subgenomes A/B/C/D)
+#   - HiFi PacBio + reference-guided 'Florida Brilliance'
+#   - BioProject PRJNA1203581
+#
+# Phase 5b Week 1: framework universality test — schema parses + validator
+# passes; subgenome split + LMM + DL prior come in Week 2-4. Panel VCF is
+# placeholder until we acquire a public octoploid strawberry GWAS panel
+# (Hardigan 2020 candidate, but Dryad anti-bot blocks bulk curl — alternate
+# Phytozome / NCBI SRA paths under investigation).
+
+id: fragaria_ananassa
+latin: Fragaria × ananassa
+common_name: Cultivated strawberry (octoploid)
+genome_type: allopolyploid
+ploidy: 8
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Fragaria vesca (Edger 2019 A-donor)
+    chroms: ["1A", "2A", "3A", "4A", "5A", "6A", "7A"]
+  - id: B
+    copy: 1
+    donor: Fragaria iinumae (Edger 2019 B-donor)
+    chroms: ["1B", "2B", "3B", "4B", "5B", "6B", "7B"]
+  - id: C
+    copy: 1
+    donor: Fragaria nilgerrensis (Edger 2019 C-donor)
+    chroms: ["1C", "2C", "3C", "4C", "5C", "6C", "7C"]
+  - id: D
+    copy: 1
+    donor: Fragaria nubicola (Edger 2019 D-donor)
+    chroms: ["1D", "2D", "3D", "4D", "5D", "6D", "7D"]
+
+fasta: /mnt/nvme/strawberry_ref/GCA_050043575.1_ASM5004357v1_genomic.fna.gz
+gff: /mnt/nvme/strawberry_ref/GCA_050043575.1_ASM5004357v1_genomic.gff.gz
+chrom_map: data/reference/strawberry/chrom_map_panel_to_ncbi.tsv
+
+geno:
+  # Phase 5b Week 2 Step 1 output: Pincot 2018 iStraw90 Axiom 50K genotypes
+  # remapped to NIHHS Seolhyang octoploid reference via BLAST. 30,393 SNPs ×
+  # 565 samples; subgenome distribution heavily A-skewed (87% A) because the
+  # iStraw90 array was designed against F. vesca diploid reference (F. vesca
+  # is the A-donor of octoploid strawberry per Edger 2019).
+  vcf: /mnt/nvme/strawberry_panel/pincot2018/pincot2018_octoploid_remap.vcf.gz
+  layout: single
+
+pheno: data/processed/strawberry/pheno_clean.tsv
+sample_map: ~
+
+# Phase 5a Step 3 auto-fallback: n_sub=4 → pairwise_mean K_hom by default
+# (the full 4-way Hadamard product gets too sparse for stable REML).
+dosage_model: diploidized          # diploidized 0/1/2 — community GWAS practice
+loco_unit: chrom                   # 28 leave-one-out
+dl_model_window: 6144
+dl_candidate_window: 100000
+
+qc:
+  maf_min: 0.05                    # smaller-panel-ready
+  hwe_min_p: ~                     # HWE off by default (inbred / vegetatively propagated)
+  missingness_max: 0.1
+
+known_qtl_tsv: ~                   # Week 3 task: assemble from literature
+homoeolog_map: ~                   # v1.5+ syntenic test, not required for Week 1
+
+provenance:
+  panel_name: Pincot2018_iStraw90_Axiom50K_remapped_to_NIHHS
+  panel_source: figshare doi:10.25387/g3.6007715 (Supplemental_Data_Files 1-4)
+  panel_n_sample: 565
+  panel_n_snp: 30393
+  panel_paper: Pincot et al. 2018 G3 (doi:10.1534/g3.118.200129) — Fw1 GWAS
+  reference_assembly: NIHHS Seolhyang ASM5004357v1 (2025)
+  reference_accession: GCA_050043575.1
+  reference_paper: NIHHS unpublished (BioProject PRJNA1203581)
+  subgenome_assignment_source: Edger et al. 2019 Nat Genet (A=vesca, B=iinumae, C=nilgerrensis, D=nubicola)
+  subgenome_caveat: |
+    Liston et al. 2020 disputed the 4-ancestor model (proposed 2-ancestor
+    scenario). We adopt the 4-subgenome scheme because:
+    (a) it matches the chrom-name convention of the NIHHS assembly,
+    (b) it is the operational standard in the strawberry breeding community,
+    (c) HomoeoGWAS subgenome-stratified LMM is robust to ancestor identity
+        (variance components estimate per-chunk additive contributions).
+    Supplementary will report sensitivity under the 2-subgenome reframing.
+  panel_remap_methodology: |
+    Pincot 2018 iStraw90 Axiom 50K probes were designed against F. vesca
+    diploid reference. We BLAST the 38,506 probe flanking sequences
+    (megablast, pident≥90, max_target=8) to the NIHHS Seolhyang octoploid
+    fasta and assign each probe to the subgenome that gave the highest-
+    scoring hit. Distribution (audit at probe_subgenome_assignment.tsv):
+      SUBGENOME_SPECIFIC:    4,435 probes (single-sub hit)
+      CROSS_SUBGENOME_2WAY:  4,960 probes
+      CROSS_SUBGENOME_3WAY:  7,770 probes
+      CROSS_SUBGENOME_4WAY: 15,749 probes (all 4 sub homoeologs)
+    The chrom-level distribution is heavily A-skewed (sub A 26.6K SNPs,
+    sub B 2.0K, sub C 1.1K, sub D 0.7K) because the array was designed
+    on diploid F. vesca, the A-donor; this is a paper-disclosed caveat
+    and one Phase 5b motivation for emphasising K_hom auto-fallback to
+    pairwise_mean at n_sub=4 (sparse Hadamard tensor would amplify bias).
+  panel_dedup_note: |
+    Pincot file includes technical replicates with duplicated cultivar IDs;
+    the VCF suffixes them _dup2, _dup3, … to satisfy bcftools' unique-name
+    requirement. Downstream `homoeogwas fit` should consider averaging or
+    keeping one replicate per cultivar (sample_map TSV — Week 3 task).
+  pheno_note: |
+    Pincot 2018 Supplemental_Data_File_4 contains Fusarium wilt severity
+    scores in 2016 + 2017 seasons (n=565 germplasm + ~120 mapping pop).
+    Week 3 task: extract a clean trait TSV (sample_id × trait value).
+  notes: |
+    Phase 5b Week 2 Step 1 output: remapped octoploid VCF ready for
+    `homoeogwas split` (n_sub=4 auto pairwise_mean K_hom). Step 2-4:
+    split, LMM LOCO fit, Fw1 chr2 known-QTL recovery test.

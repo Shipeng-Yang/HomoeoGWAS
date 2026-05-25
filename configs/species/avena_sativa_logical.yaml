@@ -1,0 +1,74 @@
+id: avena_sativa_logical
+latin: Avena sativa
+common_name: "Cultivated oat (hexaploid AACCDD) \u2014 logical-chrom LOCO variant"
+genome_type: allopolyploid
+ploidy: 6
+subgenomes:
+- id: A
+  copy: 1
+  donor: Avena longiglumis (Kamal 2022 A-donor candidate)
+  chroms:
+  - 1A
+  - 2A
+  - 3A
+  - 4A
+  - 5A
+  - 6A
+  - 7A
+- id: C
+  copy: 1
+  donor: Avena insularis (Kamal 2022 C-donor candidate)
+  chroms:
+  - 1C
+  - 2C
+  - 3C
+  - 4C
+  - 5C
+  - 6C
+  - 7C
+- id: D
+  copy: 1
+  donor: unknown extant species (extinct or unsampled D-donor; per Kamal 2022)
+  chroms:
+  - 1D
+  - 2D
+  - 3D
+  - 4D
+  - 5D
+  - 6D
+  - 7D
+fasta: /mnt/nvme/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
+gff: /mnt/nvme/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
+chrom_map: data/reference/oat/chrom_map_oat_logical.tsv
+geno:
+  vcf: /mnt/nvme/oat_raw/figshare/oat_old.logical_chrom.vcf.gz
+  layout: single
+pheno: data/processed/oat/pheno_clean.tsv
+sample_map: null
+dosage_model: diploidized
+loco_unit: chrom
+dl_model_window: 6144
+dl_candidate_window: 100000
+qc:
+  maf_min: 0.01
+  hwe_min_p: null
+  missingness_max: 0.1
+known_qtl_tsv: data/reference/oat/known_qtl_oat.tsv
+homoeolog_map: null
+provenance:
+  panel_name: Oat Landrace Diversity (OLD) panel
+  panel_source: Ag Data Commons figshare 27095383
+  panel_n_sample: 737
+  panel_doi: 10.15482/USDA.ADC/27095383.v1
+  panel_license: CC BY 4.0
+  panel_paper: "Rahman et al. 2025 G3 jkaf093 \u2014 A global assembly of landrace\
+    \ oat accessions"
+  reference_assembly: OT3098 v2
+  reference_doi: 10.1038/s41588-022-01127-7
+  reference_paper: "Kamal et al. 2022 Nature Genetics \u2014 Reference genome assemblies\
+    \ reveal the origin and evolution of allohexaploid oat"
+  reference_accession: GCA_916181665.1
+  notes: Logical-chrom variant for Step 6b A/B comparison. VCF segments (1A_0/1A_1
+    etc.) collapsed to 21 logical chroms via bcftools annotate --rename-chrs so LOCO
+    leaves out one whole chrom (BOLT-LOCO semantics), not one of two segments. Paper
+    Methods footnote will document this. Underlying SNP positions unchanged.

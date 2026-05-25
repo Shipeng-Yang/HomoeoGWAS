@@ -1,0 +1,49 @@
+# fit_cotton_hebau_lint_percentage_BLUE_loco.yaml — M3.4 cotton LOCO.
+# lint% BLUE across years 14+15 (corr=0.96, n=419). yield/fibre allocation trait.
+
+fit_version: 1
+
+panel_manifest: ../panels/cotton_hebau.yaml
+
+panel:
+  name: cotton_hebau
+  subgenomes: [A, D]
+
+phenotype:
+  path: data/processed/cotton/pheno_m3_4_blue.tsv
+  sample_col: sample
+  trait: lint_percentage_BLUE
+
+genotype:
+  scan_bed_prefix_template: data/processed/cotton/{subgenome}/all
+  grm:
+    source: bed
+    bed_prefix_template: data/processed/cotton/{subgenome}/all
+    maf_min: 0.01
+
+kernels:
+  normalize: trace
+  include_hadamard: false
+  hadamard_name: hom
+
+reml:
+  n_starts: 10
+  seed: 2026
+
+scan:
+  mode: auto
+  backend: auto
+  batch_size: 20000
+  maf_min: 0.01
+  call_rate_min: 0.9
+  loco:
+    enabled: true
+    fallback: error
+    min_denominator_fraction: 1.0e-6
+
+plots:
+  enabled: true
+
+outputs:
+  out_dir: results/phase3/m3_1_loco_v2/cotton_hebau/lint_percentage_BLUE
+  prefix: lint_percentage_BLUE

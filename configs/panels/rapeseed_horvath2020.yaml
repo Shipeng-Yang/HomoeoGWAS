@@ -1,0 +1,66 @@
+# rapeseed_horvath2020.yaml — Phase 1 frozen manifest (2026-05-20)
+# Horvath 2020 winter rapeseed diversity panel, Zenodo 4302088.
+# 实际数据观察: 60K SNP chip + imputation 推到 290k, 过 QC 只剩 52k (低密度),
+# 但 geno-pheno 配齐, 适合做端到端 pipeline 调试 (开发锚点) + 低密度鲁棒性测试.
+
+panel: rapeseed_horvath2020
+species: rapeseed
+species_latin: Brassica napus (winter type)
+ploidy: tetraploid
+subgenomes: [A, C]
+
+reference:
+  name: Darmor v4.1 / Bra_napus_v2.0 (NCBI GCF_000686985.2)
+  chrom_style_native: "chr{A01..A10},chr{C01..C09}"
+  notes: "A/C 亚基因组直接编码在 CHROM 字段, 无需额外 FASTA join."
+
+geno:
+  source: "Anderson et al. Agronomy 2020 10(12):2006 DOI 10.3390/agronomy10122006"
+  zenodo: 4302088
+  raw: data/raw/rapeseed/Horvath2020_Zenodo4302088/imputed.vcf.gz
+  raw_was_plain_gzip: true        # 原文件是 plain gzip, 已 reblock 成 BGZF
+  raw_backup_plain: data/raw/rapeseed/Horvath2020_Zenodo4302088/imputed.gz.plain.bak
+  raw_chrom_counts: data/raw/rapeseed/Horvath2020_Zenodo4302088/chrom_snp_counts.txt
+  processed_dir: data/processed/rapeseed/horvath
+  processed_layout: "{A,C}/all.{vcf.gz,pgen,pvar,psam}"
+  n_samples: 429
+  n_snp_total_raw: 290972
+  n_snp_total_qc: 51914
+  n_snp_A_qc: 19150
+  n_snp_C_qc: 32764
+  random_scaffolds_dropped: true   # *_random / chrAnn_random / chrCnn_random / chrUnn_random 丢弃
+
+pheno:
+  raw: data/raw/rapeseed/Horvath2020_Zenodo4302088/pheno_lines_phenotypes.xlsx
+  format: "1 sheet, 16 列, 1 行/材料 (ARS001..ARS428)"
+  trait_dictionary:
+    - {col: "ARS#",                 name: sample_id}
+    - {col: "NAME",                 name: cultivar_name}
+    - {col: "SOURCE",               name: institution}
+    - {col: "WINTER SURVIVAL",      name: winter_survival,  unit: "%"}
+    - {col: "GROWTH HABIT",         name: growth_habit,     unit: ordinal}
+    - {col: "50% BLOOM",            name: bloom_50pct,      unit: doy}     # 开花期
+    - {col: "Fall vigor (10-8-15)", name: fall_vigor,       unit: ordinal}
+    - {col: "Bloom",                name: bloom,            unit: doy}
+    - {col: "ave bloom date",       name: ave_bloom_date,   unit: doy}
+    - {col: "Stem elongation (12-9-15)", name: stem_elongation, unit: ordinal}
+    - {col: "Fall stand",           name: fall_stand,       unit: ordinal}
+    - {col: "Plant height",         name: plant_height,     unit: cm}
+  primary_traits:    [bloom_50pct]        # 开花期 / 50% bloom — 经典 BnaFLC / BnaFT QTL
+  secondary_traits:  [winter_survival, plant_height]
+  id_mapping_note: |
+    pheno ARS001..ARS428 直接对 VCF sample id 出现规则, 需在 Step D 验证.
+
+qc:
+  maf_min: 0.01
+  missing_max: 0.10
+  hwe_pmin: 1e-6
+  bi_allelic_only: true
+  snps_only: true
+
+v1_role: tier1_developer_anchor
+notes: |
+  - 全 QC 后 52k SNP, 密度低 (~1 SNP / 25 kb),
+    实际更适合端到端 pipeline 调试 + 低密度鲁棒性 use case (而非 fine-mapping).
+  - 60K Brassica SNP array (Illumina Infinium) + imputation 出处.
+  - pheno 涵盖 winter rapeseed 农艺/抗逆/生育期, 易找已知位点回收.
