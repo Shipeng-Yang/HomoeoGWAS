@@ -2,10 +2,10 @@
 
 **Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS**
 
-[![CI](https://github.com/U7-GWAS/homoeogwas/actions/workflows/ci.yml/badge.svg)](https://github.com/U7-GWAS/homoeogwas/actions/workflows/ci.yml)
+[![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-249%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-260%20passed-brightgreen.svg)](#testing)
 
 HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It combines:
 
@@ -14,25 +14,29 @@ HomoeoGWAS is a GWAS framework for **allopolyploid crops** (wheat AABBDD, cotton
 3. **Zero-shot DL prior re-ranking** — PlantCaduceus + AgroNT log-likelihood fused with GWAS p-value as `z(-log10 p) + β · z(|LLR|)` over suggestive hits + LD blocks (~10⁵ SNPs); per-panel β chosen by LOQO grid.
 4. **Dual-GPU native stack** — per-SNP LMM scan on 2× RTX 3080 20 GB (~90 min for wheat 83.3M markers × 827 samples LOCO);ablation evidence + scalable workflow as the engineering contribution.
 
-## Status (2026-05-24)
+## Status (2026-05-25)
 
 | Phase | Status |
 |---|---|
 | Phase 0 (data + env)              | ✅ |
 | Phase 1 (3 Tier-1 panel build-out) | ✅ |
-| Phase 2 (Core LMM + Horvath + wheat + simulation) | ✅ — `pytest 249 passed + 1 skipped` |
+| Phase 2 (Core LMM + Horvath + wheat + simulation) | ✅ |
 | Phase 3 (M3.1 LOCO + M3.2 known QTL + M3.3 DL prior + M3.4 v2 three-panel cross-trait) | ✅ |
 | Phase 5a (Species YAML schema + `homoeogwas split` + K_hom n-sub fallback) | ✅ |
 | Phase 5b (strawberry 8n Pincot 2018 validation panel) | ✅ |
 | Phase 5c (GBLUP Table 1 — K_hom universal null finding) | ✅ |
-| Phase 5d (oat AACCDD 6n blind-run, Rahman 2025 OLD panel) | ⏳ in progress |
+| Phase 5d (oat AACCDD 6n blind-run, Rahman 2025 OLD panel) | ✅ — `pytest 260 passed + 1 skipped` |
 | Phase 4 (v1.0 release: repo + Zenodo + Snakemake + mkdocs + CI) | ⏳ this artifact set |
 
-**Real-data novel loci found (charter §3.3 hard gate ≥1; we have ≥3)**:
+Five panels spanning ploidy 2n→8n run through the same framework with zero
+core-code change per species (subgenome-aware LMM universality).
+
+**Real-data novel / recovered loci (charter §3.3 hard gate ≥1; we have ≥4 panels)**:
 - Wheat *Triticum aestivum* Watkins, days_to_emerg: `chr6D:142021157 p=4.9e-12`, near *TaCAD-D1* (cinnamyl alcohol dehydrogenase, ~90 kb)
-- Cotton *Gossypium hirsutum* hebau, fiber_length: `chrD11:21714989 p=5.3e-14`
+- Cotton *Gossypium hirsutum* hebau, fiber_length: `chrD11:21714989 p=5.3e-14` (novel; ortholog-coordinate-corrected anchor set)
 - Rapeseed *Brassica napus* Horvath2020, bloom_50pct: `chrA10` near *BnaA10.FT* (14 kb recovery)
-- Strawberry Pincot 2018, mean_score: `chr2A:28339895 p=8.5e-153` (Fw1 *Fusarium oxysporum* race 1 resistance, paper replication)
+- Strawberry Pincot 2018, mean_score: `chr2A:28339895 p=8.5e-153` (Fw1 *Fusarium oxysporum* race 1 resistance, paper replication; 87% subgenome-A marker bias caveat)
+- Oat *Avena sativa* Rahman 2025 OLD: D-subgenome-localized association signals for environmental-differentiation traits (31 novel candidates; sanity/robustness panel, not a main figure)
 
 ## Quick start
 
@@ -62,7 +66,7 @@ The CLI exposes **≤ 5 flags** (`--config`, `--out-dir`, `--backend`, `--dry-ru
 | Cotton *G. hirsutum* | AADD 4n | hebau | 419 | 498k | HBAU NDM8 | ✅ |
 | Rapeseed *B. napus* | AACC 4n | Horvath2020 | 297-428 | 51k | Darmor v4.1 | ✅ |
 | Strawberry *F. ananassa* | 8n (4 sub) | Pincot 2018 | 564 | 30k | NIHHS Seolhyang (BLAST remap) | ✅ |
-| Oat *A. sativa* | AACCDD 6n | Rahman 2025 OLD | 737 | 394k | OT3098 v2 | ⏳ |
+| Oat *A. sativa* | AACCDD 6n | Rahman 2025 OLD | 737 | 394k | OT3098 v2 | ✅ |
 
 ## Architecture
 
@@ -101,12 +105,31 @@ Across three panels and four traits, fusing the PlantCaduceus + AgroNT ensemble 
 ## Testing
 
 ```bash
-pytest -m "not gpu and not slow"   # 249 CPU tests (~3-5 min)
+pytest -m "not gpu and not slow"   # CPU tests (~3-5 min)
 pytest -m "not slow"               # + GPU tests (requires polygwas-gpu env)
-pytest                             # full suite incl. simulation benchmarks
+pytest                             # full suite incl. simulation benchmarks (260 passed + 1 skipped)
 ```
 
 CI runs ruff + pytest CPU smoke on Python 3.10 / 3.11 / 3.12. See `.github/workflows/ci.yml`.
+
+## Reproducing baselines
+
+The eight benchmark tools (NodeGWAS, GWASpoly, networkGWAS, regenie, SAIGE,
+PanGenie, STAAR, deepRVAT) are **not vendored** in this repository (size +
+heterogeneous licenses). Clone them on demand:
+
+```bash
+bash scripts/reproduce_baselines.sh   # clones into benchmarks/
+```
+
+Large inputs (`data/`, ~950 GB) and intermediate outputs (`results/`, ~19 GB)
+are git-ignored. Release reproducibility fingerprints (SHA256 of the key paper
+artifacts) are committed at `results/phase4/reproducibility_fingerprints.tsv`;
+re-generate the DL-prior figure inputs with:
+
+```bash
+rm -rf results/phase3/m3_3_dl_prior_v2 && snakemake paper_figures --cores 4
+```
 
 ## Citation
 
@@ -115,11 +138,14 @@ Manuscript in preparation.
 ```bibtex
 @unpublished{homoeogwas2026,
   title  = {HomoeoGWAS: subgenome-aware scalable LMM with DL prior conditional lift for allopolyploid GWAS},
-  author = {HomoeoGWAS authors},
+  author = {Yang, Shipeng},
   year   = {2026},
   note   = {In preparation; target Nature Communications},
+  url    = {https://github.com/Shipeng-Yang/HomoeoGWAS},
 }
 ```
+
+See [`CITATION.cff`](CITATION.cff) for machine-readable citation metadata.
 
 ## License
 

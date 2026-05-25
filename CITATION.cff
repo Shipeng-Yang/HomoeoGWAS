@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use HomoeoGWAS, please cite it using these metadata."
+title: "HomoeoGWAS: subgenome-aware scalable LMM with DL prior conditional lift for allopolyploid GWAS"
+abstract: >-
+  HomoeoGWAS is a GWAS framework for allopolyploid crops (wheat AABBDD,
+  cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It combines
+  subgenome-partitioned random-effect LMMs with per-logical-chromosome LOCO,
+  an optional scope-conditional homoeolog Hadamard kernel, and a zero-shot
+  PlantCaduceus + AgroNT deep-learning prior that re-ranks suggestive GWAS
+  hits. A dual-GPU native scan handles up to ~10^8 markers.
+type: software
+authors:
+  - family-names: Yang
+    given-names: Shipeng
+    email: qhyysp@gmail.com
+version: 0.1.0.dev0
+license: MIT
+repository-code: "https://github.com/Shipeng-Yang/HomoeoGWAS"
+keywords:
+  - GWAS
+  - allopolyploid
+  - mixed model
+  - LMM
+  - deep learning prior
+  - PlantCaduceus
+  - AgroNT
+  - wheat
+  - cotton
+  - rapeseed
+  - oat
+  - strawberry
+preferred-citation:
+  type: unpublished
+  title: "HomoeoGWAS: subgenome-aware scalable LMM with DL prior conditional lift for allopolyploid GWAS"
+  authors:
+    - family-names: Yang
+      given-names: Shipeng
+      email: qhyysp@gmail.com
+  year: 2026
+  notes: "In preparation; target Nature Communications."
