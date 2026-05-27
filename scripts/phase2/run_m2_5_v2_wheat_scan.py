@@ -20,6 +20,7 @@ standard EMMAX/P3D genome-wide scan with one global fixed V.
 Run in the GPU env:  ~/miniconda3/envs/polygwas-gpu/bin/python run_m2_5_v2_wheat_scan.py
 """
 from __future__ import annotations
+
 import argparse
 import json
 import os

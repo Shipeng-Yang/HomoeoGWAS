@@ -31,6 +31,7 @@ inflate FDR or lose power.
 Everything here is unit-testable with toy arrays — no Horvath data, no GEMMA.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 import numpy as np

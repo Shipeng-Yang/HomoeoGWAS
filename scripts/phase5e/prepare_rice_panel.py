@@ -66,7 +66,7 @@ def build_pheno():
     ph = pd.read_csv(REGU / "phenos.csv")
     fam = pd.read_csv(REGU / "rice4k.fam", sep=r"\s+", header=None,
                       names=["FID", "IID", "x1", "x2", "x3", "x4"])
-    iid2fid = dict(zip(fam["IID"].astype(str), fam["FID"].astype(str)))
+    iid2fid = dict(zip(fam["IID"].astype(str), fam["FID"].astype(str), strict=True))
     ph["IID"] = ph["id_name"].astype(str)          # id_name (C001..) matches FAM IID
     ph = ph[ph["IID"].isin(iid2fid)].copy()
     ph["FID"] = ph["IID"].map(iid2fid)

@@ -15,9 +15,11 @@ Two reconciliations:
 Backups: pheno_clean.tsv.prev_step4_bak, known_qtl_oat.tsv.prev_step4_bak
 """
 from __future__ import annotations
-from pathlib import Path
-import pandas as pd
+
 import shutil
+from pathlib import Path
+
+import pandas as pd
 
 PROJ = Path("/mnt/7302share/fast_ysp/U7_GWAS")
 PHENO = PROJ / "data/processed/oat/pheno_clean.tsv"

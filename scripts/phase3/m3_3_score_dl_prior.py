@@ -17,11 +17,9 @@ Outputs per model (gzip TSV):
   window_bp token_phase n_masked_tokens runtime_ms status
 """
 from __future__ import annotations
+
 import argparse
-import gzip
 import json
-import os
-import sys
 import time
 from pathlib import Path
 
@@ -101,7 +99,6 @@ class AgroNTScorer:
         self.mask_id = self.tokenizer.mask_token_id
 
     def _tokenise(self, seq: str):
-        import torch
         return self.tokenizer(seq, return_tensors="pt",
                                 add_special_tokens=False).input_ids.to(self.device)
 
@@ -118,7 +115,6 @@ class AgroNTScorer:
         if snp_pos_shifted < 0 or snp_pos_shifted >= len(s):
             return None, None, "PHASE_OOB", -1
         k_tok_idx = snp_pos_shifted // self.KMER
-        offset_in_kmer = snp_pos_shifted % self.KMER
         # Build ref / alt sequences by substituting the SNP centre base
         s_ref = s[:snp_pos_shifted] + ref + s[snp_pos_shifted+1:]
         s_alt = s[:snp_pos_shifted] + alt + s[snp_pos_shifted+1:]
@@ -245,7 +241,8 @@ def main():
         # (e.g. NC_027757.2, CM032202.1) for pysam.fetch.
         chrom = str(r["fasta_chrom"]) if "fasta_chrom" in r.index and pd.notna(r.get("fasta_chrom")) else str(r["chrom"])
         pos = int(r["pos"])
-        ref = str(r["ref_fasta"]); alt = str(r["alt_fasta"])
+        ref = str(r["ref_fasta"])
+        alt = str(r["alt_fasta"])
         if alt not in ("A","C","G","T") or ref not in ("A","C","G","T"):
             rows.append(dict(snp_id=r["snp_id"], chrom=chrom, pos=pos,
                               ref=ref, alt=alt, model=args.model,

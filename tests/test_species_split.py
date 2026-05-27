@@ -10,14 +10,11 @@ import pytest
 
 from homoeogwas.species_config import GenoSource, SpeciesConfig, Subgenome
 from homoeogwas.species_split import (
-    SplitPlan,
-    SubgenomeWork,
     _route_per_chrom,
     cmd_split,
     execute_plan,
     plan_split,
 )
-
 
 # ---------------------------------------------------------------------------
 # Tiny VCF + per_chrom dir fixtures (no external bcftools/plink2 required)
@@ -55,13 +52,16 @@ def _write_per_chrom_dir(d: Path) -> Path:
 
 @pytest.fixture
 def wheat_like_cfg_single(tmp_path: Path) -> SpeciesConfig:
-    fasta = tmp_path / "ref.fa"; fasta.touch()
-    gff = tmp_path / "ref.gff"; gff.touch()
+    fasta = tmp_path / "ref.fa"
+    fasta.touch()
+    gff = tmp_path / "ref.gff"
+    gff.touch()
     chrom_map = tmp_path / "chrom_map.tsv"
     chrom_map.write_text(
         "panel_chrom\tfasta_chrom\tsubgenome\nchr1A\tchr1A\tA\nchr1B\tchr1B\tB\nchr1D\tchr1D\tD\n")
     vcf = _write_single_vcf(tmp_path / "panel.vcf.gz")
-    pheno = tmp_path / "pheno.tsv"; pheno.write_text("sample_id\ttrait1\n")
+    pheno = tmp_path / "pheno.tsv"
+    pheno.write_text("sample_id\ttrait1\n")
     return SpeciesConfig(
         id="wheat_like", latin="X", common_name="X",
         genome_type="allopolyploid", ploidy=6,
@@ -78,13 +78,16 @@ def wheat_like_cfg_single(tmp_path: Path) -> SpeciesConfig:
 
 @pytest.fixture
 def wheat_like_cfg_per_chrom(tmp_path: Path) -> SpeciesConfig:
-    fasta = tmp_path / "ref.fa"; fasta.touch()
-    gff = tmp_path / "ref.gff"; gff.touch()
+    fasta = tmp_path / "ref.fa"
+    fasta.touch()
+    gff = tmp_path / "ref.gff"
+    gff.touch()
     chrom_map = tmp_path / "chrom_map.tsv"
     chrom_map.write_text(
         "panel_chrom\tfasta_chrom\tsubgenome\nchr1A\tchr1A\tA\nchr1B\tchr1B\tB\nchr1D\tchr1D\tD\n")
     vcf_dir = _write_per_chrom_dir(tmp_path / "vcfs")
-    pheno = tmp_path / "pheno.tsv"; pheno.write_text("sample_id\ttrait1\n")
+    pheno = tmp_path / "pheno.tsv"
+    pheno.write_text("sample_id\ttrait1\n")
     return SpeciesConfig(
         id="wheat_like", latin="X", common_name="X",
         genome_type="allopolyploid", ploidy=6,
@@ -172,7 +175,8 @@ def test_plan_qc_hwe_only_added_when_set(wheat_like_cfg_single, tmp_path):
 
 def test_plan_rejects_bed_root_mode(wheat_like_cfg_single, tmp_path):
     """If user already provided pre-split BED, splitter must refuse."""
-    bed_root = tmp_path / "bed"; (bed_root / "A").mkdir(parents=True)
+    bed_root = tmp_path / "bed"
+    (bed_root / "A").mkdir(parents=True)
     (bed_root / "A" / "all.bim").write_text("")
     wheat_like_cfg_single.geno = GenoSource(bed_root=bed_root)
     with pytest.raises(ValueError, match="bed_root mode"):

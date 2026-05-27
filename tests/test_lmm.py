@@ -1,15 +1,10 @@
 """Unit tests for src/homoeogwas/lmm.py — Phase 2 M2.3."""
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from homoeogwas.lmm import fit_reml, REMLResult
+from homoeogwas.lmm import REMLResult, fit_reml
 
 
 def _toy_psd(n: int, r: int, seed: int) -> np.ndarray:
@@ -88,7 +83,8 @@ def test_reml_input_validation():
     with pytest.raises(ValueError, match=r"K must be square"):
         fit_reml(y, X, np.zeros((n, n + 1)))
     # NaN in y
-    y_bad = y.copy(); y_bad[0] = np.nan
+    y_bad = y.copy()
+    y_bad[0] = np.nan
     with pytest.raises(ValueError, match="finite"):
         fit_reml(y_bad, X, K)
 

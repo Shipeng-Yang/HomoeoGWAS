@@ -16,7 +16,6 @@ from homoeogwas.gp import run_cv_gblup
 from homoeogwas.grm import compute_grm
 from homoeogwas.io import GenoChunk, load_bed_hardcall
 
-
 ROOT = Path(__file__).resolve().parents[2]
 BED_ROOT = ROOT / "data/processed/fragaria_ananassa"
 PHENO_TSV = ROOT / "data/processed/strawberry/pheno_clean.tsv"
@@ -53,7 +52,7 @@ def main():
 
     # Verify sample order identical across subgenomes
     ref_samples = sample_ids_per_sub[0]
-    for sg, sids in zip(("A","B","C","D"), sample_ids_per_sub):
+    for sg, sids in zip(("A","B","C","D"), sample_ids_per_sub, strict=True):
         if sids != ref_samples:
             raise RuntimeError(f"sub {sg} sample order differs from sub A")
     print(f"  4 GRMs aligned on {len(ref_samples)} samples")
@@ -71,7 +70,7 @@ def main():
     print(f"  aligned n={n}  y mean={y.mean():.3f}  var={y.var():.3f}")
 
     # Build K_pool from CONCATENATED dosage (proper rrBLUP single-K baseline)
-    print(f"\n=== build K_pool from concatenated dosage (proper rrBLUP) ===")
+    print("\n=== build K_pool from concatenated dosage (proper rrBLUP) ===")
     concat_dosage = np.hstack([beds_obj[sg].dosage for sg in "ABCD"])
     concat_chunk = GenoChunk(
         samples=beds_obj["A"].samples,
@@ -85,7 +84,7 @@ def main():
     print(f"  K_pool n_snp = {info_pool.get('n_variants_kept', concat_dosage.shape[1])}")
 
     # Quick CV
-    print(f"\n=== run_cv_gblup (n_folds=5, n_repeats=3) ===")
+    print("\n=== run_cv_gblup (n_folds=5, n_repeats=3) ===")
     ts = time.time()
     res = run_cv_gblup(
         y, X, grms,
@@ -99,12 +98,12 @@ def main():
     print(f"  total CV runtime {time.time()-ts:.1f}s")
 
     # Summary
-    print(f"\n=== Tier summary ===")
+    print("\n=== Tier summary ===")
     for tname, ts_obj in res.tiers.items():
         print(f"  {tname:5}  r²={ts_obj.mean_r2:.4f}  r={ts_obj.mean_r:.4f}  "
               f"top10_enrich={ts_obj.mean_top10_enrichment:.2f}  "
               f"CI=[{ts_obj.ci_r2_low:.4f},{ts_obj.ci_r2_high:.4f}]")
-    print(f"\n=== Δ vs tier0 ===")
+    print("\n=== Δ vs tier0 ===")
     for tname, d in res.delta_vs_tier0.items():
         sig = "**" if d["significant_95"] else "  "
         print(f"  {tname:5} {sig} Δr²={d['delta_r2_mean']:+.4f}  "

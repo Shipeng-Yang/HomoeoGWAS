@@ -1,13 +1,8 @@
 """Unit tests for fit_multi_reml — Phase 2 M2.4.1."""
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas.lmm import (
     MultiREMLResult,
@@ -98,7 +93,8 @@ def test_multi_reml_input_validation():
     with pytest.raises(ValueError, match="square"):
         fit_multi_reml(y, X, {"A": K[:30, :30]})
     # Non-finite kernel
-    K_bad = K.copy(); K_bad[0, 0] = np.nan
+    K_bad = K.copy()
+    K_bad[0, 0] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         fit_multi_reml(y, X, {"A": K_bad})
     # y/X dim mismatch

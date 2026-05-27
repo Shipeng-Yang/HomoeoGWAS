@@ -24,6 +24,7 @@ Usage:
                       --n-starts 50 --run-null-calibration
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -31,6 +32,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,8 +43,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import hadamard_kernel, normalize_kernel  # noqa: E402
 from homoeogwas.diagnostics import (  # noqa: E402
-    boundary_lrt_table,
     bootstrap_lrt_table,
+    boundary_lrt_table,
     compare_nested_reml,
     pve_sensitivity_grid,
 )
@@ -140,14 +142,15 @@ def make_plots(out_dir, trait, full_pve, kernel_corr, sweep):
     keys = ["A", "C", "hom", "e"]
     vals = [full_pve[k] for k in keys]
     bars = ax.bar(keys, vals, color=["#1f77b4", "#ff7f0e", "#2ca02c", "#999999"])
-    for b, v in zip(bars, vals):
+    for b, v in zip(bars, vals, strict=True):
         ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}", ha="center", fontsize=9)
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("PVE")
     ax.set_title(f"M2.4.4 A+C+hom PVE — Horvath2020 {trait}")
     fig.tight_layout()
     p = out_dir / f"pve_bar_{trait}.png"
-    fig.savefig(p, dpi=120, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(p, dpi=120, bbox_inches="tight")
+    plt.close(fig)
     paths.append(str(p))
 
     # 2) 3-kernel correlation heatmap
@@ -155,8 +158,10 @@ def make_plots(out_dir, trait, full_pve, kernel_corr, sweep):
     M = np.array([[kernel_corr[a][b] for b in names] for a in names])
     fig, ax = plt.subplots(figsize=(4.2, 3.8))
     im = ax.imshow(M, cmap="RdBu_r", vmin=-1, vmax=1)
-    ax.set_xticks(range(3)); ax.set_xticklabels(names)
-    ax.set_yticks(range(3)); ax.set_yticklabels(names)
+    ax.set_xticks(range(3))
+    ax.set_xticklabels(names)
+    ax.set_yticks(range(3))
+    ax.set_yticklabels(names)
     for i in range(3):
         for j in range(3):
             ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=9)
@@ -164,13 +169,15 @@ def make_plots(out_dir, trait, full_pve, kernel_corr, sweep):
     fig.colorbar(im, ax=ax, fraction=0.046)
     fig.tight_layout()
     p = out_dir / f"kernel_corr_{trait}.png"
-    fig.savefig(p, dpi=120, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(p, dpi=120, bbox_inches="tight")
+    plt.close(fig)
     paths.append(str(p))
 
     # 3) multi-start sweep: log_lik + PVE_hom vs n_starts
     fig, ax1 = plt.subplots(figsize=(6, 4))
     ax1.plot(sweep["n_starts"], sweep["log_lik"], "o-", color="#1f77b4")
-    ax1.set_xlabel("n_starts"); ax1.set_ylabel("full-model log_lik", color="#1f77b4")
+    ax1.set_xlabel("n_starts")
+    ax1.set_ylabel("full-model log_lik", color="#1f77b4")
     ax1.set_xscale("log")
     ax2 = ax1.twinx()
     ax2.plot(sweep["n_starts"], sweep["pve_hom"], "s--", color="#2ca02c")
@@ -178,7 +185,8 @@ def make_plots(out_dir, trait, full_pve, kernel_corr, sweep):
     ax1.set_title(f"M2.4.4 multi-start stability — {trait}")
     fig.tight_layout()
     p = out_dir / f"multistart_sweep_{trait}.png"
-    fig.savefig(p, dpi=120, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(p, dpi=120, bbox_inches="tight")
+    plt.close(fig)
     paths.append(str(p))
     return paths
 
@@ -213,7 +221,7 @@ def main():
     y, X, raw_kernels, meta = load_inputs(grm_npz, pheno_tsv, trait)
     n = meta["n_analysis"]
     print(f"  n={n}  var(y)={meta['phenotype_var']:.3f}")
-    print(f"  RAW kernel trace: " +
+    print("  RAW kernel trace: " +
           " ".join(f"{k}={v:.1f}" for k, v in meta['raw_kernel_trace'].items()))
     print(f"  K_hom min eig = {meta['K_hom_min_eig']:.3g}")
 
@@ -354,7 +362,7 @@ def main():
         sub = sens.drift_table[(sens.drift_table["axis"] == ax)
                                & sens.drift_table["is_genetic"]]
         axis_drift[ax] = float(sub["pve_range"].max()) if len(sub) else float("nan")
-    print(f"  per-axis genetic drift: "
+    print("  per-axis genetic drift: "
           + " ".join(f"{k}={v:.2g}" for k, v in axis_drift.items()))
     observe("sensitivity_drift_by_axis", {k: round(v, 6) for k, v in axis_drift.items()},
             f"single-axis genetic PVE drift (others at reference); global "
@@ -366,7 +374,8 @@ def main():
     if args.run_null_calibration:
         print(f"\n[null calibration] A+C+e → A+C+hom+e  n_sim={args.null_n_sim}")
         from homoeogwas.calibration import (
-            run_null_lrt_calibration, scenario_from_reduced_fit,
+            run_null_lrt_calibration,
+            scenario_from_reduced_fit,
         )
         scen = scenario_from_reduced_fit(
             "hom_inclusion", y, X, canonical,

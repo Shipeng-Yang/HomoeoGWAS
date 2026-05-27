@@ -15,7 +15,6 @@ from homoeogwas.khom_tier1 import (
     spike_in_power_grid,
 )
 
-
 # ---------------------------------------------------------------------------
 # Path F — recall@K
 # ---------------------------------------------------------------------------
@@ -135,7 +134,6 @@ def test_simulate_additive_plus_epistasis_shape_and_centering():
 
 def test_simulate_rejects_unnormalized_by_default():
     """Codex Q3 fix: unnormalized kernels raise without bypass flag."""
-    rng = np.random.default_rng(0)
     n = 30
     # Trace will be ≫ n → fails normalization check
     K_pool = np.eye(n) * 10.0
@@ -175,4 +173,4 @@ def test_spike_in_power_grid_smoke():
     assert (df["power"] >= 0).all() and (df["power"] <= 1).all()
     # Codex Q4 fix: PLACEHOLDER output must be explicitly marked
     assert (df["backend"] == "PLACEHOLDER").all()
-    assert (df["paper_value"] == False).all()
+    assert (df["paper_value"].eq(False)).all()

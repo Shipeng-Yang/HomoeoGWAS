@@ -24,6 +24,7 @@ Run in the GPU env (has the full data stack + torch):
   ~/miniconda3/envs/polygwas-gpu/bin/python run_m2_4_5_wheat_pilot.py
 """
 from __future__ import annotations
+
 import argparse
 import json
 import resource
@@ -33,6 +34,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,10 +43,10 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from homoeogwas import fit_multi_reml, hadamard_kernel, normalize_kernel  # noqa: E402
+from homoeogwas import hadamard_kernel, normalize_kernel  # noqa: E402
+from homoeogwas.diagnostics import boundary_lrt_table, compare_nested_reml  # noqa: E402
 from homoeogwas.grm import compute_grm  # noqa: E402
 from homoeogwas.io import load_bed_hardcall  # noqa: E402
-from homoeogwas.diagnostics import boundary_lrt_table, compare_nested_reml  # noqa: E402
 from homoeogwas.scan import build_scan_context, lambda_gc, scan_snps  # noqa: E402
 
 PLINK2 = str(Path.home() / ".local/share/mamba/envs/polygwas-cpu/bin/plink2")
@@ -375,7 +377,8 @@ def main():
         ax.bar(keys, vals, color=["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#999999"])
         for i, v in enumerate(vals):
             ax.text(i, v + 0.01, f"{v:.3f}", ha="center", fontsize=9)
-        ax.set_ylim(0, 1.05); ax.set_ylabel("PVE")
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("PVE")
         ax.set_title(f"M2.4.5 wheat A+B+D+hom PVE — {trait} (n={n})")
         fig.tight_layout()
         fig.savefig(out_dir / f"pve_bar_{trait}.png", dpi=120, bbox_inches="tight")

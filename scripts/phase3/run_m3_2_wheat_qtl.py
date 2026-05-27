@@ -24,8 +24,8 @@ acceptance gates are written so the v1 physical-only result is auditable
 and the LD step adds confidence without changing the locus call.
 """
 from __future__ import annotations
+
 import argparse
-import gzip
 import json
 import sys
 import time
@@ -47,10 +47,14 @@ CLUMP_KB = 1_000_000                  # physical clumping window (1 Mb)
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
-    if isinstance(o, np.ndarray): return o.tolist()
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -184,7 +188,7 @@ def collect_significant_seeds(
 ) -> pd.DataFrame:
     """One full pass over LOCO sumstats; return all SNPs with p < p_thresh."""
     parts: list[pd.DataFrame] = []
-    for sg, path in loco_paths.items():
+    for _sg, path in loco_paths.items():
         for chunk in pd.read_csv(
                 path, sep="\t",
                 usecols=["snp_id","subgenome","chrom","pos","beta","se","chi2","p"],
@@ -321,7 +325,8 @@ def annotate_nearest_gene(
             if chrom not in needed_chroms:
                 continue
             try:
-                start = int(cols[3]); end = int(cols[4])
+                start = int(cols[3])
+                end = int(cols[4])
             except ValueError:
                 continue
             # extract ID=...;
@@ -406,7 +411,7 @@ def make_manhattan_qtl(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     parts: list[pd.DataFrame] = []
-    for sg, path in loco_paths.items():
+    for _sg, path in loco_paths.items():
         for chunk in pd.read_csv(
                 path, sep="\t",
                 usecols=["chrom","pos","chi2","p"],
@@ -425,7 +430,9 @@ def make_manhattan_qtl(
     logp = -np.log10(np.clip(p_arr, 1e-300, 1.0))
     span = int(pos.max()) + 1 if pos.size else 1
     order = np.argsort(np.array([rank[c] for c in chrom], dtype=np.int64) * span + pos)
-    chrom = chrom[order]; logp = logp[order]; pos = pos[order]
+    chrom = chrom[order]
+    logp = logp[order]
+    pos = pos[order]
     x = np.arange(chrom.size)
     fig, ax = plt.subplots(figsize=(14, 4.5))
     cols = ["#1f77b4" if rank[c] % 2 == 0 else "#9ecae1" for c in chrom]
@@ -515,10 +522,12 @@ def main():
         "B": ROOT / "results/phase2/m2_5_v2/wheat_watkins/scan_B.tsv.gz",
         "D": ROOT / "results/phase2/m2_5_v2/wheat_watkins/scan_D.tsv.gz",
     }
-    for sg, p in loco_paths.items():
-        if not p.exists(): sys.exit(f"ERR: missing LOCO sumstats: {p}")
-    for sg, p in emmax_paths.items():
-        if not p.exists(): sys.exit(f"ERR: missing EMMAX baseline sumstats: {p}")
+    for _sg, p in loco_paths.items():
+        if not p.exists():
+            sys.exit(f"ERR: missing LOCO sumstats: {p}")
+    for _sg, p in emmax_paths.items():
+        if not p.exists():
+            sys.exit(f"ERR: missing EMMAX baseline sumstats: {p}")
 
     print(f"[2] known-QTL window scan (LOCO, ±{KNOWN_WINDOW_BP//1000} kb)")
     known_hits = scan_known_windows_loco(loco_paths, qtls)
@@ -544,7 +553,7 @@ def main():
     leads = physical_clump_seeds(seeds, clump_kb=CLUMP_KB)
     print(f"  {len(leads)} independent leads after physical clumping")
 
-    print(f"[5] EMMAX baseline + known-QTL distance + nearest gene annotation")
+    print("[5] EMMAX baseline + known-QTL distance + nearest gene annotation")
     leads = annotate_emmax(leads, emmax_paths)
     leads = annotate_known_qtl_distance(leads, qtls, exclusion_bp=NOVEL_EXCLUSION_BP)
     gff3 = Path(args.gff3_extracted)
@@ -562,9 +571,9 @@ def main():
           f"(p<5e-8, dist>{NOVEL_EXCLUSION_BP//1000}kb to known, EMMAX p<1e-5)")
 
     # lambda_GC sanity check using significant + small thinned background
-    print(f"[6] lambda_GC sanity check")
+    print("[6] lambda_GC sanity check")
     chi2_parts = []
-    for sg, p in loco_paths.items():
+    for _sg, p in loco_paths.items():
         for chunk in pd.read_csv(p, sep="\t", usecols=["chi2"],
                                  chunksize=2_000_000, low_memory=False):
             chi2_parts.append(chunk["chi2"].to_numpy(dtype=np.float64))
@@ -572,7 +581,7 @@ def main():
     lam_gc = float(np.median(all_chi2) / _CHI2_1_MEDIAN)
     print(f"  λ_GC (recomputed) = {lam_gc:.4f}")
 
-    print(f"[7] writing outputs")
+    print("[7] writing outputs")
     out_hits = out_dir / "known_qtl_hits.tsv"
     known_hits.to_csv(out_hits, sep="\t", index=False)
     out_novel = out_dir / "new_locus_candidates.tsv"
@@ -583,7 +592,7 @@ def main():
     print(f"  wrote {out_novel}")
     print(f"  wrote {out_leads_all}")
 
-    print(f"[8] Manhattan with QTL annotations")
+    print("[8] Manhattan with QTL annotations")
     manhattan_path = out_dir / f"manhattan_{args.trait}_qtl.png"
     make_manhattan_qtl(loco_paths, qtls, novel, manhattan_path, args.trait)
     print(f"  wrote {manhattan_path}")
@@ -594,7 +603,7 @@ def main():
     def check(name, ok, msg=""):
         acceptance.append({"check": name, "passed": bool(ok), "message": msg})
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {msg}" if msg else ""))
-    print(f"\n[9] acceptance gates")
+    print("\n[9] acceptance gates")
     check("at_least_3_known_p5e5_recovered",
           n_recovered_p5e5 >= 3,
           f"{n_recovered_p5e5}/{len(known_hits)} known QTL recovered at p<5e-5")

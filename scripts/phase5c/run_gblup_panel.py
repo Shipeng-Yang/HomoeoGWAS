@@ -157,12 +157,12 @@ def main():
     print(f"\nCV runtime {time.time()-ts:.1f}s")
 
     # Summary print
-    print(f"\n=== Tier summary ===")
+    print("\n=== Tier summary ===")
     for tname, ts_obj in res.tiers.items():
         print(f"  {tname:5}  r²={ts_obj.mean_r2:.4f}  r={ts_obj.mean_r:.4f}  "
               f"top10_enrich={ts_obj.mean_top10_enrichment:.2f}  "
               f"CI=[{ts_obj.ci_r2_low:+.4f},{ts_obj.ci_r2_high:+.4f}]")
-    print(f"\n=== Δ vs tier0 ===")
+    print("\n=== Δ vs tier0 ===")
     for tname, d in res.delta_vs_tier0.items():
         sig = "**" if d["significant_95"] else "  "
         print(f"  {tname:5} {sig} Δr²={d['delta_r2_mean']:+.4f}  "

@@ -18,6 +18,7 @@ Pipeline (generalised to J subgenomes — Horvath A/C, wheat A/B/D, ...):
 The engine modules (io / grm / kernel / lmm / scan) are imported unchanged.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -28,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from . import __version__
-from .grm import compute_grm, compute_loco_grm_parts, loco_grm_from_parts
+from .grm import GRMPart, compute_grm, compute_loco_grm_parts, loco_grm_from_parts
 from .io import load_bed_hardcall
 from .kernel import hadamard_kernel, normalize_kernel
 from .lmm import fit_multi_reml
@@ -414,8 +415,8 @@ def build_loco_kernels(
                        "loco_enabled": True, "raw": {}, "loco": {}}
 
     # 1. Read each subgenome's BED, align samples, accumulate parts
-    global_parts: dict[str, "GRMPart"] = {}
-    parts_per_sub: dict[str, dict[str, "GRMPart"]] = {}
+    global_parts: dict[str, GRMPart] = {}
+    parts_per_sub: dict[str, dict[str, GRMPart]] = {}
     chrom_to_sub: dict[str, str] = {}
     for sg in subg:
         geno = load_bed_hardcall(_grm_bed_prefix(cfg, sg))

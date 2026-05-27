@@ -22,6 +22,7 @@ Usage:
   paper-grade: python run_m2_4_2_horvath_diagnostics.py --B 1000 --n-jobs 32
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -29,6 +30,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,12 +41,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import normalize_kernel  # noqa: E402
 from homoeogwas.diagnostics import (  # noqa: E402
-    boundary_lrt_table,
     bootstrap_lrt_table,
+    boundary_lrt_table,
     compare_nested_reml,
     pve_sensitivity_grid,
 )
-
 
 # ---------------------------------------------------------------------
 # I/O helpers
@@ -134,7 +135,7 @@ def make_plots(out_dir: Path, trait: str, full_pve: dict, lrt_table: pd.DataFram
     keys = list(full_pve.keys())
     vals = [full_pve[k] for k in keys]
     bars = ax.bar(keys, vals, color=["#1f77b4", "#ff7f0e", "#999999"][:len(keys)])
-    for b, v in zip(bars, vals):
+    for b, v in zip(bars, vals, strict=True):
         ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}", ha="center", fontsize=9)
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("PVE")
@@ -228,7 +229,7 @@ def main():
     kernel_names = list(canonical.keys())
     full_model = "+".join(kernel_names) + "+e"
     meta["canonical_kernel_trace"] = {k: float(np.trace(canonical[k])) for k in kernel_names}
-    print(f"  canonical trace-norm: " +
+    print("  canonical trace-norm: " +
           " ".join(f"{k}={meta['canonical_kernel_trace'][k]:.2f}" for k in kernel_names))
 
     acceptance: list[dict] = []

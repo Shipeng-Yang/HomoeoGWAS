@@ -19,6 +19,7 @@ proximal contamination: the scanned marker also sits in the GRM. v1 is a
 standard EMMAX/P3D scan and does not correct for it (LOCO is v2).
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -196,11 +197,11 @@ def lambda_gc(chi2: np.ndarray) -> float:
 # =====================================================================
 
 def _scan_batch_cpu(P: np.ndarray, Py: np.ndarray, G: np.ndarray):
-    """U = G'Py, I = diag(G'PG) for a SNP batch G (n,B). numpy float64."""
+    """U = G'Py, info = diag(G'PG) for a SNP batch G (n,B). numpy float64."""
     PG = P @ G
     U = G.T @ Py
-    I = np.einsum("ij,ij->j", G, PG, optimize=True)
-    return U, I
+    info = np.einsum("ij,ij->j", G, PG, optimize=True)
+    return U, info
 
 
 def _scan_batch_gpu(P_t, Py_t, G: np.ndarray, device):
@@ -209,8 +210,8 @@ def _scan_batch_gpu(P_t, Py_t, G: np.ndarray, device):
     G_t = torch.as_tensor(np.ascontiguousarray(G), dtype=P_t.dtype, device=device)
     PG = P_t @ G_t
     U = G_t.t() @ Py_t
-    I = (G_t * PG).sum(dim=0)
-    return U.detach().cpu().numpy(), I.detach().cpu().numpy()
+    info = (G_t * PG).sum(dim=0)
+    return U.detach().cpu().numpy(), info.detach().cpu().numpy()
 
 
 def _resolve_backend(backend: str) -> str:
@@ -347,17 +348,17 @@ def scan_snps(
             continue
         Gk = np.ascontiguousarray(G[:, keep])
         if backend_used == "gpu":
-            U, I = _scan_batch_gpu(P_t, Py_t, Gk, device)
+            U, info = _scan_batch_gpu(P_t, Py_t, Gk, device)
         else:
-            U, I = _scan_batch_cpu(P, Py, Gk)
-        good = np.isfinite(I) & (I > 0) & np.isfinite(U)
+            U, info = _scan_batch_cpu(P, Py, Gk)
+        good = np.isfinite(info) & (info > 0) & np.isfinite(U)
         filt["bad_info"] += int((~good).sum())
         if not good.any():
             continue
-        U, I = U[good], I[good]
-        beta = U / I
-        se = np.sqrt(1.0 / I)
-        chi2 = U * U / I
+        U, info = U[good], info[good]
+        beta = U / info
+        se = np.sqrt(1.0 / info)
+        chi2 = U * U / info
         pval = stats.chi2.sf(chi2, df=1)
 
         idx = np.arange(start, end)[keep][good]
@@ -503,15 +504,15 @@ def scan_bed_stream(
                 continue
             Gk = np.ascontiguousarray(G[:, keep])
             if backend_used == "gpu":
-                U, I = _scan_batch_gpu(P_t, Py_t, Gk, device)
+                U, info = _scan_batch_gpu(P_t, Py_t, Gk, device)
             else:
-                U, I = _scan_batch_cpu(P, Py, Gk)
-            good = np.isfinite(I) & (I > 0) & np.isfinite(U)
+                U, info = _scan_batch_cpu(P, Py, Gk)
+            good = np.isfinite(info) & (info > 0) & np.isfinite(U)
             filt["bad_info"] += int((~good).sum())
             if not good.any():
                 continue
-            U, I = U[good], I[good]
-            chi2 = U * U / I
+            U, info = U[good], info[good]
+            chi2 = U * U / info
             idx_local = np.arange(start, start + m)[keep][good]
             df = pd.DataFrame({
                 "snp_id": np.asarray(chunk.variant_ids, dtype=object)[keep][good],
@@ -519,8 +520,8 @@ def scan_bed_stream(
                 "chrom": np.asarray(chunk.chrom, dtype=object)[keep][good],
                 "pos": np.asarray(chunk.pos, dtype=np.int64)[keep][good],
                 "variant_index": idx_local,
-                "beta": U / I,
-                "se": np.sqrt(1.0 / I),
+                "beta": U / info,
+                "se": np.sqrt(1.0 / info),
                 "chi2": chi2,
                 "p": stats.chi2.sf(chi2, df=1),
                 "n_obs": n_obs[keep][good],
@@ -794,21 +795,21 @@ def scan_snps_loco(
                 continue
             Gk = np.ascontiguousarray(G[:, keep])
             if backend_used == "gpu":
-                U, I = _scan_batch_gpu(P_t, Py_t, Gk, device)
+                U, info = _scan_batch_gpu(P_t, Py_t, Gk, device)
             else:
-                U, I = _scan_batch_cpu(ctx_c.P, ctx_c.Py, Gk)
-            good = np.isfinite(I) & (I > 0) & np.isfinite(U)
+                U, info = _scan_batch_cpu(ctx_c.P, ctx_c.Py, Gk)
+            good = np.isfinite(info) & (info > 0) & np.isfinite(U)
             filt["bad_info"] += int((~good).sum())
             if not good.any():
                 continue
-            U, I = U[good], I[good]
-            chi2 = U * U / I
+            U, info = U[good], info[good]
+            chi2 = U * U / info
             idx = np.arange(b_start, b_end)[keep][good]
             cols["snp_id"].append(snp_id[idx])
             cols["chrom"].append(chrom_arr[idx])
             cols["pos"].append(pos_arr[idx])
-            cols["beta"].append(U / I)
-            cols["se"].append(np.sqrt(1.0 / I))
+            cols["beta"].append(U / info)
+            cols["se"].append(np.sqrt(1.0 / info))
             cols["chi2"].append(chi2)
             cols["p"].append(stats.chi2.sf(chi2, df=1))
             cols["n_obs"].append(n_obs[keep][good])
@@ -943,15 +944,15 @@ def scan_bed_stream_loco(
                         continue
                     Gk = np.ascontiguousarray(G[:, keep])
                     if backend_used == "gpu":
-                        U, I = _scan_batch_gpu(P_t, Py_t, Gk, device)
+                        U, info = _scan_batch_gpu(P_t, Py_t, Gk, device)
                     else:
-                        U, I = _scan_batch_cpu(ctx_c.P, ctx_c.Py, Gk)
-                    good = np.isfinite(I) & (I > 0) & np.isfinite(U)
+                        U, info = _scan_batch_cpu(ctx_c.P, ctx_c.Py, Gk)
+                    good = np.isfinite(info) & (info > 0) & np.isfinite(U)
                     filt["bad_info"] += int((~good).sum())
                     if not good.any():
                         continue
-                    U, I = U[good], I[good]
-                    chi2 = U * U / I
+                    U, info = U[good], info[good]
+                    chi2 = U * U / info
                     idx_local = np.arange(
                         chunk_start + b_start, chunk_start + b_end)[keep][good]
                     df = pd.DataFrame({
@@ -963,8 +964,8 @@ def scan_bed_stream_loco(
                         "pos": np.asarray(chunk.pos[b_start:b_end],
                                           dtype=np.int64)[keep][good],
                         "variant_index": idx_local,
-                        "beta": U / I,
-                        "se": np.sqrt(1.0 / I),
+                        "beta": U / info,
+                        "se": np.sqrt(1.0 / info),
                         "chi2": chi2,
                         "p": stats.chi2.sf(chi2, df=1),
                         "n_obs": n_obs[keep][good],

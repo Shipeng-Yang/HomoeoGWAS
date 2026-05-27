@@ -11,14 +11,13 @@ Strategy:  for each trait family {fiber_length, fiber_strength, lint_percentage,
   Records per-trait per-year correlation + non-null counts for QC.
 """
 from __future__ import annotations
+
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 
 ROOT = Path(__file__).resolve().parents[2]
 # Trait families = column name with year suffix stripped

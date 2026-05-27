@@ -13,13 +13,14 @@ Codex review #3 lock points enforced:
 - oat panel = supplementary robustness, NOT main NC figure
 """
 from __future__ import annotations
+
 import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 PROJ = Path("/mnt/7302share/fast_ysp/U7_GWAS")

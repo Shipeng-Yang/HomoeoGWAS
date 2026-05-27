@@ -16,8 +16,12 @@ Tier scheme:
 All non-DROPPED rows are emitted with NDM8 coords. Acceptance gate: ≥8 of 10
 anchors get a coord (any non-DROPPED tier).
 """
-import gzip, subprocess, shutil, time
+import gzip
+import shutil
+import subprocess
+import time
 from pathlib import Path
+
 import pandas as pd
 
 ROOT = Path("/mnt/7302share/fast_ysp/U7_GWAS")

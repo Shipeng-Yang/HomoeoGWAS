@@ -20,6 +20,7 @@ LOCO support (Phase 3, M3.1):
     with a build-time checksum that catches any chrom-dependent QC drift).
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
 

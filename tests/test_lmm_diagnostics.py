@@ -1,19 +1,24 @@
 """Unit tests for diagnostics.py — Phase 2 M2.4.2 Step 2."""
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
 from homoeogwas.diagnostics import (
+    BootstrapLRTResult,
+    BoundaryLRTResult,
     NestedREMLComparison,
     ResidualOnlyResult,
+    SensitivityGridResult,
+    _bh_adjust,
     _default_model_specs,
+    bootstrap_lrt_table,
+    boundary_lrt,
+    boundary_lrt_table,
     compare_nested_reml,
+    lrt_boundary_pvalue,
+    parametric_bootstrap_lrt,
+    pve_sensitivity_grid,
     residual_only_reml,
 )
 
@@ -129,14 +134,6 @@ if __name__ == "__main__":
 # =====================================================================
 # Phase 2 M2.4.2 Step 3 — Boundary-Corrected LRT tests
 # =====================================================================
-
-from homoeogwas.diagnostics import (
-    BoundaryLRTResult,
-    boundary_lrt,
-    boundary_lrt_table,
-    lrt_boundary_pvalue,
-)
-
 
 def test_lrt_boundary_pvalue_k1_at_3_84_gives_one_half_chi2_sf():
     """k=1 at chi²_1 95% crit (T=3.841): p_naive ≈ 0.05, p_mix ≈ 0.025."""
@@ -281,14 +278,6 @@ def test_boundary_lrt_null_boundary_components_positive_case():
 # Phase 2 M2.4.2 Step 4 — Parametric Bootstrap LRT tests
 # =====================================================================
 
-from homoeogwas.diagnostics import (
-    BootstrapLRTResult,
-    _bh_adjust,
-    bootstrap_lrt_table,
-    parametric_bootstrap_lrt,
-)
-
-
 def test_parametric_bootstrap_lrt_returns_valid_p():
     """B=50 small sim, default n_jobs=1, p ∈ [1/(B+1), 1]."""
     y, K_A, K_C, X = _simulate_2kernel(n=120, sig2_A=0.4, sig2_C=0.3, sig2_e=0.3, seed=0)
@@ -347,7 +336,6 @@ def test_parametric_bootstrap_lrt_under_null_uniform_T_distribution():
     )
     # 真 null,p 不应该很小;不强 < 1.0 because sample randomness
     # 但 T_obs 应该不在 T_b 极右侧
-    rank = float(np.sum(res.T_boot >= res.boundary.statistic))
     # 不强校验 p > 0.05,但 p > 1/B (i.e. > 1.25%) 应可靠
     assert res.bootstrap_p > 1.0 / (res.B_success + 1.0)
 
@@ -468,12 +456,6 @@ def test_bh_adjust_rejects_nan():
 # =====================================================================
 # Phase 2 M2.4.2 Step 5 — PVE Sensitivity Grid tests
 # =====================================================================
-
-from homoeogwas.diagnostics import (
-    SensitivityGridResult,
-    pve_sensitivity_grid,
-)
-
 
 def test_pve_sensitivity_grid_row_count_and_columns():
     """Default grid = 2 y_modes × 3 norms × 2 n_starts = 12 cells."""

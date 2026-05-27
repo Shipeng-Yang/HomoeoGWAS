@@ -4,11 +4,13 @@
 Consumes M2.1 GRM artifact (no recompute) → builds K_hom + K_sum + heatmap.
 """
 from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -76,13 +78,14 @@ def main() -> None:
     panels = [("G_A", G_A), ("G_C", G_C),
               ("K_sum_AC (norm trace)", K_sum),
               ("K_hom_AC (norm trace)", K_hom)]
-    for ax, (title, M) in zip(axes, panels):
+    for ax, (title, M) in zip(axes, panels, strict=True):
         # 共享色阶但裁极值
         vmin = float(np.percentile(M, 1))
         vmax = float(np.percentile(M, 99))
         im = ax.imshow(M, cmap="RdBu_r", vmin=vmin, vmax=vmax, aspect="auto")
         ax.set_title(f"{title}\n(trace={np.trace(M):.2f}, n={n})", fontsize=10)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
         fig.colorbar(im, ax=ax, fraction=0.046)
     fig.suptitle("Horvath2020 rapeseed A/C subgenome kernels (M2.2)", fontsize=12)
     fig.tight_layout()

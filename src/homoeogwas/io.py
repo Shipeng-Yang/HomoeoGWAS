@@ -10,6 +10,7 @@ Conventions:
 - 不做 imputation,后续步骤(GRM 计算)显式处理 NaN
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 

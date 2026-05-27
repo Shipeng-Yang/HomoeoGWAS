@@ -23,8 +23,9 @@ Backends
 - ``auto`` — try CuPy, fall back to CPU.
 """
 from __future__ import annotations
-from dataclasses import dataclass, asdict
-from typing import Literal, Optional
+
+from dataclasses import asdict, dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -578,7 +579,7 @@ def fit_multi_reml(
                 boundary_components.append(k_name)
 
     kernel_corr, kernel_design_cond = _compute_kernel_diagnostics(
-        {name: K for name, K in zip(kernel_names, K_list)}, n
+        {name: K for name, K in zip(kernel_names, K_list, strict=True)}, n
     )
 
     return MultiREMLResult(
@@ -637,8 +638,8 @@ class MultiREMLAutoResult:
     (without). ``preferred`` points at the one the framework recommends
     using downstream (typically additive when the fallback triggered)."""
 
-    full: "MultiREMLResult | None"        # None if hom kernel was 'none' (n_sub<=1)
-    additive: "MultiREMLResult"
+    full: MultiREMLResult | None        # None if hom kernel was 'none' (n_sub<=1)
+    additive: MultiREMLResult
     homoeolog_mode: str                    # 'hadamard' / 'pairwise_mean' / 'none'
     homoeolog_dropped: bool                # True → fallback to additive
     drop_reason: str                       # 'no_hom_kernel' / 'boundary' / 'cond' / 'pve_floor' / 'kept'

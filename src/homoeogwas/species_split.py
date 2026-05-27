@@ -36,10 +36,8 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .species_config import SpeciesConfig, load_species_config
-
 
 # ---------------------------------------------------------------------------
 # Plan structures
@@ -59,12 +57,12 @@ class SubgenomeWork:
     subset_vcf: Path
     pgen_prefix: Path
     bed_prefix: Path
-    out_vcf: Optional[Path]
+    out_vcf: Path | None
     bcftools_cmd: list[str]            # bcftools view/concat → subset_vcf
     bcftools_index_cmd: list[str]      # bcftools index -t subset_vcf
     plink2_cmd: list[str]              # plink2 import → pgen (or bed if --skip-pgen)
-    plink2_bed_cmd: Optional[list[str]] = None        # plink2 pgen → bed
-    plink2_export_vcf_cmd: Optional[list[str]] = None  # only when keep_vcf
+    plink2_bed_cmd: list[str] | None = None        # plink2 pgen → bed
+    plink2_export_vcf_cmd: list[str] | None = None  # only when keep_vcf
 
 
 @dataclass
@@ -124,7 +122,7 @@ def plan_split(
     threads: int = 8,
     keep_vcf: bool = False,
     skip_pgen: bool = False,
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
 ) -> SplitPlan:
     """Build the SplitPlan for a species (one SubgenomeWork per subgenome).
 
@@ -191,7 +189,7 @@ def plan_split(
         # First pass writes pgen (the QC pass — only one pass should run QC
         # filters so the subsequent bed conversion stays bit-identical).
         # If --skip-pgen the user only wants bed; do everything in one pass.
-        plink2_bed_cmd: Optional[list[str]] = None
+        plink2_bed_cmd: list[str] | None = None
         if not skip_pgen:
             plink2_cmd += ["--make-pgen"]
             plink2_bed_cmd = [
@@ -232,7 +230,7 @@ def plan_split(
 # ---------------------------------------------------------------------------
 
 
-def _run_cmd(cmd: list[str], log_file: Optional[Path] = None) -> subprocess.CompletedProcess:
+def _run_cmd(cmd: list[str], log_file: Path | None = None) -> subprocess.CompletedProcess:
     """Run a single command and (optionally) append stdout/stderr to log."""
     t0 = time.time()
     res = subprocess.run(cmd, check=True, capture_output=True, text=True)

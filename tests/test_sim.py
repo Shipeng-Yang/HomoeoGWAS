@@ -3,18 +3,14 @@
 All tests use toy arrays — no Horvath data, no GEMMA/regenie binaries.
 """
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from homoeogwas import normalize_kernel  # noqa: E402
-from homoeogwas import sim  # noqa: E402
-
+from homoeogwas import (
+    normalize_kernel,  # noqa: E402
+    sim,  # noqa: E402
+)
 
 # ---------------------------------------------------------------------
 # toy fixtures

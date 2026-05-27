@@ -12,9 +12,9 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import pandas as pd
-import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -71,8 +71,6 @@ def write_table1(rows: list[dict]) -> pd.DataFrame:
     # Reshape to one row per panel-trait, columns per tier
     pivot_r2 = df.pivot_table(index=["panel","trait","n_samples","n_subgenomes"],
                               columns="tier", values="mean_r2").reset_index()
-    pivot_top10 = df.pivot_table(index=["panel","trait"],
-                                  columns="tier", values="mean_top10_enrich").reset_index()
     delta = df[df["tier"] != "tier0"][[
         "panel","trait","tier","delta_r2_vs_tier0","ci_lo_vs_tier0","ci_hi_vs_tier0","sig_95_vs_tier0"
     ]]
@@ -104,7 +102,8 @@ def plot_table1(df: pd.DataFrame):
         for p, t in panels:
             row = df[(df["panel"] == p) & (df["trait"] == t) & (df["tier"] == tier)]
             if row.empty:
-                bars.append(np.nan); errs.append(0)
+                bars.append(np.nan)
+                errs.append(0)
             else:
                 bars.append(row["mean_r2"].iloc[0])
                 # use 1 SE as visual error bar (CI is paired-bootstrap of Δ, not absolute)
@@ -136,7 +135,7 @@ def main():
     rows = collect_rows(panels)
     df = write_table1(rows)
     plot_table1(df)
-    print(f"\n=== Final Table 1 (paper-grade) ===")
+    print("\n=== Final Table 1 (paper-grade) ===")
     if not df.empty:
         view = df.copy()
         for c in ("mean_r2","se_r2","delta_r2_vs_tier0","ci_lo_vs_tier0","ci_hi_vs_tier0"):

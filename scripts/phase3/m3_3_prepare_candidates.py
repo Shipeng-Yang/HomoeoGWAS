@@ -20,11 +20,11 @@ Outputs in results/phase3/m3_3_dl_prior/wheat_watkins/:
   candidates_summary.json
 """
 from __future__ import annotations
+
 import argparse
-import gzip
 import json
-import sys
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -40,10 +40,14 @@ PLINK2_MEMORY_MB = 8000
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
-    if isinstance(o, np.ndarray): return o.tolist()
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -126,7 +130,7 @@ def expand_ld_partners(
         if not vcor.exists() or vcor.stat().st_size == 0:
             continue
         df = pd.read_csv(vcor, sep="\t")
-        def _col(prefer):
+        def _col(prefer, df=df):
             for p in prefer:
                 for c in df.columns:
                     if c.upper() == p:
@@ -178,7 +182,7 @@ def load_bim_alleles(full_bed_root: Path,
                 df["chrom"].to_numpy(),
                 df["a1"].to_numpy(),
                 df["a2"].to_numpy(),
-                df["pos"].to_numpy()):
+                df["pos"].to_numpy(), strict=True):
             out[str(snp_id)] = (str(chrom), str(a1), str(a2), int(pos))
     return out
 
@@ -195,27 +199,39 @@ def harmonize_with_fasta(
     for _, r in cand.iterrows():
         sid = str(r["snp_id"])
         if sid not in allele_map:
-            refs.append(None); alts.append(None); matches.append("BIM_MISSING")
+            refs.append(None)
+            alts.append(None)
+            matches.append("BIM_MISSING")
             continue
         ch, a1, a2, pos = allele_map[sid]
         try:
             fasta_base = fa.fetch(ch, pos - 1, pos).upper()
-        except (KeyError, ValueError) as e:
-            refs.append(None); alts.append(None); matches.append(f"FASTA_KEYERR")
+        except (KeyError, ValueError):
+            refs.append(None)
+            alts.append(None)
+            matches.append("FASTA_KEYERR")
             continue
         if fasta_base not in ("A","C","G","T"):
-            refs.append(None); alts.append(None); matches.append("FASTA_NON_ACGT")
+            refs.append(None)
+            alts.append(None)
+            matches.append("FASTA_NON_ACGT")
             continue
         # plink convention: A1 is the minor allele (counted), A2 is reference
         # but the BIM may not match the actual fasta REF. So we pick the
         # allele that matches FASTA as ref_fasta, the other as alt_fasta.
         a1u, a2u = a1.upper(), a2.upper()
         if fasta_base == a1u and a2u in ("A","C","G","T"):
-            refs.append(a1u); alts.append(a2u); matches.append("A1_IS_REF")
+            refs.append(a1u)
+            alts.append(a2u)
+            matches.append("A1_IS_REF")
         elif fasta_base == a2u and a1u in ("A","C","G","T"):
-            refs.append(a2u); alts.append(a1u); matches.append("A2_IS_REF")
+            refs.append(a2u)
+            alts.append(a1u)
+            matches.append("A2_IS_REF")
         else:
-            refs.append(fasta_base); alts.append(None); matches.append("REF_MISMATCH")
+            refs.append(fasta_base)
+            alts.append(None)
+            matches.append("REF_MISMATCH")
     fa.close()
     cand = cand.copy()
     cand["ref_fasta"] = refs
@@ -298,13 +314,13 @@ def main():
 
     print(f"=== M3.3 prepare candidates — trait={args.trait} ===")
     if args.pilot:
-        print(f"  PILOT mode: only forced leads + known-QTL sentinels")
+        print("  PILOT mode: only forced leads + known-QTL sentinels")
 
     # 1. Forced novel leads
     novel = pd.read_csv(Path(args.m3_2_dir) / "novel_loci_tiered.tsv", sep="\t")
     novel_subset = novel.copy()
     if args.ld_leads_tier == "STRICT_HIGH_CONFIDENCE":
-        ld_leads = novel[novel["strict_high_confidence"] == True].copy()
+        ld_leads = novel[novel["strict_high_confidence"].eq(True)].copy()
     elif args.ld_leads_tier == "HIGH_CONFIDENCE":
         ld_leads = novel[novel["tier"] == "HIGH_CONFIDENCE"].copy()
     else:

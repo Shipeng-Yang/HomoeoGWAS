@@ -5,16 +5,13 @@ import numpy as np
 import pytest
 
 from homoeogwas.gp import (
-    FoldResult,
     GBLUPResult,
-    TierSummary,
     blup_predict,
     paired_bootstrap_ci,
     run_cv_gblup,
     stratified_folds,
     top_k_enrichment,
 )
-
 
 # ---------------------------------------------------------------------------
 # Synthetic data helpers
@@ -222,7 +219,7 @@ def test_tier0_fallback_equal_weight_warns(recwarn):
     """If neither k_pool nor snp_counts given, equal-weight average warns."""
     grms = _make_grms(n=40, n_sub=2, n_snp_per_sub=40, seed=6)
     y, X = _sim_pheno_from_multi_K(grms, sig2_each=0.3, sig2_e=0.3, seed=7)
-    res = run_cv_gblup(
+    run_cv_gblup(
         y, X, grms,
         tiers=("tier0",),
         n_folds=3, n_repeats=1, seed=2026, n_starts=2,

@@ -12,8 +12,9 @@ Fix:
 
 Idempotent: detects whether IDs are already non-empty and skips.
 """
-from pathlib import Path
 import shutil
+from pathlib import Path
+
 import pandas as pd
 
 ROOT = Path("/mnt/7302share/fast_ysp/U7_GWAS")

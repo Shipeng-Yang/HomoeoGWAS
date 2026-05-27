@@ -34,8 +34,9 @@ Citation backbone
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, Sequence
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -114,7 +115,6 @@ def recall_at_k(
     n_known = len(kn)
 
     results: list[RecallAtK] = []
-    by_chrom = {c: g.reset_index(drop=True) for c, g in ss.groupby(sumstats_chrom_col)}
     for k in k_grid:
         topk = ss.head(k)
         topk_by_chrom = {c: g for c, g in topk.groupby(sumstats_chrom_col)}
@@ -155,7 +155,7 @@ def ablation_table(
     b = recall_at_k(sumstats_with_khom, known_qtl,
                     k_grid=k_grid, window_bp=window_bp, **recall_kwargs)
     rows = []
-    for ai, bi in zip(a, b):
+    for ai, bi in zip(a, b, strict=True):
         assert ai.k == bi.k and ai.n_known == bi.n_known
         rows.append({
             "k": ai.k,
@@ -459,8 +459,10 @@ def _run_one_replicate(
     n = scenario.n
     K_p = K_pool[:n, :n]
     K_h = K_hom[:n, :n]
-    y = simulate_additive_plus_epistasis(K_p, K_h, scenario,
-                                          skip_normalization_check=skip_normalization_check)
+    # Call retained for its scenario/normalization validation side-effects;
+    # the placeholder REML below does not consume the simulated phenotype.
+    simulate_additive_plus_epistasis(K_p, K_h, scenario,
+                                      skip_normalization_check=skip_normalization_check)
     # PLACEHOLDER REML output — replace with fit_multi_reml in production
     # Self-Liang p drawn from a chi-squared mixture under H0 + simple
     # signal-leak model proportional to h2_epi for sanity in tests.

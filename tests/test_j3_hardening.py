@@ -6,19 +6,14 @@ exercised at J=2. M2.4.4 adds a third kernel (the homoeolog Hadamard kernel),
 so these tests lock down the J=3 behaviour.
 """
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
 from homoeogwas import fit_multi_reml, hadamard_kernel, normalize_kernel
 from homoeogwas.diagnostics import (
-    boundary_lrt_table,
     bootstrap_lrt_table,
+    boundary_lrt_table,
     compare_nested_reml,
     pve_sensitivity_grid,
 )

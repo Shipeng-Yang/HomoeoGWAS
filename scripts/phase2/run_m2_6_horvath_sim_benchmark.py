@@ -27,6 +27,7 @@ Everything runs under the CPU env (no GPU needed at Horvath scale):
   ~/.local/share/mamba/envs/polygwas-cpu/bin/python run_m2_6_horvath_sim_benchmark.py run
 """
 from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -53,10 +54,14 @@ import pandas as pd  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from homoeogwas import fit_multi_reml, hadamard_kernel, normalize_kernel  # noqa: E402
+from homoeogwas import (  # noqa: E402
+    fit_multi_reml,
+    hadamard_kernel,
+    normalize_kernel,
+    sim,  # noqa: E402
+)
 from homoeogwas.io import load_bed_hardcall  # noqa: E402
 from homoeogwas.scan import build_scan_context, scan_snps  # noqa: E402
-from homoeogwas import sim  # noqa: E402
 
 GEMMA = os.path.expanduser("~/.local/share/mamba/envs/polygwas-cpu/bin/gemma")
 REGENIE = os.path.expanduser("~/.local/share/mamba/envs/polygwas-cpu/bin/regenie")
@@ -301,7 +306,7 @@ def _link(src: Path, dst: Path) -> None:
 def _write_fam(path: Path, fid, iid, pheno) -> None:
     """Write a PLINK .fam with the given column-6 phenotype."""
     with open(path, "w") as fh:
-        for f, i, y in zip(fid, iid, pheno):
+        for f, i, y in zip(fid, iid, pheno, strict=True):
             fh.write(f"{f} {i} 0 0 0 {y}\n")
 
 
@@ -579,7 +584,7 @@ def _baseline_worker(task: dict) -> dict:
         ph = work / "pheno.txt"
         with open(ph, "w") as fh:
             fh.write("FID IID Y\n")
-            for f, i, v in zip(samples["fid"], samples["iid"], y):
+            for f, i, v in zip(samples["fid"], samples["iid"], y, strict=True):
                 fh.write(f"{f} {i} {v}\n")
         s1 = work / "step1"
         rc1, log1 = _run([REGENIE, "--step", "1", "--bed", str(prep / "merged"),
@@ -1176,10 +1181,10 @@ def _plot_power_box(path, arm, bh_pw, present):
             colors.append(_COLORS[m])
     if data:
         bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showmeans=True)
-        for patch, c in zip(bp["boxes"], colors):
+        for patch, c in zip(bp["boxes"], colors, strict=True):
             patch.set_facecolor(c)
             patch.set_alpha(0.6)
-    ax.set_ylabel(f"power @ BH q≤0.05")
+    ax.set_ylabel("power @ BH q≤0.05")
     ax.set_title(f"M2.6 per-replicate power — {arm}")
     ax.tick_params(axis="x", rotation=20)
     fig.tight_layout()
@@ -1206,7 +1211,7 @@ def _plot_runtime(out: Path, path):
             colors.append(_COLORS[m])
     if data:
         bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showmeans=True)
-        for patch, c in zip(bp["boxes"], colors):
+        for patch, c in zip(bp["boxes"], colors, strict=True):
             patch.set_facecolor(c)
             patch.set_alpha(0.6)
     ax.set_ylabel("per-replicate runtime (s, single-thread)")

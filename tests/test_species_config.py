@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from homoeogwas.species_config import (
     GenoSource,
@@ -24,13 +25,17 @@ SPECIES_DIR = ROOT / "configs" / "species"
 def _minimal_kwargs(tmp_path: Path) -> dict:
     """Build a SpeciesConfig kwargs dict pointing at tmp_path so model_validate
     succeeds without requiring real data files."""
-    fasta = tmp_path / "ref.fa"; fasta.touch()
-    gff = tmp_path / "ref.gff"; gff.touch()
-    chrom_map = tmp_path / "chrom_map.tsv"; chrom_map.write_text("panel_chrom\tfasta_chrom\tsubgenome\nchr1A\tchr1A\tA\n")
+    fasta = tmp_path / "ref.fa"
+    fasta.touch()
+    gff = tmp_path / "ref.gff"
+    gff.touch()
+    chrom_map = tmp_path / "chrom_map.tsv"
+    chrom_map.write_text("panel_chrom\tfasta_chrom\tsubgenome\nchr1A\tchr1A\tA\n")
     bed_root = tmp_path / "bed"
     (bed_root / "A").mkdir(parents=True)
     (bed_root / "A" / "all.bim").write_text("")
-    pheno = tmp_path / "pheno.tsv"; pheno.write_text("sample_id\ttrait1\n")
+    pheno = tmp_path / "pheno.tsv"
+    pheno.write_text("sample_id\ttrait1\n")
     return dict(
         id="testsp", latin="Test species", common_name="Test",
         genome_type="allopolyploid", ploidy=4,
@@ -57,7 +62,7 @@ def test_diploid_must_have_one_subgenome(tmp_path: Path):
     kw["genome_type"] = "diploid"
     kw["ploidy"] = 2
     # diploid + 2 subgenomes should fail
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SpeciesConfig(**kw)
     # diploid + 1 subgenome should pass
     kw["subgenomes"] = [Subgenome(id="A", chroms=["chr1"])]
@@ -68,7 +73,7 @@ def test_diploid_must_have_one_subgenome(tmp_path: Path):
 def test_allopolyploid_must_have_ge_two_subgenomes(tmp_path: Path):
     kw = _minimal_kwargs(tmp_path)
     kw["subgenomes"] = [Subgenome(id="A", chroms=["chr1A"])]
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SpeciesConfig(**kw)
 
 
@@ -78,7 +83,7 @@ def test_subgenome_id_must_be_unique(tmp_path: Path):
         Subgenome(id="A", chroms=["chr1A"]),
         Subgenome(id="A", chroms=["chr1B"]),
     ]
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SpeciesConfig(**kw)
 
 
@@ -88,21 +93,21 @@ def test_chrom_appearing_in_two_subgenomes_rejected(tmp_path: Path):
         Subgenome(id="A", chroms=["chr1"]),
         Subgenome(id="B", chroms=["chr1"]),
     ]
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SpeciesConfig(**kw)
 
 
 def test_geno_requires_exactly_one_source(tmp_path: Path):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GenoSource()  # neither vcf nor bed_root
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GenoSource(vcf=tmp_path / "x.vcf", bed_root=tmp_path / "bed")
 
 
 def test_extra_top_level_field_rejected(tmp_path: Path):
     kw = _minimal_kwargs(tmp_path)
     kw["nonexistent"] = "x"
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SpeciesConfig(**kw)
 
 
@@ -171,6 +176,7 @@ def test_strawberry_octoploid_has_four_sub_28_chrom():
 def test_strawberry_kernel_auto_picks_pairwise_mean():
     """Phase 5a Step 3 K_hom auto-fallback decision for n_sub=4 = pairwise_mean."""
     import numpy as np
+
     from homoeogwas.kernel import build_homoeolog_kernel
 
     cfg = load_species_config(SPECIES_DIR / "fragaria_ananassa.yaml", validate=False)

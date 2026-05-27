@@ -10,9 +10,9 @@ Also unzips the .fna.gz to a flat .fa next to it on first call (idempotent;
 pysam.FastaFile needs uncompressed FASTA for samtools-style indexing).
 """
 from __future__ import annotations
+
 import argparse
 import gzip
-import json
 import shutil
 import sys
 from pathlib import Path
@@ -55,7 +55,7 @@ def main():
     fa_path = ensure_fasta_unzipped(fa_gz)
     import pysam
     fa = pysam.FastaFile(str(fa_path))         # auto-creates .fai
-    fasta_chrom_len: dict[str, int] = dict(zip(fa.references, fa.lengths))
+    fasta_chrom_len: dict[str, int] = dict(zip(fa.references, fa.lengths, strict=True))
 
     # Collect pvar/bim max pos per panel_chrom
     panel_max_pos: dict[str, int] = {}
@@ -83,7 +83,7 @@ def main():
         print(f"  parsed {bp_path.name}: {len(df)} rows, chroms={df['chrom'].nunique()}")
 
     # Validate each map row
-    print(f"\n=== validation ===")
+    print("\n=== validation ===")
     errors: list[str] = []
     rows: list[dict] = []
     for _, row in chrom_map.iterrows():

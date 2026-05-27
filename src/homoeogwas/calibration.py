@@ -31,6 +31,7 @@ association scan yet (slated for M2.5); this module calibrates the
 variance-component LRT only.
 """
 from __future__ import annotations
+
 import warnings
 from dataclasses import dataclass, field
 from math import comb
@@ -372,7 +373,11 @@ def run_null_lrt_calibration(
         raise ValueError(f"n_sim must be >= 1, got {n_sim}")
 
     alt_k = scenario.model_specs[scenario.alt_model]
-    null_k = scenario.model_specs[scenario.null_model]
+    if scenario.null_model not in scenario.model_specs:
+        raise ValueError(
+            f"scenario {scenario.name!r} null_model {scenario.null_model!r} "
+            f"not present in model_specs"
+        )
     for k in alt_k:
         if k not in kernels:
             raise ValueError(f"kernels dict missing {k!r} required by scenario")

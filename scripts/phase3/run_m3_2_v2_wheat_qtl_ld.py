@@ -27,8 +27,8 @@ Outputs in same dir (v1 outputs preserved):
 The script is *idempotent*: rerunning skips already-cached plink2 LD outputs.
 """
 from __future__ import annotations
+
 import argparse
-import gzip
 import json
 import shutil
 import subprocess
@@ -59,10 +59,14 @@ PLINK2_THREADS = 8
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
-    if isinstance(o, np.ndarray): return o.tolist()
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -316,7 +320,7 @@ def per_env_regression(
             gi = g[mask]
             try:
                 slope, intercept, rval, pval, stderr = scstats.linregress(gi, yi)
-            except Exception as e:                              # noqa: BLE001
+            except Exception:                              # noqa: BLE001
                 continue
             rows.append({
                 "lead_snp": snp,
@@ -515,7 +519,7 @@ def main():
     print("[1] loading inputs")
     qtls = load_known_qtls(Path(args.known_qtl))
     v1 = load_v1_outputs(Path(args.v1_dir))
-    novel = v1["novel"][v1["novel"]["is_novel_candidate"] == True].copy()
+    novel = v1["novel"][v1["novel"]["is_novel_candidate"].eq(True)].copy()
     novel = novel.sort_values("p").head(args.top_cand).reset_index(drop=True)
     print(f"  known QTL: {len(qtls)}, v1 novel candidates: {len(v1['novel'])}, "
           f"top-{args.top_cand}: {len(novel)}")

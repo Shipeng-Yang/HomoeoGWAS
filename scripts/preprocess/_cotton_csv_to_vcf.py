@@ -6,11 +6,11 @@ CSV 列: CHROM,POS,REF,ALT,maf,B001,B002,...
 
 用法: python _cotton_csv_to_vcf.py <chr_A01.csv.gz> <chr_A01.vcf.gz> <CHROM_id>
 """
-import sys
-import gzip
 import csv
-import subprocess
+import gzip
 import os
+import subprocess
+import sys
 
 
 def encode(g: str, ref: str, alt: str) -> str:
@@ -42,7 +42,7 @@ def main(csv_path: str, out_vcf: str, chrom_id: str) -> None:
         for row in r:
             if not row:
                 continue
-            chrom, pos, ref, alt = row[0], row[1], row[2], row[3]
+            pos, ref, alt = row[1], row[2], row[3]
             gts = row[5:]
             rec = [chrom_id, pos, '.', ref, alt, '.', '.', '.', 'GT']
             rec += [encode(g, ref, alt) for g in gts]

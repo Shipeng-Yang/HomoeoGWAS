@@ -39,15 +39,13 @@ paired-bootstrap 95% CI over individuals.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Optional
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import scipy.stats
 
 from .kernel import build_homoeolog_kernel, normalize_kernel
-from .lmm import fit_multi_reml, MultiREMLResult
-
+from .lmm import fit_multi_reml
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -127,7 +125,7 @@ class GBLUPResult:
 
 
 def stratified_folds(y: np.ndarray, n_folds: int = 5, n_strata: int = 5,
-                     rng: Optional[np.random.Generator] = None) -> list[np.ndarray]:
+                     rng: np.random.Generator | None = None) -> list[np.ndarray]:
     """Return list of test-index arrays — each fold balanced by trait quantile.
 
     Implementation: rank y into n_strata bins, then within each stratum
@@ -298,7 +296,6 @@ def _fit_and_predict_one_fold(
     if not kernels_full:
         # Mean prediction baseline
         beta = np.array([y_train.mean()])
-        X_train_d = np.ones((len(train_idx), 1))
         X_test_d = np.ones((len(test_idx), 1))
         y_pred = X_test_d @ beta
         sigma2 = {"e": float(np.var(y_train, ddof=1))}
@@ -347,8 +344,8 @@ def run_cv_gblup(
     per_subgenome_grms: dict[str, np.ndarray],
     *,
     tiers: tuple[str, ...] = ("tier0", "tier1", "tier2"),
-    k_pool: Optional[np.ndarray] = None,
-    snp_counts: Optional[dict[str, int]] = None,
+    k_pool: np.ndarray | None = None,
+    snp_counts: dict[str, int] | None = None,
     n_folds: int = 5,
     n_repeats: int = 20,
     seed: int = 2026,
@@ -386,7 +383,6 @@ def run_cv_gblup(
     GBLUPResult with TierSummary per tier and per-fold raw FoldResult list.
     """
     n = len(y)
-    rng = np.random.default_rng(seed)
 
     # Build the three kernel sets once (full n × n)
     kernel_sets: dict[str, dict[str, np.ndarray]] = {}

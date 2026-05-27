@@ -6,15 +6,10 @@ Covers the engine surface added in src/homoeogwas/{grm,scan}.py:
   • scan_snps_loco / scan_bed_stream_loco
 """
 from __future__ import annotations
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas.grm import (
     GRMPart,
@@ -34,7 +29,6 @@ from homoeogwas.scan import (
     scan_snps,
     scan_snps_loco,
 )
-
 
 # ---------------------------------------------------------------------
 # Fixtures
@@ -277,7 +271,7 @@ def test_build_loco_scan_contexts_basic():
     assert loco_ctx.chroms == ["cA", "cB", "cC"]
     assert loco_ctx.sigma2 == {"g": 0.6, "e": 0.4}
     # Each per-chrom P annihilates X
-    for c, ctx_c in loco_ctx.contexts.items():
+    for _c, ctx_c in loco_ctx.contexts.items():
         assert np.allclose(ctx_c.P @ X, 0.0, atol=1e-8)
         assert np.allclose(ctx_c.P, ctx_c.P.T, atol=1e-10)
 
@@ -366,12 +360,12 @@ def test_scan_snps_loco_matches_explicit_per_chrom_scan():
         )
         sub_res = scan_snps(ctx_c, sub_chunk, backend="cpu")
         # Align by snp_id
-        for sid, chi2 in zip(sub_res.snp_id, sub_res.chi2):
+        for sid, chi2 in zip(sub_res.snp_id, sub_res.chi2, strict=True):
             idx = np.where(chunk.variant_ids == sid)[0][0]
             ref_chi2[idx] = chi2
     # Align loco_res to the original chunk variant order
     loco_chi2 = np.full(chunk.dosage.shape[1], np.nan)
-    for sid, chi2 in zip(loco_res.snp_id, loco_res.chi2):
+    for sid, chi2 in zip(loco_res.snp_id, loco_res.chi2, strict=True):
         idx = np.where(chunk.variant_ids == sid)[0][0]
         loco_chi2[idx] = chi2
     ok = np.isfinite(ref_chi2) & np.isfinite(loco_chi2)
@@ -401,7 +395,7 @@ def test_scan_snps_loco_single_snp_matches_explicit_gls_wald():
     rng = np.random.default_rng(0)
     picks = rng.choice(chunk.dosage.shape[1], size=5, replace=False)
     loco_res = scan_snps_loco(loco_ctx, chunk, backend="cpu")
-    snp_to_chi2 = dict(zip(loco_res.snp_id, loco_res.chi2))
+    snp_to_chi2 = dict(zip(loco_res.snp_id, loco_res.chi2, strict=True))
     for j in picks:
         c = chrom_arr[j]
         K_c = kernels_by_chrom[c]["g"]
@@ -554,8 +548,8 @@ def test_scan_snps_loco_sample_alignment():
     res_normal = scan_snps_loco(loco_ctx, chunk, backend="cpu")
     res_reordered = scan_snps_loco(loco_ctx, rev_chunk, backend="cpu")
     # Same SNPs → same χ² regardless of input row ordering
-    s_to_chi_n = dict(zip(res_normal.snp_id, res_normal.chi2))
-    s_to_chi_r = dict(zip(res_reordered.snp_id, res_reordered.chi2))
+    s_to_chi_n = dict(zip(res_normal.snp_id, res_normal.chi2, strict=True))
+    s_to_chi_r = dict(zip(res_reordered.snp_id, res_reordered.chi2, strict=True))
     common = set(s_to_chi_n) & set(s_to_chi_r)
     assert len(common) > 0
     for s in common:
@@ -597,8 +591,8 @@ def test_scan_bed_stream_loco_matches_in_memory(tmp_path):
     res_mem = scan_snps_loco(loco_ctx, chunk, backend="cpu")
     stream_df = pd.read_csv(out_path, sep="\t")
     # Align by snp_id
-    mem_map = dict(zip(res_mem.snp_id, res_mem.chi2))
-    stream_map = dict(zip(stream_df["snp_id"], stream_df["chi2"]))
+    mem_map = dict(zip(res_mem.snp_id, res_mem.chi2, strict=True))
+    stream_map = dict(zip(stream_df["snp_id"], stream_df["chi2"], strict=True))
     common = set(mem_map) & set(stream_map)
     assert len(common) > 0
     for s in common:
@@ -633,8 +627,8 @@ def test_scan_bed_stream_loco_chunk_crosses_chrom_boundary(tmp_path):
     assert summary.n_chunks >= 2
     res_mem = scan_snps_loco(loco_ctx, chunk, backend="cpu")
     stream_df = pd.read_csv(out_path, sep="\t")
-    mem_map = dict(zip(res_mem.snp_id, res_mem.chi2))
-    stream_map = dict(zip(stream_df["snp_id"], stream_df["chi2"]))
+    mem_map = dict(zip(res_mem.snp_id, res_mem.chi2, strict=True))
+    stream_map = dict(zip(stream_df["snp_id"], stream_df["chi2"], strict=True))
     common = set(mem_map) & set(stream_map)
     assert len(common) > 0
     for s in common:

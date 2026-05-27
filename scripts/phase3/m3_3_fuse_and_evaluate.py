@@ -21,6 +21,7 @@ Outputs in same dir:
   m3_3_summary_<trait>.json
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -36,9 +37,12 @@ RECALL_TOP_N = 100                              # recall@100
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -86,7 +90,9 @@ def known_qtl_for_snp(cand_df: pd.DataFrame, qtls: pd.DataFrame,
         pos = int(r["pos"])
         sub = qtls[qtls["_chrom_s"] == ch]
         if len(sub) == 0:
-            near.append(None); inwin.append(False); continue
+            near.append(None)
+            inwin.append(False)
+            continue
         d = (sub["qtl_pos"] - pos).abs()
         i = d.idxmin()
         near.append(str(sub.loc[i, "qtl_name"]))
@@ -217,7 +223,7 @@ def main():
 
     # 3. Merge scores onto candidates
     merged = cand.copy()
-    for model, df in score_parts.items():
+    for _model, df in score_parts.items():
         merged = merged.merge(df, on="snp_id", how="left")
 
     # robust z per model + ensemble
@@ -279,13 +285,13 @@ def main():
               f"Fused={rf:.3f} ({nf}/{n_pos})  lift={rf-rg:+.3f}")
 
     # β sensitivity sweep: report per-QTL rank improvement at multiple β
-    print(f"\n[6b'] β sensitivity sweep — per-QTL best rank improvement")
+    print("\n[6b'] β sensitivity sweep — per-QTL best rank improvement")
     beta_sensitivity: dict[str, dict] = {}
     for beta_test in (0.25, 1.0, 5.0):
         s_score = merged["z_gwas"].fillna(0) + beta_test * merged["z_llr_abs"].fillna(0)
         s_ranked = merged.assign(_s=s_score).sort_values("_s", ascending=False).reset_index(drop=True)
         s_rank_map = {sid: i + 1 for i, sid in enumerate(s_ranked["snp_id"].astype(str))}
-        qtl_s = merged[merged["in_known_window_500kb"] == True].copy()
+        qtl_s = merged[merged["in_known_window_500kb"].eq(True)].copy()
         qtl_s["s_rank"] = qtl_s["snp_id"].astype(str).map(s_rank_map)
         qtl_s["g_rank"] = qtl_s["snp_id"].astype(str).map(
             {sid: i + 1 for i, sid in enumerate(gwas_ranked["snp_id"].astype(str))})
@@ -306,7 +312,7 @@ def main():
 
     # Per-QTL best-rank improvement (the variant-prioritization metric)
     print(f"\n[6c] per-QTL best rank (GWAS vs Fused using chosen β={beta})")
-    qtl_in = merged[merged["in_known_window_500kb"] == True].copy()
+    qtl_in = merged[merged["in_known_window_500kb"].eq(True)].copy()
     gwas_rank_map = {sid: i + 1 for i, sid in
                      enumerate(gwas_ranked["snp_id"].astype(str))}
     fused_rank_map = {sid: i + 1 for i, sid in

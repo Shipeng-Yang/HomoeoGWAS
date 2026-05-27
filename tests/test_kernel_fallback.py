@@ -11,7 +11,6 @@ from homoeogwas.kernel import (
 )
 from homoeogwas.lmm import fit_with_homoeolog_fallback
 
-
 # ---------------------------------------------------------------------------
 # Tiny GRMs (n=20 samples, J subgenomes) — small enough to fit REML quickly
 # ---------------------------------------------------------------------------

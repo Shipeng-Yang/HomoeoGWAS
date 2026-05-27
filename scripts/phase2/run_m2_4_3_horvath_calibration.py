@@ -26,6 +26,7 @@ Usage:
                       --bootstrap-B 199 --bootstrap-n-sim 200
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -33,6 +34,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -120,10 +122,13 @@ def make_plots(out_dir: Path, trait: str, results: dict) -> list[str]:
             row = t1[(t1.method == m) & (t1.alpha == 0.05)]
             if len(row):
                 r = row.iloc[0]
-                rates.append(r["type1_rate"]); los.append(r["type1_rate"] - r["ci_lo"])
+                rates.append(r["type1_rate"])
+                los.append(r["type1_rate"] - r["ci_lo"])
                 his.append(r["ci_hi"] - r["type1_rate"])
             else:
-                rates.append(np.nan); los.append(0); his.append(0)
+                rates.append(np.nan)
+                los.append(0)
+                his.append(0)
         ax.bar(x + i * w, rates, width=w, yerr=[los, his], capsize=3,
                label=m, color=colors[m])
     ax.axhline(0.05, ls="--", color="k", lw=1, label="nominal α=0.05")
@@ -142,7 +147,7 @@ def make_plots(out_dir: Path, trait: str, results: dict) -> list[str]:
     fig, axes = plt.subplots(1, len(scen_names), figsize=(4.2 * len(scen_names), 4))
     if len(scen_names) == 1:
         axes = [axes]
-    for ax, s in zip(axes, scen_names):
+    for ax, s in zip(axes, scen_names, strict=True):
         rep = results[s]["replicate"]
         T = np.sort(rep.loc[rep["success"], "lrt"].to_numpy(dtype=np.float64))
         df = int(results[s]["df_added"])
@@ -153,7 +158,8 @@ def make_plots(out_dir: Path, trait: str, results: dict) -> list[str]:
         lim = max(float(theo.max()), float(T.max()), 1.0) * 1.05
         ax.plot([0, lim], [0, lim], ls="--", color="k", lw=1)
         ax.scatter(theo, T, s=8, color="#1f77b4", alpha=0.5)
-        ax.set_xlim(0, lim); ax.set_ylim(0, lim)
+        ax.set_xlim(0, lim)
+        ax.set_ylim(0, lim)
         ax.set_xlabel(f"theoretical chi-bar (df={df})")
         ax.set_ylabel("empirical LRT")
         ax.set_title(s, fontsize=9)
@@ -287,7 +293,7 @@ def main():
             observe(f"{label}_e_boundary_rate", round(res.e_boundary_rate, 3),
                     "fraction of replicates with σ²_e at boundary")
 
-        def _verdict(method):
+        def _verdict(method, type1=type1):
             row = type1[(type1.method == method) & (type1.alpha == 0.05)]
             return row.iloc[0]["verdict"] if len(row) else None
 

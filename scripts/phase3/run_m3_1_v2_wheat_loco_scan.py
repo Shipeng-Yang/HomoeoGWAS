@@ -25,6 +25,7 @@ Run in the GPU env:
   ~/miniconda3/envs/polygwas-gpu/bin/python run_m3_1_v2_wheat_loco_scan.py
 """
 from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -41,6 +42,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import fit_multi_reml, normalize_kernel  # noqa: E402
 from homoeogwas.grm import (  # noqa: E402
+    GRMPart,
     compute_loco_grm_parts,
     loco_grm_from_parts,
 )
@@ -97,8 +99,8 @@ def build_context(args, out_dir: Path) -> dict:
     X = np.ones((n, 1), dtype=np.float64)
 
     # per-sub LOCO GRM parts (global numerator/denom + per-chrom partials)
-    global_parts_by_sub: dict[str, "GRMPart"] = {}
-    parts_per_sub: dict[str, dict[str, "GRMPart"]] = {}
+    global_parts_by_sub: dict[str, GRMPart] = {}
+    parts_per_sub: dict[str, dict[str, GRMPart]] = {}
     chrom_to_sub: dict[str, str] = {}
     for sg in SUBGENOMES:
         bed = pruned_dir / sg

@@ -1,14 +1,10 @@
 """Unit tests for src/homoeogwas/grm.py — M2.1 scaffold acceptance."""
 from __future__ import annotations
-import sys
+
 from pathlib import Path
 
 import numpy as np
 import pytest
-
-# Make src importable without install (development mode).
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas.grm import compute_grm, compute_grm_panel
 from homoeogwas.io import GenoChunk

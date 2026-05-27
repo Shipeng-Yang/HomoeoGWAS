@@ -5,12 +5,14 @@ Fits y = X β + u_A + u_C + e on plant_height (default trait).
 Consumes M2.1 GRM artifact; trace-normalizes each kernel before REML.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -124,7 +126,7 @@ def main():
     keys = ["A", "C", "e"]
     pves = [res.pve[k] for k in keys]
     bars = ax.bar(keys, pves, color=["#1f77b4", "#ff7f0e", "#999999"])
-    for b, v in zip(bars, pves):
+    for b, v in zip(bars, pves, strict=True):
         ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}",
                 ha="center", fontsize=9)
     ax.set_ylim(0, 1.05)

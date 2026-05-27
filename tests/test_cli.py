@@ -5,6 +5,7 @@ binaries. Exercises config parsing, the flag budget, the end-to-end fit
 pipeline (in-memory + streaming + J=3 Hadamard) and error handling.
 """
 from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -18,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import cli  # noqa: E402
-
 
 # ---------------------------------------------------------------------
 # synthetic panel
@@ -45,7 +45,7 @@ def _make_panel(tmp: Path, subgenomes, n=60, m=2000, seed=0):
     samples = [f"S{i:03d}" for i in range(n)]
     geno_dir = tmp / "panel"
     dos_by_sg = {}
-    for si, sg in enumerate(subgenomes):
+    for _si, sg in enumerate(subgenomes):
         dos = rng.binomial(2, 0.3, size=(n, m)).astype(np.float32)
         # two chromosomes per subgenome
         chrom = [f"{sg}{1 + (j // (m // 2))}" for j in range(m)]

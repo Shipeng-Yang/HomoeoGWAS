@@ -6,7 +6,9 @@ Phase 5d Step 2 helper. After Ensembl Plants OT3098 v2 fasta is downloaded
 logical chrom for fasta lookup).
 """
 from __future__ import annotations
+
 from pathlib import Path
+
 import pandas as pd
 
 CHROM_MAP_PATH = Path("/mnt/7302share/fast_ysp/U7_GWAS/data/reference/oat/chrom_map_oat.tsv")

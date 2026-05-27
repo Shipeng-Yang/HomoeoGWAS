@@ -15,6 +15,7 @@ Run on the GPU env for the GPU backend:
   ~/miniconda3/envs/polygwas-gpu/bin/python run_m2_5_horvath_scan.py
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -22,6 +23,7 @@ import time
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,9 +33,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import fit_multi_reml, normalize_kernel  # noqa: E402
-from homoeogwas.io import GenoChunk, load_bed_hardcall  # noqa: E402
+from homoeogwas.io import load_bed_hardcall  # noqa: E402
 from homoeogwas.scan import (  # noqa: E402
-    build_scan_context, lambda_gc, scan_snps, write_scan_tsv,
+    build_scan_context,
+    lambda_gc,
+    scan_snps,
 )
 
 SUBGENOMES = ("A", "C")
@@ -68,23 +72,29 @@ def make_plots(out_dir: Path, trait: str, cols: dict, subg: np.ndarray):
     order = np.lexsort((cols["pos"], chrom))
     chrom_o, logp_o, sub_o = chrom[order], logp[order], subg[order]
     uchrom = list(dict.fromkeys(chrom_o))
-    xpos = np.zeros(len(chrom_o)); offset = 0.0; ticks = []; tick_lab = []
+    xpos = np.zeros(len(chrom_o))
+    offset = 0.0
+    ticks = []
+    tick_lab = []
     fig, ax = plt.subplots(figsize=(11, 4))
     for ci in uchrom:
         msk = chrom_o == ci
         k = int(msk.sum())
         xpos[msk] = offset + np.arange(k)
-        ticks.append(offset + k / 2); tick_lab.append(ci)
+        ticks.append(offset + k / 2)
+        tick_lab.append(ci)
         color = "#1f77b4" if sub_o[msk][0] == "A" else "#ff7f0e"
         ax.scatter(xpos[msk], logp_o[msk], s=4, c=color)
         offset += k + max(1, k // 50)
-    ax.set_xticks(ticks); ax.set_xticklabels(tick_lab, rotation=90, fontsize=6)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(tick_lab, rotation=90, fontsize=6)
     ax.set_ylabel("-log10(p)")
     ax.set_title(f"M2.5 Manhattan — Horvath2020 {trait} (A=blue, C=orange)")
     ax.axhline(-np.log10(5e-8), ls="--", lw=0.8, color="red")
     fig.tight_layout()
     mp = out_dir / f"manhattan_{trait}.png"
-    fig.savefig(mp, dpi=130, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(mp, dpi=130, bbox_inches="tight")
+    plt.close(fig)
     paths.append(str(mp))
 
     # QQ plot
@@ -94,12 +104,15 @@ def make_plots(out_dir: Path, trait: str, cols: dict, subg: np.ndarray):
     lim = max(float(obs.max()), float(exp.max())) * 1.05
     ax.plot([0, lim], [0, lim], ls="--", color="k", lw=1)
     ax.scatter(exp, obs, s=5, color="#1f77b4")
-    ax.set_xlabel("expected -log10(p)"); ax.set_ylabel("observed -log10(p)")
-    ax.set_xlim(0, lim); ax.set_ylim(0, lim)
+    ax.set_xlabel("expected -log10(p)")
+    ax.set_ylabel("observed -log10(p)")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
     ax.set_title(f"M2.5 QQ — Horvath2020 {trait}  λ_GC={lambda_gc(cols['chi2']):.3f}")
     fig.tight_layout()
     qp = out_dir / f"qq_{trait}.png"
-    fig.savefig(qp, dpi=130, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(qp, dpi=130, bbox_inches="tight")
+    plt.close(fig)
     paths.append(str(qp))
     return paths
 

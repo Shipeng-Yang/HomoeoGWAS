@@ -9,12 +9,14 @@ and reports σ_g², σ_e², h², log-lik, eigen condition.
 Reuses M2.2 kernel artifact; no recompute.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import fit_reml  # noqa: E402
-from homoeogwas.lmm import _neg_log_reml  # for profile plot
+from homoeogwas.lmm import _neg_log_reml  # noqa: E402  (after sys.path + mpl backend)
 
 
 def _project_eigenbasis(K, y, X):

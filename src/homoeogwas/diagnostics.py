@@ -10,8 +10,9 @@ Result types:
 - ``ResidualOnlyResult``: lightweight result for J=0 model.
 """
 from __future__ import annotations
+
 import json
-from dataclasses import dataclass, asdict, field, replace
+from dataclasses import dataclass, field, replace
 from itertools import combinations, product
 from typing import Literal
 
@@ -252,6 +253,7 @@ def lrt_boundary_pvalue(
         (p_naive, p_mixture, weights).
     """
     from math import comb
+
     from scipy import stats
 
     if df_added < 1:

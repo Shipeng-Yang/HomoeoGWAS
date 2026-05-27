@@ -19,8 +19,8 @@ Outputs (same schema as wheat v1, in --out-dir):
   candidates_summary.json
 """
 from __future__ import annotations
+
 import argparse
-import gzip
 import hashlib
 import json
 import subprocess
@@ -42,10 +42,14 @@ SENTINELS_PER_QTL = 10
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
-    if isinstance(o, np.ndarray): return o.tolist()
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -79,7 +83,7 @@ def load_leads(path: Path, ld_leads_tier: str) -> tuple[pd.DataFrame, pd.DataFra
         raise ValueError(f"leads TSV {path} missing lead_snp/snp_id column")
 
     if ld_leads_tier == "STRICT_HIGH_CONFIDENCE" and has_strict_col:
-        ld = df[df["strict_high_confidence"] == True].copy()
+        ld = df[df["strict_high_confidence"].eq(True)].copy()
     elif ld_leads_tier == "HIGH_CONFIDENCE" and has_tier_col:
         ld = df[df["tier"] == "HIGH_CONFIDENCE"].copy()
     elif ld_leads_tier == "ALL":
@@ -129,7 +133,7 @@ def expand_ld_partners(leads: pd.DataFrame, bed_root: Path, plink2_bin: str,
         if not vcor.exists() or vcor.stat().st_size == 0:
             continue
         df = pd.read_csv(vcor, sep="\t")
-        def _col(prefer):
+        def _col(prefer, df=df):
             for p in prefer:
                 for c in df.columns:
                     if c.upper() == p:
@@ -167,7 +171,7 @@ def load_bim_alleles(bed_root: Path, subgenomes: list[str],
         for snp_id, chrom, a1, a2, pos in zip(
                 df["snp_id"].to_numpy(), df["chrom"].to_numpy(),
                 df["a1"].to_numpy(), df["a2"].to_numpy(),
-                df["pos"].to_numpy()):
+                df["pos"].to_numpy(), strict=True):
             out[str(snp_id)] = (str(chrom), str(a1), str(a2), int(pos))
     return out
 
@@ -190,25 +194,37 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
     for _, r in cand.iterrows():
         sid = str(r["snp_id"])
         if sid not in allele_map:
-            refs.append(None); alts.append(None); matches.append("BIM_MISSING")
-            palindromes.append(False); continue
+            refs.append(None)
+            alts.append(None)
+            matches.append("BIM_MISSING")
+            palindromes.append(False)
+            continue
         panel_ch, a1, a2, pos = allele_map[sid]
         # Sanity: cand and BIM should agree on (chrom, pos) for this snp_id
         cand_ch = str(r["chrom"])
         cand_pos = int(r["pos"]) if pd.notna(r["pos"]) else -1
         if cand_ch != panel_ch or (cand_pos > 0 and cand_pos != pos):
             n_pos_disagree += 1
-            refs.append(None); alts.append(None); matches.append("BIM_CAND_DISAGREE")
-            palindromes.append(False); continue
+            refs.append(None)
+            alts.append(None)
+            matches.append("BIM_CAND_DISAGREE")
+            palindromes.append(False)
+            continue
         fasta_ch = chrom_map.get(panel_ch, panel_ch)
         try:
             fasta_base = fa.fetch(fasta_ch, pos - 1, pos).upper()
         except (KeyError, ValueError):
-            refs.append(None); alts.append(None); matches.append("FASTA_KEYERR")
-            palindromes.append(False); continue
+            refs.append(None)
+            alts.append(None)
+            matches.append("FASTA_KEYERR")
+            palindromes.append(False)
+            continue
         if fasta_base not in ("A","C","G","T"):
-            refs.append(None); alts.append(None); matches.append("FASTA_NON_ACGT")
-            palindromes.append(False); continue
+            refs.append(None)
+            alts.append(None)
+            matches.append("FASTA_NON_ACGT")
+            palindromes.append(False)
+            continue
         a1u, a2u = a1.upper(), a2.upper()
         both_acgt = a1u in COMP and a2u in COMP
         is_pal = both_acgt and ({a1u, a2u} == {"A", "T"} or {a1u, a2u} == {"C", "G"})
@@ -216,9 +232,13 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
         # Palindromic A/T or C/G SNPs always resolve here (ref=fasta_base is
         # correct for scoring even though the design strand is unknowable).
         if fasta_base == a1u and a2u in COMP:
-            refs.append(a1u); alts.append(a2u); matches.append("A1_IS_REF")
+            refs.append(a1u)
+            alts.append(a2u)
+            matches.append("A1_IS_REF")
         elif fasta_base == a2u and a1u in COMP:
-            refs.append(a2u); alts.append(a1u); matches.append("A2_IS_REF")
+            refs.append(a2u)
+            alts.append(a1u)
+            matches.append("A2_IS_REF")
         # Reverse-complement: array allele recorded on the strand opposite the
         # FASTA. ref stays = fasta_base (+ strand, so seq[center]==ref holds);
         # the + strand alt is the complement of the OTHER VCF allele. beta/se/p
@@ -231,11 +251,17 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
         # that reads beta as an allele-specific effect MUST re-derive the effect
         # allele from ref_fasta/alt_fasta, not assume a1.
         elif both_acgt and COMP[fasta_base] == a1u:
-            refs.append(fasta_base); alts.append(COMP[a2u]); matches.append("A1_IS_REF_RC")
+            refs.append(fasta_base)
+            alts.append(COMP[a2u])
+            matches.append("A1_IS_REF_RC")
         elif both_acgt and COMP[fasta_base] == a2u:
-            refs.append(fasta_base); alts.append(COMP[a1u]); matches.append("A2_IS_REF_RC")
+            refs.append(fasta_base)
+            alts.append(COMP[a1u])
+            matches.append("A2_IS_REF_RC")
         else:
-            refs.append(fasta_base); alts.append(None); matches.append("REF_MISMATCH")
+            refs.append(fasta_base)
+            alts.append(None)
+            matches.append("REF_MISMATCH")
         palindromes.append(is_pal)
     fa.close()
     cand = cand.copy()
@@ -297,7 +323,7 @@ def load_chrom_map(path: Path | None) -> dict:
         return {}
     df = pd.read_csv(path, sep="\t")
     return dict(zip(df["panel_chrom"].astype(str),
-                    df["fasta_chrom"].astype(str)))
+                    df["fasta_chrom"].astype(str), strict=True))
 
 
 def main():

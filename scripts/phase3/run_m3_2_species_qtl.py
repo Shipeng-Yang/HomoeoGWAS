@@ -14,6 +14,7 @@ but acceptance gates here only require the pipeline to complete; the
 biological hit interpretation needs assembly verification.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -33,9 +34,12 @@ CLUMP_KB = 1_000_000
 
 
 def _json_default(o):
-    if isinstance(o, (np.integer,)): return int(o)
-    if isinstance(o, (np.floating,)): return float(o)
-    if isinstance(o, (np.bool_,)): return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
@@ -123,7 +127,10 @@ def annotate_known_distance(leads: pd.DataFrame, qtls: pd.DataFrame,
     for _, r in leads.iterrows():
         chr_qtls = qtls[qtls["chrom"] == r["chrom"]]
         if len(chr_qtls) == 0:
-            nearest.append(None); dist.append(None); inwin.append(False); continue
+            nearest.append(None)
+            dist.append(None)
+            inwin.append(False)
+            continue
         d = (chr_qtls["qtl_pos"] - int(r["pos"])).abs()
         i = d.idxmin()
         nearest.append(str(chr_qtls.loc[i, "qtl_name"]))
@@ -194,7 +201,7 @@ def main():
     def check(name, ok, msg=""):
         acceptance.append({"check": name, "passed": bool(ok), "message": msg})
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {msg}" if msg else ""))
-    print(f"\n[6] acceptance gates")
+    print("\n[6] acceptance gates")
     check("lambda_gc_in_range", 0.80 <= lam_gc <= 1.20,
           f"λ_GC={lam_gc:.4f}")
     check("at_least_1_known_recovery_relaxed", n_recov_relaxed >= 1,

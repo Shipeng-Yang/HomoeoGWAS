@@ -10,9 +10,10 @@ Outputs:
   data/reference/oat/chrom_map_oat.tsv       — panel_chrom (1A_0/1A_1) → fasta_chrom (TBD after ref unzip) → subgenome (A/C/D) → logical_chrom (1A) for LOCO grouping
 """
 from __future__ import annotations
-import pandas as pd
+
 from pathlib import Path
-import sys
+
+import pandas as pd
 
 BASE = Path("/mnt/nvme/oat_raw/figshare")
 OUT_PHENO = Path("/mnt/7302share/fast_ysp/U7_GWAS/data/processed/oat/pheno_clean.tsv")
@@ -120,6 +121,6 @@ cm = pd.DataFrame(rows)
 OUT_CHROMMAP.parent.mkdir(parents=True, exist_ok=True)
 cm.to_csv(OUT_CHROMMAP, sep="\t", index=False)
 print(f"[chrom_map] {len(cm)} entries (42 segments + UN) → {OUT_CHROMMAP}")
-print(f"[chrom_map] NOTE: fasta_chrom column is BLANK — fill after OT3098 v2 unzip")
+print("[chrom_map] NOTE: fasta_chrom column is BLANK — fill after OT3098 v2 unzip")
 print()
 print("===== DONE =====")

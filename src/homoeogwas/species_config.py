@@ -18,12 +18,11 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 
 # ---------------------------------------------------------------------------
 # Sub-models
@@ -44,7 +43,7 @@ class Subgenome(BaseModel):
         description="Copy number (1 for typical allopolyploid, "
                     "≥2 only for autopolyploid which is out-of-scope)",
     )
-    donor: Optional[str] = Field(None, description="Metadata: ancestral donor species, "
+    donor: str | None = Field(None, description="Metadata: ancestral donor species, "
                                                     "e.g. 'Aegilops tauschii' for wheat D")
     chroms: list[str] = Field(..., min_length=1)
 
@@ -66,8 +65,8 @@ class GenoSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    vcf: Optional[Path] = None
-    bed_root: Optional[Path] = None
+    vcf: Path | None = None
+    bed_root: Path | None = None
     layout: Literal["single", "per_chrom"] = "single"
 
     @model_validator(mode="after")
@@ -85,7 +84,7 @@ class QCConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     maf_min: float = Field(0.01, ge=0.0, le=0.5)
-    hwe_min_p: Optional[float] = None          # null = filter off
+    hwe_min_p: float | None = None          # null = filter off
     missingness_max: float = Field(0.1, ge=0.0, le=1.0)
 
 
@@ -95,13 +94,13 @@ class Provenance(BaseModel):
 
     model_config = ConfigDict(extra="allow")  # allow any metadata field
 
-    panel_name: Optional[str] = None
-    panel_source: Optional[str] = None
-    panel_n_sample: Optional[int] = None
-    reference_assembly: Optional[str] = None
-    reference_doi: Optional[str] = None
-    reference_paper: Optional[str] = None
-    notes: Optional[str] = None
+    panel_name: str | None = None
+    panel_source: str | None = None
+    panel_n_sample: int | None = None
+    reference_assembly: str | None = None
+    reference_doi: str | None = None
+    reference_paper: str | None = None
+    notes: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -133,15 +132,15 @@ class SpeciesConfig(BaseModel):
     pheno: Path
 
     # === optional w/ default ===
-    sample_map: Optional[Path] = None
+    sample_map: Path | None = None
     dosage_model: Literal["diploidized", "dosage_0_to_n", "presence_absence"] = "diploidized"
     loco_unit: Literal["chrom", "subgenome"] = "chrom"
     dl_model_window: int = Field(6144, ge=128)
     dl_candidate_window: int = Field(100_000, ge=1_000)
     qc: QCConfig = Field(default_factory=QCConfig)
-    known_qtl_tsv: Optional[Path] = None
-    homoeolog_map: Optional[Path] = None
-    provenance: Optional[Provenance] = None
+    known_qtl_tsv: Path | None = None
+    homoeolog_map: Path | None = None
+    provenance: Provenance | None = None
 
     # ---------------------------------------------------------------------
     # Structural cross-field validation (Tier 2 in the dual-plan validator)
@@ -200,7 +199,7 @@ class ValidationReport(BaseModel):
     n_chroms_total: int
     n_chroms_in_chrom_map: int
     n_chroms_resolved_to_fasta: int
-    n_samples_in_pheno: Optional[int]
+    n_samples_in_pheno: int | None
     n_known_qtl: int
     warnings: list[str]
 
@@ -216,7 +215,7 @@ def validate_species_config(cfg: SpeciesConfig, *, project_root: Path) -> Valida
     known QTL columns, dosage_model x genome_type sanity)."""
     warnings: list[str] = []
 
-    def _resolve(p: Optional[Path]) -> Optional[Path]:
+    def _resolve(p: Path | None) -> Path | None:
         if p is None:
             return None
         return p if p.is_absolute() else (project_root / p)
@@ -317,7 +316,7 @@ def validate_species_config(cfg: SpeciesConfig, *, project_root: Path) -> Valida
 
 
 def load_species_config(
-    yaml_path: str | Path, *, validate: bool = True, project_root: Optional[Path] = None
+    yaml_path: str | Path, *, validate: bool = True, project_root: Path | None = None
 ) -> SpeciesConfig:
     """Load + optionally validate a species YAML file.
 
