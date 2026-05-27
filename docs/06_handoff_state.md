@@ -1,4 +1,23 @@
-# 06 — Handoff State(2026-05-25,Phase 0-3 + Phase 5a-5d 全部完成)
+# 06 — Handoff State(2026-05-26 更新,Phase 0-5e + Phase 4 release + RC 修复 全完成)
+
+## ★ 2026-05-26 会话更新(最新,先读这段)
+
+**Phase 4 v1.0 release ✅(代码侧全完成)**:GitHub repo `Shipeng-Yang/HomoeoGWAS`(Private,SSH 配好)+ tag v1.0.0 + pyproject 1.0.0 + CITATION.cff + conda recipe + benchmark notebook(notebooks/benchmark_figures.py,Table1+Fig2-3)+ Snakemake DAG verified + reproducibility fingerprints。**git push 用户暂缓**(待软件定型;本地 5 commit 领先 origin:fede8a8/8256eaf/a70298c/97e49b5/bb79244)。Zenodo DOI 同样暂缓。详见 memory phase4_release。
+
+**REF-match 45-50% 修复 ✅**(memory refmatch_rc_fix):根因 = **strand flip**(~40% array 等位在反链)非装配错。harmonize 加 RC 分支(comp(fasta_base)∈{a1,a2}→ref=fasta_base,alt=comp(other),beta 不动)+ palindrome 标记。**全 panel REF 修到 85-98%**(horvath 85% / cotton 93% / rice 90% / oat 98% / wheat 100% v1)。主图 lift holding(bloom 0.70→0.80)。oat post-fix:BIO6 +0.058 / SOC **-0.092** / BIO12 **+0.105**(异质稳)。**fuse chrom-dtype bug 修复**(纯数字 chrom panel rice 暴露,字母-chrom panel 无影响,旧结果无需重跑)。audit 表 results/phase4/refmatch_rc_audit/。
+
+**Phase 5e 水稻二倍体 panel ✅**(memory rice_diploid_panel):RiceVarMap2 529 acc × 4.69M SNP(本地 regubreed），IRGSP-1.0，**genome_type=diploid n_sub=1 实测可用**。LOCO λ 0.94-1.10;M3.2 抽穗 11/12 回收(GW5/sd1 top hit 命中);M3.3 DL prior Heading +0.25 / Grain_width +0.20 / Grain_length 0 / Plant_height 0。**定位 = supplementary 二倍体泛化旁证,不撑主卖点**(二倍体上退化成标准 LMM+DL prior)。Codex PASS_WITH_TIGHTEN:paper-prep 前需统一候选协议/敏感性(防 per-trait p_max cherry-pick)。
+
+**DL prior 诚实定位锁定**(memory dl_prior_positioning):lift 来自**别人预训练模型**非我们训练;贡献 = calibrated fusion + 跨倍性系统评估。核心创新 = 多倍体框架。
+
+**Phase 6 / v2.0 提案固化**(memory phase6_paralogy_aware_dl,3 轮 dual-plan 收敛):训自研 **paralogy-aware causal prior**(轻量微调 + homoeolog-aware hard negative + cross-fit stacking),2×3080 够,MVP 6-8 周。训练物种策略:self-model 标签从玉米/拟南芥等克隆基因富集物种廉价扩。**先收尾 v1.0 再启**。
+
+**下一步** = v1.0 paper(Phase 5f)vs Phase 6 先做 —— 2026-05-26 dual-plan 规划(见 memory + 本次会话)。
+
+---
+
+# (以下为 2026-05-25 及更早状态)
+## 06 — Handoff State(2026-05-25,Phase 0-3 + Phase 5a-5d 全部完成)
 
 > **新会话先读**:`docs/00_charter.md`(冻结 claim & 硬指标;K_hom 已降级 2026-05-24)→ `docs/07_panel_tiers.md`(panel 分级)→ `docs/09_phase2_progress.md`(Phase 2 子里程碑详情)→ 本文(总进度 + 下一步)。
 
