@@ -1,8 +1,8 @@
 site_name: HomoeoGWAS
 site_description: Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS
-site_url: https://u7-gwas.github.io/homoeogwas/
-repo_url: https://github.com/U7-GWAS/homoeogwas
-repo_name: U7-GWAS/homoeogwas
+site_url: https://shipeng-yang.github.io/HomoeoGWAS/
+repo_url: https://github.com/Shipeng-Yang/HomoeoGWAS
+repo_name: Shipeng-Yang/HomoeoGWAS
 
 theme:
   name: material
