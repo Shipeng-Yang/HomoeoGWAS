@@ -1,9 +1,9 @@
-"""Generalized per-subgenome split for any allopolyploid species (Phase 5a Step 2).
+"""Generalized per-subgenome split for any allopolyploid species.
 
-Drives ``bcftools`` (chrom subset + concat) and ``plink2`` (BED/pgen
-import + QC) from a ``configs/species/<species>.yaml``. The intent is
-that adding a new species (e.g. strawberry 8n, peanut 4n, Jerusalem
-artichoke 6n) requires writing a YAML — never editing this module.
+Drives ``bcftools`` (chrom subset + concat) and ``plink2`` (BED/pgen import +
+QC) from a ``configs/species/<species>.yaml``. Adding a new species (e.g.
+strawberry 8n, peanut 4n, Jerusalem artichoke 6n) should require writing a
+YAML, not editing this module.
 
 Pipeline per subgenome (j ∈ {A, B, D, …}):
 
@@ -180,7 +180,7 @@ def plan_split(
             plink2_cmd += ["--hwe", str(cfg.qc.hwe_min_p)]
         plink2_cmd += [
             "--max-alleles", "2", "--snps-only",
-            # Auto-fill SNP IDs (cotton "." pitfall from M3.4 v2 docs/06)
+            # auto-fill SNP IDs (avoids the cotton "." variant-id pitfall)
             "--set-all-var-ids", "@:#",
             "--new-id-max-allele-len", "200", "missing",
             "--threads", str(threads),

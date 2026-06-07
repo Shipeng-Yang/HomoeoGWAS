@@ -246,29 +246,16 @@ def fit_reml(
     )
 
 
-# =====================================================================
-# Phase 2 M2.4 — Multi-kernel REML (J >= 1 random-effect kernels)
-# =====================================================================
+# Multi-kernel REML (J >= 1 random-effect kernels)
 #
-# Model
-# -----
 #     y = X β + Σ_j u_j + e,    u_j ~ N(0, σ²_j K_j),    e ~ N(0, σ²_e I)
 #
-# Algorithm: box-constrained L-BFGS-B over raw σ² (no exp(θ) reparam,
-# because true σ² = 0 boundary is interior to the model and needed for
-# proper LRT inference; the Davies / Stram-Lee 50:50 chi² mixture only
-# makes sense if the optimizer can sit at the constraint).
-#
-# Linear algebra: scipy.linalg.cho_factor / cho_solve at each likelihood
-# eval. n is small here (Horvath 429; wheat ~1000) so O(n³) per call is
-# trivial.
-#
-# Identifiability:
-#  - "boundary_zero" when PVE_j < boundary_eps (scale-invariant)
-#  - kernel collinearity matrix (off-diag Pearson corr of vec(K_j))
-#  - design condition number of [vec(K_1) … vec(I)]
-# These three together let a user distinguish "no genetic signal in
-# subgenome j" from "K_j is essentially a linear combination of K_others".
+# Box-constrained L-BFGS-B over raw σ² (no exp(θ) reparam, because the σ² = 0
+# boundary must be reachable for the Davies / Stram-Lee 50:50 chi² mixture LRT).
+# n is small (a few hundred to ~1000), so the O(n³) cho_factor/cho_solve per
+# likelihood eval is cheap. Three diagnostics distinguish "no signal in
+# subgenome j" from "K_j is collinear with the others": PVE_j boundary flag,
+# pairwise vec(K_j) correlations, and the design condition number.
 
 
 @dataclass
@@ -324,7 +311,6 @@ def _neg_log_reml_multi(
     from scipy.linalg import cho_factor, cho_solve
 
     V = _build_V(sigma2, K_list, n)
-    # Cholesky with one jitter retry on failure
     try:
         c, lower = cho_factor(V, lower=True, check_finite=False)
     except np.linalg.LinAlgError:
@@ -403,27 +389,25 @@ def fit_multi_reml(
     random_state: int | None = None,
     start_scale: tuple[float, float] = (1e-3, 1e1),
 ) -> MultiREMLResult:
-    """Fit y = X β + Σ_j u_j + e with multiple GRM-like kernels.
-
-    Optimization: scipy L-BFGS-B over raw σ² with box bounds.
+    """Fit y = X β + Σ_j u_j + e with multiple GRM-like kernels via L-BFGS-B
+    over raw σ² with box bounds.
 
     Args:
-        y, X, kernels: as before.
-        init / bounds: as before.
-        boundary_eps: PVE_j < boundary_eps (paper-grade PVE = σ²·trace(K)/n  Σ),
-            or for "e" additionally σ²_e ≤ lower_bound·(1+1e-6), → flagged in
-            ``boundary_components`` (may include "e"). Scale-invariant under K↦cK.
+        y, X, kernels, init, bounds: as in fit_reml / above.
+        boundary_eps: a component is flagged in ``boundary_components`` when
+            its PVE < boundary_eps (PVE = σ²·trace(K)/n, normalized); for "e"
+            also when σ²_e ≤ lower_bound·(1+1e-6). Scale-invariant under K↦cK.
         eig_tol: each kernel must have min eigval ≥ −eig_tol after symmetrize;
-            (−eig_tol, 0) eigs are clipped to 0; below raises.
+            eigs in (−eig_tol, 0) are clipped to 0, below raises.
         jitter: V + jitter·var(y)·I on Cholesky retry.
-        n_starts: total optimizer starts (must be ≥ 1); start 0 = deterministic;
-            starts ≥ 1 sample σ²_j = var(y) · exp(U(log start_scale[0], log start_scale[1]))
-            (log-uniform), then clipped into bounds.
+        n_starts: number of optimizer starts (≥ 1); start 0 is deterministic,
+            the rest draw σ²_j log-uniformly over var(y)·start_scale, clipped
+            into bounds.
         random_state: seed for multi-start sampling.
-        start_scale: (lo, hi) bounds for log-uniform draw, scaled by var(y).
+        start_scale: (lo, hi) bounds for the log-uniform draw, scaled by var(y).
 
     Returns:
-        MultiREMLResult with paper-grade PVE = σ²_j·trace(K_j)/n  Σ.
+        MultiREMLResult, with PVE = σ²_j·trace(K_j)/n normalized.
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
@@ -452,7 +436,6 @@ def fit_multi_reml(
         if not np.all(np.isfinite(K)):
             raise ValueError(f"kernels[{name!r}] contains non-finite values")
         K_sym = 0.5 * (K + K.T).astype(np.float64)
-        # PSD validation
         eigs = np.linalg.eigvalsh(K_sym)
         min_eig = float(eigs.min())
         kernel_min_eig[name] = min_eig
@@ -464,7 +447,7 @@ def fit_multi_reml(
                 f"n_below_tol={int((eigs < -eig_tol).sum())}"
             )
         if n_clipped > 0:
-            # Reconstruct K from clipped eigvals
+            # rebuild K from the clipped eigenvalues
             evals, evecs = np.linalg.eigh(K_sym)
             evals = np.clip(evals, 0.0, None)
             K_sym = (evecs * evals) @ evecs.T
@@ -473,7 +456,6 @@ def fit_multi_reml(
     if not (np.all(np.isfinite(y)) and np.all(np.isfinite(X))):
         raise ValueError("y / X must be all finite")
 
-    # validate multi-start params
     if n_starts < 1:
         raise ValueError(f"n_starts must be ≥ 1, got {n_starts}")
     if not (start_scale[0] > 0 and start_scale[1] > 0 and start_scale[0] < start_scale[1]):
@@ -484,7 +466,6 @@ def fit_multi_reml(
         raise ValueError(f"var(y)={var_y} non-positive")
     jitter_var = jitter * var_y
 
-    # default init
     def _default_init() -> np.ndarray:
         a = np.empty(J + 1, dtype=np.float64)
         a[:J] = 0.3 * var_y / J
@@ -497,7 +478,6 @@ def fit_multi_reml(
             init_arr_default[j] = float(init.get(name, 0.3 * var_y / J))
         init_arr_default[J] = float(init.get("e", 0.7 * var_y))
 
-    # bounds
     if bounds is None:
         bounds_list = [(0.0, var_y * 1e4)] * J + [(var_y * 1e-8, var_y * 1e4)]
     else:
@@ -508,13 +488,11 @@ def fit_multi_reml(
         lo_e, hi_e = bounds.get("e", (var_y * 1e-8, var_y * 1e4))
         bounds_list.append((float(lo_e), float(hi_e)))
 
-    # Multi-start
     rng = np.random.default_rng(random_state)
     starts = [init_arr_default]
     for _ in range(max(0, n_starts - 1)):
         u = rng.uniform(np.log(start_scale[0]), np.log(start_scale[1]), size=J + 1)
         scaled = np.exp(u) * var_y
-        # respect bounds (clip into feasible region)
         for k in range(J + 1):
             lo_k, hi_k = bounds_list[k]
             scaled[k] = float(np.clip(scaled[k], lo_k, hi_k))
@@ -544,7 +522,7 @@ def fit_multi_reml(
     sigma2_hat = best_res.x.astype(np.float64)
     log_lik = float(-best_res.fun)
 
-    # final β via best fit V
+    # final β at the best-fit V
     V = _build_V(sigma2_hat, K_list, n)
     from scipy.linalg import cho_factor, cho_solve
     try:
@@ -556,7 +534,7 @@ def fit_multi_reml(
     Vinv_y = cho_solve((c, lo), y, check_finite=False)
     beta = np.linalg.solve(XtVinvX, X.T @ Vinv_y)
 
-    # σ² dict + paper-grade PVE = σ²·trace(K)/n component-wise
+    # component-wise PVE = σ²·trace(K)/n, normalized
     sigma2_dict = {kernel_names[j]: float(sigma2_hat[j]) for j in range(J)}
     sigma2_dict["e"] = float(sigma2_hat[J])
     component_var = {kernel_names[j]: float(sigma2_hat[j] * np.trace(K_list[j]) / n)
@@ -565,13 +543,12 @@ def fit_multi_reml(
     total_var = sum(component_var.values())
     pve = {k: (v / total_var if total_var > 0 else 0.0) for k, v in component_var.items()}
 
-    # Boundary detection — uses scale-invariant PVE threshold + bound-hit check
+    # boundary detection: scale-invariant PVE threshold + lower-bound hit
     boundary_components: list[str] = []
     for k_name in sigma2_dict.keys():
         pve_k = pve[k_name]
         if k_name == "e":
             lo_e = bounds_list[-1][0]
-            # 'e' boundary: σ²_e hit lower bound (within rel tol) OR PVE_e < boundary_eps
             if sigma2_dict[k_name] <= lo_e * (1 + 1e-6) or pve_k < boundary_eps:
                 boundary_components.append(k_name)
         else:
@@ -605,31 +582,17 @@ def fit_multi_reml(
     )
 
 
-# =====================================================================
-# Phase 5a Step 3 — auto-fallback wrapper around fit_multi_reml
-# =====================================================================
+# Auto-fallback wrapper around fit_multi_reml.
 #
-# Rationale (Codex review v2 finding #2):
+# The Hadamard K_hom often gives no detectable variance component (PVE_hom ≈ 0,
+# σ²_hom at the lower bound), e.g. with modest sample size, ≥4 subgenomes (the
+# tensor goes sparse), or an ill-conditioned [vec(K_j), vec(I)] design. When
+# that happens the additive-only model is the right headline.
 #
-#   Hadamard K_hom in v1 wheat/Horvath fit gave no detectable variance
-#   component (M2.4.4/M2.4.5: PVE_hom ≈ 0 with σ²_hom hitting the lower
-#   bound). For new polyploid species the same fate is likely whenever
-#   (a) sample size is modest, (b) subgenome count is ≥4 making the
-#   tensor too sparse, or (c) the design matrix [vec(K_j), vec(I)] is
-#   ill-conditioned. In all such cases the paper should report
-#   additive-only as the headline model, not pretend Hadamard "worked".
-#
-# This wrapper builds K_hom from per-subgenome GRMs via
-# ``kernel.build_homoeolog_kernel`` (Hadamard for ≤3 subgenomes,
-# pairwise-mean for ≥4), fits the full model, inspects the result, and
-# automatically refits without K_hom when:
-#
-#   - σ²_hom hit its lower bound  ("K_hom" in boundary_components), OR
-#   - kernel_design_cond > cond_threshold (default 1e4), OR
-#   - PVE_hom < pve_floor (default 1e-3, paper-grade negligible).
-#
-# The returned MultiREMLAutoResult carries both fits + a reason string,
-# so the caller / paper can be transparent about which model was used.
+# This wrapper builds K_hom via kernel.build_homoeolog_kernel, fits the full
+# model, and refits without K_hom when σ²_hom hits its lower bound,
+# kernel_design_cond > cond_threshold, or PVE_hom < pve_floor. The returned
+# result keeps both fits plus a reason string.
 
 
 @dataclass

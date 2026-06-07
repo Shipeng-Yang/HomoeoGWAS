@@ -41,7 +41,7 @@ class Subgenome(BaseModel):
     copy_number: int = Field(
         1, ge=1, alias="copy",
         description="Copy number (1 for typical allopolyploid, "
-                    "≥2 only for autopolyploid which is out-of-scope)",
+                    ">=2 only for autopolyploid which is out-of-scope)",
     )
     donor: str | None = Field(None, description="Metadata: ancestral donor species, "
                                                     "e.g. 'Aegilops tauschii' for wheat D")

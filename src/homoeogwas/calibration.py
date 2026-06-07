@@ -1,34 +1,25 @@
-"""Null-simulation calibration for the multi-kernel variance-component LRT
-(Phase 2 M2.4.3).
+"""Null-simulation calibration for the multi-kernel variance-component LRT.
 
-Validates that the M2.4.2 boundary-corrected LRT — and, optionally, the
-parametric bootstrap LRT — controls type-I error under H0 (a variance
-component truly equal to 0). This is a Phase 2 exit gate: a multi-kernel LRT
-is only trustworthy once its false-positive rate is shown to match nominal α.
+Checks that the boundary-corrected LRT (and, optionally, the parametric
+bootstrap LRT) controls type-I error under H0, i.e. a variance component
+truly equal to 0.
 
-Approach
---------
-For a ``NullSimulationScenario`` (which fixes the *true* variance components,
+For a ``NullSimulationScenario`` (which fixes the true variance components,
 with the tested component(s) pinned to 0), simulate ``n_sim`` phenotypes
 
     y_b = X β  +  L z,    V_true = σ²_e I + Σ_j σ²_j K_j,    L Lᵀ = V_true
 
 refit the nested pair with the same direct REML objective, and record the
-LRT statistic together with three p-values:
+LRT statistic plus three p-values: asymptotic χ²_df (``p_naive``), the
+boundary-corrected Stram-Lee binomial chi-bar (``p_mixture``), and the
+optional Phipson-Smyth parametric bootstrap (``bootstrap_p``).
 
-  - ``p_naive``    asymptotic χ²_df            (boundary-ignorant)
-  - ``p_mixture``  Stram-Lee binomial chi-bar  (boundary-corrected)
-  - ``bootstrap_p``Phipson-Smyth parametric bootstrap (optional, expensive)
-
-Calibration is summarised as the empirical type-I rate at nominal α with a
-Wilson confidence interval. The boundary LRT p-value has a point mass at 1
-(when T=0), so it is *not* continuous-Uniform — KS / standard λ_GC are
-inappropriate; lower-tail rejection ``P(p ≤ α)`` is the correct check, and a
-chi-bar tail-inflation ratio replaces λ_GC.
-
-per-SNP QQ / λ_GC are intentionally out of scope: there is no per-SNP
-association scan yet (slated for M2.5); this module calibrates the
-variance-component LRT only.
+Calibration is the empirical type-I rate at nominal α with a Wilson CI.
+The boundary p-value has a point mass at 1 (when T=0) and is not
+continuous-Uniform, so KS / standard λ_GC do not apply: lower-tail rejection
+``P(p ≤ α)`` is the check, and a chi-bar tail-inflation ratio replaces λ_GC.
+Per-SNP QQ / λ_GC are out of scope; this calibrates the variance-component
+LRT only.
 """
 from __future__ import annotations
 
@@ -53,9 +44,8 @@ from .lmm import fit_multi_reml
 _Z95 = 1.959963984540054  # standard normal 97.5% quantile
 
 
-# =====================================================================
 # chi-bar-square helpers (Self-Liang / Stram-Lee binomial mixture)
-# =====================================================================
+
 
 def _chibar_weights(df_added: int) -> dict[int, float]:
     """Binomial chi-bar weights {j: C(k,j)/2^k} for k = df_added boundary comps."""
@@ -115,16 +105,15 @@ def _wilson_ci(n_reject: int, n: int, z: float = _Z95) -> tuple[float, float]:
     return (float(max(0.0, center - half)), float(min(1.0, center + half)))
 
 
-# =====================================================================
 # Scenario + result types
-# =====================================================================
+
 
 @dataclass(frozen=True)
 class NullSimulationScenario:
     """A null-hypothesis simulation scenario for one nested LRT contrast.
 
-    The tested component(s) (alt-not-null kernels) MUST have sigma2_true == 0:
-    this is what makes it a *null* scenario.
+    The tested component(s) (alt-not-null kernels) must have sigma2_true == 0;
+    that is what makes it a null scenario.
     """
     name: str
     null_model: str
@@ -156,9 +145,8 @@ class NullCalibrationResult:
     bootstrap_B: int | None
 
 
-# =====================================================================
 # Scenario construction
-# =====================================================================
+
 
 def _kernels_of_model(model_name: str) -> list[str]:
     """Parse a default model name ('A+C+e' -> ['A','C'], 'e' -> []).
@@ -186,12 +174,12 @@ def scenario_from_reduced_fit(
     random_state: int | None = None,
     description: str = "",
 ) -> NullSimulationScenario:
-    """Build a null scenario by fitting the *reduced* (null) model on real y.
+    """Build a null scenario by fitting the reduced (null) model on real y.
 
-    The null model is fit on the observed phenotype to obtain realistic
-    σ² / β; the tested component(s) (alt-not-null) are pinned to 0. Using the
-    reduced fit — not the full model — keeps the tested component's real
-    signal/noise out of the null simulation.
+    The null model is fit on the observed phenotype to get realistic σ² / β;
+    the tested component(s) are pinned to 0. Using the reduced fit rather than
+    the full model keeps the tested component's real signal out of the null
+    simulation.
 
     Args:
         name: scenario label.
@@ -200,9 +188,6 @@ def scenario_from_reduced_fit(
         null_model, alt_model: default-style names ('e', 'A+e', 'A+C+e'); must
             be strict-nested.
         n_starts, random_state: passed to fit_multi_reml for the reduced fit.
-
-    Returns:
-        NullSimulationScenario.
     """
     null_k = _kernels_of_model(null_model)
     alt_k = _kernels_of_model(alt_model)
@@ -228,9 +213,9 @@ def scenario_from_reduced_fit(
     for k in alt_k:
         sigma2_true[k] = float(red.sigma2[k]) if k in null_k else 0.0
 
-    # Surface a degenerate null: if the reduced fit pushed σ²_e to its boundary,
-    # the null simulation is a near-zero-residual null and the Stram-Lee
-    # analytic mixture is only approximate (the residual is a boundary nuisance).
+    # Flag a degenerate null: if the reduced fit pushed σ²_e to its boundary,
+    # the simulation is a near-zero-residual null and the Stram-Lee analytic
+    # mixture is only approximate.
     red_bc = sorted(getattr(red, "boundary_components", []) or [])
     residual_pve = float(red.pve.get("e", float("nan")))
     residual_boundary = "e" in red_bc
@@ -265,17 +250,15 @@ def scenario_from_reduced_fit(
     )
 
 
-# =====================================================================
 # Simulation
-# =====================================================================
+
 
 def _covariance_from_sigma2(
     sigma2: dict[str, float], kernels: dict[str, np.ndarray], n: int
 ) -> np.ndarray:
     """V = σ²_e I + Σ_j σ²_j K_j from explicit true variance components.
 
-    Each K_j is PSD-projected (mirrors fit_multi_reml) so the simulated
-    covariance matches the kernel the likelihood uses.
+    Each K_j is PSD-projected (mirrors fit_multi_reml).
     """
     V = float(sigma2["e"]) * np.eye(n, dtype=np.float64)
     for name, K in kernels.items():
@@ -354,16 +337,13 @@ def run_null_lrt_calibration(
         alphas: nominal type-I levels to report.
         seed: master seed; SeedSequence spawns independent (y, fit, bootstrap)
             states per replicate, so results are n_jobs-invariant.
-        fit_kwargs: passed to compare_nested_reml's fit_kwargs (e.g. n_starts);
-            must NOT set random_state (per-replicate controlled).
-        n_jobs: 1 = serial; >1 = joblib parallel (loky caps BLAS threads).
+        fit_kwargs: passed to compare_nested_reml (e.g. n_starts); must not set
+            random_state (per-replicate controlled).
+        n_jobs: 1 = serial; >1 = joblib parallel.
         bootstrap_B: if set, also run a parametric bootstrap LRT per replicate
             (expensive: n_sim × B refits) and calibrate bootstrap_p.
         bootstrap_fit_kwargs: passed to parametric_bootstrap_lrt.
         require_converged: forwarded to parametric_bootstrap_lrt.
-
-    Returns:
-        NullCalibrationResult.
     """
     X = np.ascontiguousarray(X, dtype=np.float64)
     if X.ndim != 2:
@@ -384,7 +364,7 @@ def run_null_lrt_calibration(
         K = kernels[k]
         if not (isinstance(K, np.ndarray) and K.shape == (n, n)):
             raise ValueError(f"kernels[{k!r}] must be ({n},{n}), got {getattr(K,'shape',None)}")
-    # Null sanity: tested components must be truly absent.
+    # Tested components must be truly absent for a null scenario.
     for t in scenario.tested_components:
         if float(scenario.sigma2_true.get(t, 0.0)) != 0.0:
             raise ValueError(
@@ -404,7 +384,7 @@ def run_null_lrt_calibration(
     if beta.shape != (X.shape[1],):
         raise ValueError(f"scenario.beta shape {beta.shape} != (p={X.shape[1]},)")
 
-    # True covariance + Cholesky (reused across all replicates).
+    # True covariance + Cholesky, reused across all replicates.
     V_true = _covariance_from_sigma2(scenario.sigma2_true, sub_kernels, n)
     mean_diag = float(np.trace(V_true) / n)
     L_V, jitter_used = _cholesky_with_jitter(V_true, mean_diag)
@@ -464,7 +444,7 @@ def run_null_lrt_calibration(
                 )
                 row["bootstrap_p"] = float(bres.bootstrap_p)
             return row
-        except Exception as e:  # noqa: BLE001 — one bad replicate must not kill the run
+        except Exception as e:  # noqa: BLE001 one bad replicate must not kill the run
             row = {
                 "sim_id": sim_id, "success": False,
                 "lrt": float("nan"), "lrt_raw": float("nan"), "df_added": scenario.df_added,
@@ -497,7 +477,6 @@ def run_null_lrt_calibration(
             RuntimeWarning, stacklevel=2,
         )
 
-    # type-I summary
     methods = ["p_naive", "p_mixture"]
     if bootstrap_B is not None:
         methods.append("bootstrap_p")

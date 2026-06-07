@@ -1,13 +1,13 @@
 """Genotype I/O for HomoeoGWAS.
 
-最小实现:从 PLINK1 .bed 读 hard-call allele-count 矩阵
-({0,1,2}, NaN = missing),用 bed-reader 后端。
+Reads PLINK1 .bed hard-call allele-count matrices ({0,1,2}, NaN = missing) via
+the bed-reader backend.
 
 Conventions:
 - shape (n_samples, n_variants), float32
 - missing -> NaN
-- dosage 字段当前只承载 BED hard calls,不是 imputed/DS dosage
-- 不做 imputation,后续步骤(GRM 计算)显式处理 NaN
+- the dosage field carries BED hard calls only, not imputed/DS dosage
+- no imputation here; downstream GRM code handles NaN explicitly
 """
 from __future__ import annotations
 
@@ -135,10 +135,9 @@ def vcf_to_bed(vcf_gz: str | Path, out_prefix: str | Path, threads: int = 8) -> 
     if bed.exists():
         return bed
     out.parent.mkdir(parents=True, exist_ok=True)
-    # 解析 plink2 绝对路径(subprocess 不一定继承 PATH)
-    plink2 = shutil.which("plink2") or "/home/yys05/.local/share/mamba/envs/polygwas-cpu/bin/plink2"
-    if not Path(plink2).exists():
-        raise FileNotFoundError(f"plink2 not found (looked up via PATH and fallback {plink2})")
+    plink2 = shutil.which("plink2")
+    if plink2 is None:
+        raise FileNotFoundError("plink2 not found on PATH")
     cmd = [
         plink2, "--vcf", str(vcf_gz), "--make-bed",
         "--out", str(out), "--threads", str(threads),

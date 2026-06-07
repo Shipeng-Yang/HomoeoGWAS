@@ -1,7 +1,7 @@
-"""Per-SNP association scan under the subgenome-stratified LMM (Phase 2 M2.5).
+"""Per-SNP association scan under the subgenome-stratified LMM.
 
-EMMAX / P3D style: the variance components are estimated once genome-wide (the
-M2.4 multi-kernel REML); each marker is then tested with the covariance V held
+EMMAX / P3D style: variance components are estimated once genome-wide
+(multi-kernel REML), then each marker is tested with the covariance V held
 fixed. The per-SNP test reduces to a fixed projection:
 
     V   = σ²_e I + Σ_j σ²_j K_j                    (absolute variance comps)
@@ -9,14 +9,10 @@ fixed. The per-SNP test reduces to a fixed projection:
     U_g = g'P y,   I_g = g'P g
     γ̂   = U_g / I_g,   SE = √(1/I_g),   χ² = U_g²/I_g  ~  χ²₁
 
-Batched over markers this is one GEMM ``P @ G`` — the GPU-accelerated kernel.
+Batched over markers this is one GEMM ``P @ G``.
 
-v1 (this module): in-memory genotype scan, CPU (numpy) + single-GPU (torch)
-backends, validated on Horvath. Wheat-scale streaming I/O, 2-GPU
-data-parallel, and leave-one-chromosome-out are M2.5-v2.
-
-proximal contamination: the scanned marker also sits in the GRM. v1 is a
-standard EMMAX/P3D scan and does not correct for it (LOCO is v2).
+The scanned marker also sits in the GRM (proximal contamination); the plain
+EMMAX/P3D scan does not correct for it. Use the LOCO variants for that.
 """
 from __future__ import annotations
 
@@ -26,10 +22,6 @@ import numpy as np
 
 _CHI2_1_MEDIAN = 0.4549364231195724   # median of the χ²₁ distribution
 
-
-# =====================================================================
-# Scan context (the fixed projection P)
-# =====================================================================
 
 @dataclass(frozen=True)
 class ScanContext:
@@ -75,14 +67,13 @@ def build_scan_context(
 
     Args:
         y: phenotype (n,).
-        X: fixed-effect design (n,p); MUST include an intercept column.
-        kernels: {name: K (n,n)} — the GRM-like kernels of the null model.
+        X: fixed-effect design (n,p); must include an intercept column.
+        kernels: {name: K (n,n)} GRM-like kernels of the null model.
         sigma2: absolute variance components from fit_multi_reml, keys =
             kernel names + "e". V = σ²_e I + Σ σ²_j K_j (phenotype scale).
-        sample_ids: optional (n,) IID order; stored so scan_snps can align
+        sample_ids: optional (n,) IID order, stored so scan_snps can align
             genotypes to it.
-        dtype: working dtype ("float64").
-        check_tol: tolerance for the P symmetry / P@X≈0 sanity checks.
+        check_tol: tolerance for the P symmetry / P@X≈0 checks.
 
     Returns:
         ScanContext.
@@ -128,7 +119,7 @@ def build_scan_context(
     P = Vinv - VinvX @ mid
     P = 0.5 * (P + P.T)
 
-    # sanity: P symmetric, P @ X ≈ 0  (P annihilates the fixed effects)
+    # P must be symmetric and annihilate the fixed effects (P @ X ≈ 0)
     sym_err = float(np.max(np.abs(P - P.T)))
     px_err = float(np.max(np.abs(P @ X)))
     scale = max(float(np.max(np.abs(P))), 1.0)
@@ -155,10 +146,6 @@ def build_scan_context(
         jitter_used=float(jitter), dtype=dtype,
     )
 
-
-# =====================================================================
-# Scan result
-# =====================================================================
 
 @dataclass(frozen=True)
 class ScanResult:
@@ -191,10 +178,6 @@ def lambda_gc(chi2: np.ndarray) -> float:
         return float("nan")
     return float(np.median(chi2) / _CHI2_1_MEDIAN)
 
-
-# =====================================================================
-# Batched score-test core
-# =====================================================================
 
 def _scan_batch_cpu(P: np.ndarray, Py: np.ndarray, G: np.ndarray):
     """U = G'Py, info = diag(G'PG) for a SNP batch G (n,B). numpy float64."""
@@ -235,8 +218,9 @@ def _resolve_backend(backend: str) -> str:
 def _impute_filter_batch(G_raw: np.ndarray, maf_min: float, call_rate_min: float):
     """Mean-impute missing, compute QC, return (G, keep, cr, maf, n_obs, var).
 
-    G_raw: (n, B) with NaN missing. Per SNP: fill NaN with non-missing mean.
-    keep: bool (B,) — False if all-missing / call_rate / MAF / zero-variance fails.
+    G_raw: (n, B) with NaN missing; per SNP, NaN is filled with the
+    non-missing mean. keep is False on all-missing / call_rate / MAF /
+    zero-variance failure.
     """
     n = G_raw.shape[0]
     obs = np.isfinite(G_raw)
@@ -273,9 +257,9 @@ def scan_snps(
 
     Args:
         context: ScanContext from build_scan_context.
-        geno: a GenoChunk (io.GenoChunk) — dosage (n,m) in {0,1,2,NaN}, with
-            samples / variant_ids / chrom / pos. If context.sample_ids is set
-            and geno.samples is present, rows are re-ordered to match.
+        geno: an io.GenoChunk with dosage (n,m) in {0,1,2,NaN} plus
+            samples / variant_ids / chrom / pos. Rows are reordered to match
+            context.sample_ids when both that and geno.samples are present.
         backend: "cpu" / "gpu" / "auto".
         batch_size: SNPs per GEMM batch.
         maf_min, call_rate_min: per-SNP QC thresholds; failing SNPs are dropped.
@@ -289,7 +273,7 @@ def scan_snps(
     if dosage.ndim != 2:
         raise ValueError(f"geno.dosage must be 2D, got {dosage.shape}")
 
-    # --- sample alignment (the #1 correctness risk) -------------------
+    # align genotype rows to context.sample_ids
     if context.sample_ids is not None and getattr(geno, "samples", None) is not None:
         geno_ids = np.asarray(geno.samples, dtype=object)
         if len(set(geno_ids.tolist())) != geno_ids.shape[0]:
@@ -336,7 +320,7 @@ def scan_snps(
         end = min(start + batch_size, m)
         G_raw = dosage[:, start:end]
         G, keep, cr, maf, n_obs, var = _impute_filter_batch(G_raw, maf_min, call_rate_min)
-        # tally QC drops (a SNP can fail several tests; attribute to the first)
+        # a SNP can fail several tests; attribute the drop to the first
         for j in np.where(~keep)[0]:
             if n_obs[j] == 0 or not np.isfinite(var[j]) or var[j] <= 0.0:
                 filt["zero_var_or_allmiss"] += 1
@@ -425,14 +409,14 @@ def scan_bed_stream(
     """Stream a per-SNP scan over a BED too large to hold in memory.
 
     Reads the BED in ``chunk_size``-variant chunks (io.iter_bed_chunks), runs
-    the batched fixed-V score test per chunk, and *appends* results to a TSV
-    (gzip by default). A tens-of-millions-of-marker scan cannot return a
-    ScanResult — this returns a StreamScanSummary instead.
+    the batched fixed-V score test per chunk, and appends results to a TSV
+    (gzip by default). Returns a StreamScanSummary rather than a per-SNP
+    ScanResult, which would not fit in memory at tens of millions of markers.
 
     Args:
         context: ScanContext from build_scan_context (carries P, Py, sample_ids).
         bed_prefix: PLINK1 BED prefix to scan.
-        out_path: output TSV(.gz) path; written incrementally.
+        out_path: output TSV(.gz) path, written incrementally.
         backend: "cpu" / "gpu" / "auto".
         chunk_size: variants per IO+compute chunk.
         maf_min, call_rate_min: per-SNP QC thresholds.
@@ -560,26 +544,14 @@ def write_scan_tsv(result: ScanResult, path) -> None:
     df.to_csv(path, sep="\t", index=False)
 
 
-# =====================================================================
-# Leave-one-chromosome-out (LOCO) scan (Phase 3 — M3.1)
-# =====================================================================
+# Leave-one-chromosome-out (LOCO) scan.
 #
-# Proximal contamination: the standard EMMAX/P3D fixed-V scan uses a single
-# genome-wide GRM, so the test SNP also sits inside the polygenic kernel —
-# its true cis-effect gets partially absorbed into u and the score test
-# loses power. LOCO rebuilds K_j(-c) for each chrom c by excluding chrom-c
-# markers from the GRM, then constructs a fresh P_(-c) (V_(-c)^-1 minus the
-# fixed-effect projection) per chrom. The variance components σ² are *not*
-# re-fit (EMMAX-LOCO / FastLMM-LOCO / BOLT-LOCO convention) — they drift
-# <1% across leave-one-chrom subsets in real panels, and refitting would
-# couple null-model changes into the LOCO contrast.
-#
-# Engine surface added:
-#   • LOCOContext             — dict[chrom -> ScanContext] + shared metadata
-#   • build_loco_scan_contexts — y/X/kernels_by_chrom -> LOCOContext
-#   • scan_snps_loco          — in-memory LOCO scan (Horvath-scale)
-#   • scan_bed_stream_loco    — streaming LOCO scan (wheat-scale)
-# The standard scan_snps / scan_bed_stream stay untouched.
+# The plain fixed-V scan uses a single genome-wide GRM, so the test SNP sits
+# inside the polygenic kernel and its cis-effect is partially absorbed into u,
+# costing power. LOCO rebuilds K_j(-c) per chrom c by excluding chrom-c markers
+# from the GRM and forms a fresh P_(-c). Variance components σ² are not re-fit
+# (EMMAX/FastLMM/BOLT-LOCO convention): they drift <1% across leave-one-chrom
+# subsets, and refitting would couple null-model changes into the contrast.
 
 
 @dataclass(frozen=True)
@@ -739,9 +711,9 @@ def scan_snps_loco(
     Args mirror :func:`scan_snps`; LOCO routing is automatic.
 
     Raises:
-        KeyError: if a variant's chrom is not in ``loco_ctx.contexts`` —
-            LOCO has no defined behaviour for an unknown chrom; fail fast
-            rather than silently fall back to a global P.
+        KeyError: if a variant's chrom is not in ``loco_ctx.contexts``; LOCO
+            has no defined behaviour there, so fail fast rather than fall back
+            to a global P.
     """
     from scipy import stats
 
@@ -923,8 +895,7 @@ def scan_bed_stream_loco(
                         P_t = torch.as_tensor(ctx_c.P, dtype=torch.float64, device=device)
                         Py_t = torch.as_tensor(ctx_c.Py, dtype=torch.float64, device=device)
                     cached_chrom = c_name
-                # within-run sub-batching: a run can fit a chunk (≤chunk_size)
-                # but split further keeps GPU GEMM tiles predictable.
+                # sub-batch within a run to keep GPU GEMM tiles predictable
                 run_batch = min(chunk_size, r_end - r_start)
                 if run_batch <= 0:
                     continue

@@ -1,4 +1,4 @@
-"""Unit tests for src/homoeogwas/grm.py — M2.1 scaffold acceptance."""
+"""Unit tests for src/homoeogwas/grm.py."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,9 +33,7 @@ def test_grm_shape_and_psd():
     chunk = _toy_chunk(n=60, m=500)
     G, info = compute_grm(chunk)
     assert G.shape == (60, 60)
-    # symmetric
     assert np.allclose(G, G.T, atol=1e-10)
-    # PSD: smallest eigenvalue >= -tol
     eigvals = np.linalg.eigvalsh(G)
     assert eigvals.min() > -1e-6, f"GRM not PSD, min eigval={eigvals.min()}"
 
@@ -45,7 +43,7 @@ def test_grm_trace_approx_n():
     n = 100
     chunk = _toy_chunk(n=n, m=5000, seed=42)
     G, info = compute_grm(chunk)
-    # 应该 trace ≈ n;允许 ~5% 偏差 (有限 m 噪声 + missing imputation)
+    # trace ~ n, allowing ~5% slack from finite m and missing imputation
     rel_err = abs(info["trace"] - n) / n
     assert rel_err < 0.05, f"trace(G)={info['trace']:.2f}, expected ~{n}, rel_err={rel_err:.3f}"
 
@@ -53,7 +51,7 @@ def test_grm_trace_approx_n():
 def test_grm_maf_filter():
     """MAF filter should drop monomorphic variants."""
     chunk = _toy_chunk(n=50, m=200, maf_lo=0.1)
-    # 人为往前 10 个 variant 注入全 0 (monomorphic)
+    # Force the first 10 variants to be monomorphic (all zero)
     X = chunk.dosage.copy()
     X[:, :10] = 0
     chunk2 = GenoChunk(

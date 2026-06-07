@@ -1,4 +1,4 @@
-"""Unit tests for src/homoeogwas/lmm.py — Phase 2 M2.3."""
+"""Unit tests for src/homoeogwas/lmm.py."""
 from __future__ import annotations
 
 import numpy as np
@@ -19,7 +19,7 @@ def _simulate(n: int, h2_true: float, seed: int) -> tuple[np.ndarray, np.ndarray
     """y = X β + u + e with known σ_g² and σ_e² implied by h²."""
     rng = np.random.default_rng(seed)
     K = _toy_psd(n, r=30, seed=seed)
-    # Normalize trace to n so σ_g² 直接对 h² 解读
+    # Normalize trace to n so sigma_g2 reads directly as h2
     K *= n / np.trace(K)
     sigma_g2 = h2_true
     sigma_e2 = 1.0 - h2_true
@@ -48,7 +48,7 @@ def test_reml_recovers_h2_on_synthetic_data():
     """With n=200 + decent kernel, profiled REML should recover h² within 0.1."""
     y, X, K, sigma_g2_true, sigma_e2_true = _simulate(n=200, h2_true=0.6, seed=42)
     res = fit_reml(y, X, K, backend="cpu")
-    # h² 估计应在真值 ±0.15 内 (有限样本 noise)
+    # h2 estimate should land near the true value within finite-sample noise
     assert abs(res.h2 - 0.6) < 0.2, f"h² estimate {res.h2} far from true 0.6"
 
 
@@ -56,13 +56,13 @@ def test_reml_clips_tiny_negative_eigenvalues():
     """Small negative eigenvalues from roundoff get clipped, larger ones raise."""
     n = 30
     K = _toy_psd(n, r=10, seed=0)
-    # 注入 tiny 负值 (within eig_tol)
+    # Inject a tiny negative eigenvalue within eig_tol
     K_bad_tiny = K - 1e-12 * np.eye(n)
     y = np.random.default_rng(0).standard_normal(n)
     X = np.ones((n, 1))
     res = fit_reml(y, X, K_bad_tiny, backend="cpu", eig_tol=1e-8)
     assert np.isfinite(res.h2)
-    # 注入 large 负值
+    # Inject a large negative eigenvalue
     K_bad_big = K - 0.5 * np.eye(n)
     with pytest.raises(ValueError, match="not be PSD|< -eig_tol"):
         fit_reml(y, X, K_bad_big, backend="cpu", eig_tol=1e-8)
@@ -102,7 +102,7 @@ def test_reml_backend_gpu_missing_cupy_raises():
         assert res_auto.backend_used == "gpu"
         res_gpu = fit_reml(y, X, K, backend="gpu")
         assert res_gpu.backend_used == "gpu"
-        # CPU/GPU 一致性
+        # CPU and GPU backends should agree
         res_cpu = fit_reml(y, X, K, backend="cpu")
         assert abs(res_cpu.log_lik - res_gpu.log_lik) < 1e-4
         assert abs(res_cpu.h2 - res_gpu.h2) < 1e-4

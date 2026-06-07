@@ -1,13 +1,8 @@
-"""Diagnostics for multi-kernel REML (Phase 2 M2.4.2).
+"""Diagnostics for multi-kernel REML.
 
-Public functions:
-- ``compare_nested_reml(y, X, kernels, model_specs)``: fit nested models with
-  the *same* direct REML objective so log-likelihoods are LRT-comparable.
-- ``residual_only_reml(y, X)``: closed-form REML for σ²_e-only null model.
-
-Result types:
-- ``NestedREMLComparison``: container with per-model fits + likelihood table.
-- ``ResidualOnlyResult``: lightweight result for J=0 model.
+``compare_nested_reml`` fits nested models with the same direct REML
+objective so their log-likelihoods are LRT-comparable; ``residual_only_reml``
+is the closed-form REML for the residual-only (J=0) null.
 """
 from __future__ import annotations
 
@@ -26,8 +21,8 @@ from .lmm import MultiREMLResult, fit_multi_reml
 @dataclass
 class ResidualOnlyResult:
     """REML fit of y = X β + e (no random-effect kernel)."""
-    sigma2: dict[str, float]            # {"e": σ²_e}
-    pve: dict[str, float]               # {"e": 1.0}
+    sigma2: dict[str, float]
+    pve: dict[str, float]
     component_var: dict[str, float]
     beta: np.ndarray
     log_lik: float
@@ -44,13 +39,10 @@ class ResidualOnlyResult:
 def residual_only_reml(y: np.ndarray, X: np.ndarray) -> ResidualOnlyResult:
     """Closed-form REML for y = X β + e, e ~ N(0, σ²_e I).
 
-    REML log-likelihood (direct, same constants as fit_multi_reml):
-        L = -0.5 [ log|V| + log|X'V⁻¹X| + (y-Xβ̂)' V⁻¹ (y-Xβ̂) ]
-    With V = σ²_e I, this is
-        L = -0.5 [ n log σ²_e + log|X'X / σ²_e| + RSS / σ²_e ]
-          = -0.5 [ (n-p) log σ²_e + log|X'X| + RSS / σ²_e ]
-    REML estimator: σ²_e_hat = RSS / (n-p).
-    At optimum L = -0.5 [(n-p) log σ²_e_hat + log|X'X| + (n-p)].
+    Uses the same likelihood constants as fit_multi_reml so the returned
+    log_lik is comparable. With V = σ²_e I the REML estimator is
+    σ²_e_hat = RSS / (n-p), and at the optimum
+    L = -0.5 [(n-p) log σ²_e_hat + log|X'X| + (n-p)].
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
@@ -89,7 +81,7 @@ class NestedREMLComparison:
     """Nested-model REML comparison."""
     fits: dict[str, MultiREMLResult | ResidualOnlyResult]
     model_specs: dict[str, list[str]]   # {model_name: [kernel_names]}
-    likelihood_table: pd.DataFrame      # cols: model, kernels, n, p, log_lik, n_components, n_params, sigma2_json, pve_json, boundary_components, optimizer_status, n_iter
+    likelihood_table: pd.DataFrame
     kernels_used: list[str]
 
 
@@ -99,9 +91,9 @@ def _default_model_specs(
 ) -> dict[str, list[str]]:
     """Build a default nested model spec dict.
 
-    - 'exhaustive': all 2^J subsets + residual-only (2^J+1 models). Good for J ≤ 3.
-    - 'leave_one_out': null + J leave-one-out + full (J+2 models).
-    - 'singletons': null + per-kernel singletons + full (J+2 models).
+    Strategies: 'exhaustive' (all 2^J subsets + residual-only, for J <= 3),
+    'leave_one_out' (null + J leave-one-out + full), 'singletons' (null +
+    per-kernel singletons + full).
     """
     specs: dict[str, list[str]] = {"e": []}
     J = len(kernel_names)
@@ -142,16 +134,13 @@ def compare_nested_reml(
 
     Args:
         y, X: as in fit_multi_reml.
-        kernels: master dict of all kernel matrices (only those referenced in
+        kernels: master dict of kernel matrices (only those referenced in
             model_specs are used).
-        model_specs: {model_name: [kernel_names]}.
-            Empty list = residual-only (uses closed-form REML).
-            Default: auto-generate via ``strategy``.
-        strategy: ignored if model_specs given.
-        fit_kwargs: extra kwargs passed to ``fit_multi_reml`` (e.g. n_starts).
-
-    Returns:
-        NestedREMLComparison.
+        model_specs: {model_name: [kernel_names]}; an empty list means
+            residual-only (closed-form REML). Auto-generated via ``strategy``
+            if None.
+        strategy: ignored when model_specs is given.
+        fit_kwargs: extra kwargs for ``fit_multi_reml`` (e.g. n_starts).
     """
     fit_kwargs = dict(fit_kwargs or {})
     kernel_names = list(kernels.keys())
@@ -168,7 +157,7 @@ def compare_nested_reml(
             res = fit_multi_reml(y, X, sub_kernels, **fit_kwargs)
         fits[model_name] = res
 
-        # Track number of free parameters: J genetic + 1 residual + p fixed
+        # Free params: J genetic + 1 residual + p fixed.
         n_genetic = len(k_names)
         n_params = n_genetic + 1 + X.shape[1]
 
@@ -196,21 +185,16 @@ def compare_nested_reml(
     )
 
 
-# =====================================================================
-# Phase 2 M2.4.2 Step 3 — Boundary-Corrected LRT
-# =====================================================================
+# Boundary-corrected LRT.
 #
-# When testing H0: σ²_j = 0 (variance component on boundary of parameter
-# space), the asymptotic LRT statistic does NOT follow chi²_k. Instead
-# it follows a chi-square mixture (Self-Liang 1987; Stram-Lee 1994):
-#
-#     T ~ Σ_j w_j chi²_j     where w_j = C(k, j) · 2^(-k)
-#
-# For k=1 boundary component: 50:50 mixture of chi²_0 (point mass) and chi²_1.
-# For k=2: 25:50:25 over chi²_0/1/2.
-# The binomial weights assume k INDEPENDENT components (diagonal Fisher info)
-# — correlated kernels (e.g. K_A K_C in cultivar panels) make these
-# approximate; Step 4 parametric bootstrap p-value is the ground truth.
+# When testing H0: σ²_j = 0, the variance component sits on the boundary of
+# the parameter space, so the LRT statistic is not chi²_k but a chi-square
+# mixture (Self-Liang 1987; Stram-Lee 1994):
+#     T ~ Σ_j w_j chi²_j,   w_j = C(k, j) · 2^(-k)
+# k=1 gives a 50:50 mixture of chi²_0 (point mass) and chi²_1; k=2 gives
+# 25:50:25 over chi²_0/1/2. The binomial weights assume k independent
+# components; correlated kernels make them approximate, in which case the
+# parametric bootstrap p-value is the reference.
 
 
 @dataclass(frozen=True)
@@ -221,18 +205,18 @@ class BoundaryLRTResult:
     ll_null: float
     ll_alt: float
     statistic: float                       # max(0, statistic_raw)
-    statistic_raw: float                   # 2·(ll_alt − ll_null), possibly negative
+    statistic_raw: float                   # 2·(ll_alt − ll_null), may be negative
     df_added: int
     p_naive: float                         # asymptotic chi²_df
     p_mixture: float                       # boundary-corrected mixture
     mixture_weights: dict[int, float]      # {j: w_j}
     added_components: tuple[str, ...]
-    null_boundary_components: tuple[str, ...]  # boundary fits in NULL model — caveat for LRT
+    null_boundary_components: tuple[str, ...]  # boundary fits in the null model
     is_nested: bool
-    clipped: bool                          # True if statistic_raw < 0 was clipped
+    clipped: bool                          # statistic_raw < 0 was clipped
     both_converged: bool
     boundary_method: str = "self-liang-stram-lee-binomial"
-    bootstrap_p: float | None = None       # filled by Step 4 if available
+    bootstrap_p: float | None = None       # filled by the bootstrap step if run
 
 
 def lrt_boundary_pvalue(
@@ -244,13 +228,10 @@ def lrt_boundary_pvalue(
     """Compute (p_naive, p_mixture, weights) for a boundary-corrected LRT.
 
     Args:
-        statistic: T = max(0, 2(ll_alt − ll_null)). If non-positive, returns
-            p_mixture = 1.0 (inclusive upper tail at the atom T=0).
-        df_added: number of variance components tested at boundary (k ≥ 1).
-        weights: optional override; default binomial {j: C(k,j)/2^k for j=0..k}.
-
-    Returns:
-        (p_naive, p_mixture, weights).
+        statistic: T = max(0, 2(ll_alt − ll_null)); non-positive yields
+            p_mixture = 1.0 (the atom at T=0).
+        df_added: number of variance components tested at the boundary (k >= 1).
+        weights: optional override; default binomial {j: C(k,j)/2^k}.
     """
     from math import comb
 
@@ -262,7 +243,6 @@ def lrt_boundary_pvalue(
         denom = 2.0 ** df_added
         weights = {j: comb(df_added, j) / denom for j in range(df_added + 1)}
     else:
-        # Validate user weights
         w_sum = sum(weights.values())
         if abs(w_sum - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {w_sum}")
@@ -278,7 +258,6 @@ def lrt_boundary_pvalue(
             p_mix += w * (1.0 if T <= 0 else 0.0)
         else:
             p_mix += w * float(stats.chi2.sf(T, df=j))
-    # Clamp to [0,1] for floating noise
     p_naive = float(np.clip(p_naive, 0.0, 1.0))
     p_mix = float(np.clip(p_mix, 0.0, 1.0))
     return p_naive, p_mix, dict(weights)
@@ -294,7 +273,7 @@ def _extract_added_components(
         raise KeyError(f"alt_model {alt_model!r} not in comparison.fits")
     null_k = set(comparison.model_specs[null_model])
     alt_k = set(comparison.model_specs[alt_model])
-    is_strict = null_k < alt_k     # strict subset
+    is_strict = null_k < alt_k
     added = tuple(sorted(alt_k - null_k))
     return added, is_strict
 
@@ -366,11 +345,8 @@ def boundary_lrt(
 
 
 def _default_pairs(comparison: NestedREMLComparison) -> list[tuple[str, str]]:
-    """Default LRT pair set for paper tables:
-      1. each-singleton vs null ('e' → 'A+e', 'e' → 'C+e', ...)
-      2. full vs each leave-one-out
-      3. full vs null
-    Pairs that don't exist in comparison.model_specs are skipped.
+    """Default LRT pairs: null vs each singleton, each leave-one-out vs full,
+    and null vs full. Pairs absent from comparison.model_specs are skipped.
     """
     specs = comparison.model_specs
     full_models = [name for name, ks in specs.items() if len(ks) == max(len(v) for v in specs.values())]
@@ -379,24 +355,24 @@ def _default_pairs(comparison: NestedREMLComparison) -> list[tuple[str, str]]:
     full = full_models[0] if full_models else None
     pairs: list[tuple[str, str]] = []
 
-    # 1. null → each-singleton
+    # null -> each singleton
     if null is not None:
         for name, ks in specs.items():
             if len(ks) == 1:
                 pairs.append((null, name))
 
-    # 2. each-leave-one-out → full
+    # each leave-one-out -> full
     if full is not None:
         full_set = set(specs[full])
         for name, ks in specs.items():
             if len(ks) == len(full_set) - 1 and set(ks) < full_set:
                 pairs.append((name, full))
 
-    # 3. null → full
+    # null -> full
     if null is not None and full is not None and null != full:
         pairs.append((null, full))
 
-    # De-dup while preserving order
+    # De-dup, preserving order.
     seen: set[tuple[str, str]] = set()
     dedup: list[tuple[str, str]] = []
     for p in pairs:
@@ -416,12 +392,9 @@ def boundary_lrt_table(
 
     Args:
         comparison: NestedREMLComparison from compare_nested_reml().
-        pairs: 'default' (paper-style 5 contrasts) / 'all_nested' (every strict
-            nested pair) / explicit list of (null_model, alt_model).
+        pairs: 'default' (paper-style contrasts), 'all_nested' (every strict
+            nested pair), or an explicit list of (null_model, alt_model).
         lrt_negative_tol: clip T_raw below this and warn.
-
-    Returns:
-        pandas DataFrame with one row per LRT.
     """
     if pairs == "default":
         pair_list = _default_pairs(comparison)
@@ -464,28 +437,21 @@ def boundary_lrt_table(
     return pd.DataFrame(rows)
 
 
-# =====================================================================
-# Phase 2 M2.4.2 Step 4 — Parametric Bootstrap for LRT
-# =====================================================================
+# Parametric bootstrap for the LRT.
 #
-# Simulate y_b under fitted null (β̂_null, V̂_null = Σ σ²_j K_j + σ²_e I),
-# refit null + alt with same direct REML, T_b = max(0, 2(ll_alt_b - ll_null_b)),
-# Phipson-Smyth p = (1 + #{T_b ≥ T_obs}) / (n_usable + 1).
-#
-# Used when correlated kernels make binomial chi-bar mixture weights only
-# asymptotic; bootstrap is finite-sample ground truth.
-#
-# Calibration safeguards (so T_obs and T_b are the SAME numerical process):
-#  - bootstrap refits inherit the observed fits' n_starts by default; a
-#    smaller n_starts is allowed but warns (anti-conservative risk).
-#  - only replicates whose null AND alt refits converge enter the p-value
-#    (require_converged=True); non-converged finite T_b can underestimate
-#    the alt optimum.
+# Simulate y_b under the fitted null (β̂_null, V̂_null = Σ σ²_j K_j + σ²_e I),
+# refit null + alt with the same direct REML, T_b = max(0, 2(ll_alt_b - ll_null_b)),
+# and form the Phipson-Smyth p = (1 + #{T_b ≥ T_obs}) / (n_usable + 1).
+# Used when correlated kernels make the binomial chi-bar weights only
+# asymptotic. Two safeguards keep T_obs and T_b the same numerical process:
+# bootstrap refits inherit the observed n_starts (a smaller value warns), and
+# only replicates whose null and alt refits both converge enter the p-value
+# (non-converged finite T_b can underestimate the alt optimum).
 
 
 @dataclass(frozen=True)
 class BootstrapLRTResult:
-    """Parametric bootstrap LRT result. Wraps observed BoundaryLRTResult."""
+    """Parametric bootstrap LRT result; wraps the observed BoundaryLRTResult."""
     boundary: BoundaryLRTResult      # observed LRT; .bootstrap_p is backfilled
     bootstrap_p: float
     B_requested: int
@@ -493,16 +459,16 @@ class BootstrapLRTResult:
     B_usable: int                    # replicates entering the p-value
     seed: int | None
     T_boot: np.ndarray
-    converged: np.ndarray            # (B,) bool: both null & alt optimizer.success
-    clipped: np.ndarray              # (B,) bool: T_raw < 0
-    success: np.ndarray              # (B,) bool: finite T_b (no exception)
+    converged: np.ndarray            # (B,) both null & alt converged
+    clipped: np.ndarray              # (B,) T_raw < 0
+    success: np.ndarray              # (B,) finite T_b (no exception)
     converged_rate: float
     clip_rate: float
     success_rate: float              # B_success / B
     usable_rate: float               # B_usable / B
     quantiles: dict[str, float]      # {"q05","q50","q95","q99"} of T_boot[usable]
-    mcse: float                      # Monte Carlo standard error of bootstrap_p
-    jitter_used: float = 0.0         # Cholesky jitter on V̂_null (0 = exact V̂_null)
+    mcse: float                      # Monte Carlo SE of bootstrap_p
+    jitter_used: float = 0.0         # Cholesky jitter on V̂_null (0 = exact)
     n_starts_bootstrap: int = 1      # n_starts used to refit each replicate
     simulation_model: str = "fitted-null"
 
@@ -510,8 +476,8 @@ class BootstrapLRTResult:
 def _psd_project(K: np.ndarray) -> np.ndarray:
     """Symmetrize K and clip negative eigenvalues to 0.
 
-    Mirrors fit_multi_reml's internal PSD treatment so the bootstrap
-    simulation covariance matches the kernel the fitted likelihood used.
+    Mirrors fit_multi_reml's PSD treatment so the simulation covariance
+    matches the kernel the fitted likelihood used.
     """
     A = np.asarray(K, dtype=np.float64)
     K_sym = 0.5 * (A + A.T)
@@ -527,8 +493,7 @@ def _psd_project(K: np.ndarray) -> np.ndarray:
 def _covariance_from_fit(fit, kernel_names: list[str], kernels: dict[str, np.ndarray]) -> np.ndarray:
     """Reconstruct V = σ²_e I + Σ σ²_j K_j from a fitted result.
 
-    Each K_j is symmetrized and PSD-projected (mirrors fit_multi_reml) so the
-    simulated covariance matches the kernel used by the fitted likelihood.
+    Each K_j is symmetrized and PSD-projected (mirrors fit_multi_reml).
     """
     n = fit.n
     V = float(fit.sigma2["e"]) * np.eye(n, dtype=np.float64)
@@ -583,7 +548,7 @@ def _fit_one_bootstrap_pair(
 
 
 def _bh_adjust(p_array: np.ndarray) -> np.ndarray:
-    """Benjamini-Hochberg FDR q-values. Monotone-enforced from sorted p."""
+    """Benjamini-Hochberg FDR q-values, monotone-enforced from sorted p."""
     p_arr = np.asarray(p_array, dtype=np.float64)
     n = len(p_arr)
     if n == 0:
@@ -594,7 +559,7 @@ def _bh_adjust(p_array: np.ndarray) -> np.ndarray:
     p_sorted = p_arr[order]
     ranks = np.arange(1, n + 1)
     q_sorted = p_sorted * n / ranks
-    # Enforce monotone (q_(i) ≤ q_(i+1)): take cum-min from right
+    # Enforce monotonicity via a right-to-left cumulative minimum.
     q_sorted = np.minimum.accumulate(q_sorted[::-1])[::-1]
     q_sorted = np.clip(q_sorted, 0.0, 1.0)
     q = np.empty(n, dtype=np.float64)
@@ -619,36 +584,31 @@ def parametric_bootstrap_lrt(
     require_converged: bool = True,
     on_failure: Literal["raise", "warn"] = "raise",
 ) -> BootstrapLRTResult:
-    """Parametric bootstrap LRT (simulate under fitted null).
+    """Parametric bootstrap LRT, simulating under the fitted null.
 
-    Simulates y_b ~ N(X β̂_null, V̂_null), refits null + alt with the *same*
-    direct REML objective, and forms T_b = max(0, 2(ll_alt_b − ll_null_b)).
-    p = (1 + #{T_b ≥ T_obs}) / (n_usable + 1)   (Phipson-Smyth).
-
-    For T_obs and T_b to be the *same numerical process*, the bootstrap refits
-    inherit the observed fits' ``n_starts`` by default (override via
-    ``bootstrap_fit_kwargs``); a smaller n_starts is allowed but warns, as it
-    can underestimate the alt optimum and make ``bootstrap_p`` anti-conservative.
+    Simulates y_b ~ N(X β̂_null, V̂_null), refits null + alt with the same
+    direct REML objective, forms T_b = max(0, 2(ll_alt_b − ll_null_b)), and
+    returns the Phipson-Smyth p = (1 + #{T_b ≥ T_obs}) / (n_usable + 1).
 
     Args:
         comparison: NestedREMLComparison from compare_nested_reml.
         null_model, alt_model: model names from comparison.fits; must be
             strict-nested (alt_kernels ⊋ null_kernels).
-        y, X, kernels: original data + design + kernel matrices used for fitting
-            (must match `comparison.fits` shape).
-        B: number of bootstrap replicates (acceptance: 200; paper: 1000+).
-        seed: master seed; np.random.SeedSequence spawns 2 independent child
-            states per replicate (noise draw + refit multi-start), so results
-            are deterministic regardless of n_jobs even when n_starts > 1.
-        bootstrap_fit_kwargs: passed to fit_multi_reml for each replicate;
-            ``n_starts`` defaults to the observed alt fit's n_starts.
+        y, X, kernels: original data, design and kernel matrices used for the
+            fit (must match comparison.fits shape).
+        B: number of bootstrap replicates.
+        seed: master seed; SeedSequence spawns two child states per replicate
+            (noise draw + refit multi-start), so results are deterministic
+            regardless of n_jobs even with n_starts > 1.
+        bootstrap_fit_kwargs: passed to fit_multi_reml per replicate; n_starts
+            defaults to the observed alt fit's n_starts. A smaller value warns,
+            since it can underestimate the alt optimum and make bootstrap_p
+            anti-conservative.
         n_jobs: 1 = serial; >1 = joblib parallel (order-preserving).
-        min_success_rate: raise/warn if B_usable/B < this (default 0.95).
-        require_converged: if True (default), only replicates whose null *and*
-            alt refits report optimizer convergence enter the p-value; finite
-            but non-converged T_b can systematically underestimate the alt
-            optimum. Set False to use all finite T_b (approximate).
-        on_failure: "raise" or "warn" when usable rate violated.
+        min_success_rate: raise/warn if B_usable/B falls below this.
+        require_converged: if True, only replicates whose null and alt refits
+            both converge enter the p-value; set False to use all finite T_b.
+        on_failure: "raise" or "warn" when the usable rate is violated.
 
     Returns:
         BootstrapLRTResult; ``.boundary.bootstrap_p`` is backfilled.
@@ -676,7 +636,7 @@ def parametric_bootstrap_lrt(
             f"{null_model!r}/{alt_model!r}; have {sorted(kernels.keys())}"
         )
 
-    # n_starts inheritance: keep T_obs and T_b the same numerical process.
+    # Inherit n_starts so T_obs and T_b are the same numerical process.
     observed_n_starts = int(getattr(alt_fit, "n_starts", 1) or 1)
     if bootstrap_fit_kwargs is None:
         fit_kwargs = {"n_starts": observed_n_starts}
@@ -711,8 +671,8 @@ def parametric_bootstrap_lrt(
         )
     beta_null = np.asarray(null_fit.beta, dtype=np.float64)
 
-    # Two independent child states per replicate (noise draw + refit RNG), so
-    # determinism holds regardless of n_jobs and n_starts.
+    # Two child states per replicate (noise draw + refit RNG) so determinism
+    # holds regardless of n_jobs and n_starts.
     ss = np.random.SeedSequence(seed)
     seed_pairs: list[tuple[int, int]] = []
     for child in ss.spawn(B):
@@ -750,7 +710,6 @@ def parametric_bootstrap_lrt(
     converged_rate = float(converged.sum() / B)
     clip_rate = float(clipped.sum() / B)
 
-    # Replicates entering the p-value.
     usable = (success & converged) if require_converged else success
     B_usable = int(usable.sum())
     usable_rate = B_usable / B
@@ -775,8 +734,7 @@ def parametric_bootstrap_lrt(
     else:
         n_used = len(T_used)
         bootstrap_p = float((1.0 + np.sum(T_used >= T_obs)) / (n_used + 1.0))
-        # MCSE of the Phipson-Smyth estimate p̂=(K+1)/(n+1), K~Binomial(n,p):
-        #   Var(p̂) = n·p(1−p)/(n+1)²  →  plug in p̂.
+        # MCSE of p̂=(K+1)/(n+1) with K~Binomial(n,p): Var(p̂)=n·p(1−p)/(n+1)².
         mcse = float(
             np.sqrt(max(n_used * bootstrap_p * (1.0 - bootstrap_p), 0.0)) / (n_used + 1.0)
         )
@@ -829,7 +787,6 @@ def bootstrap_lrt_table(
     adjust_method: Literal["bh"] | None = None,
 ) -> pd.DataFrame:
     """Compute parametric bootstrap LRT for multiple (null, alt) pairs."""
-    # Resolve pairs same as boundary_lrt_table
     if pairs == "default":
         pair_list = _default_pairs(comparison)
     elif pairs == "all_nested":
@@ -900,25 +857,17 @@ def bootstrap_lrt_table(
     return table
 
 
-# =====================================================================
-# Phase 2 M2.4.2 Step 5 — PVE Sensitivity Grid
-# =====================================================================
+# PVE sensitivity grid.
 #
-# Re-fit the full multi-kernel REML over a grid of preprocessing /
-# optimizer choices and report how the PVE decomposition drifts:
-#   - y transform:   raw | zscore
-#   - kernel norm:   trace | frobenius | none
-#   - n_starts:      1 | 10
-#
-# The paper-grade PVE (σ²_j·trace(K_j)/n  normalised) is analytically
-# invariant to K↦cK and to affine y transforms (given an intercept in X);
-# this grid demonstrates that empirically. A non-trivial drift on the
-# kernel-norm or y axis therefore signals an *optimizer* problem (local
-# optimum / unconverged), not statistical instability — which is why each
-# cell keeps optimizer_status / n_iter / boundary_components, and n_starts
-# is itself a grid axis (n_starts=10 is the robust anchor). LRT / bootstrap
-# are deliberately NOT rerun per cell: Step 3/4 already cover inference, and
-# bootstrap Monte-Carlo noise would blur the sensitivity claim.
+# Re-fit the full multi-kernel REML over a grid of preprocessing / optimizer
+# choices (y transform raw|zscore, kernel norm trace|frobenius|none, n_starts
+# 1|10) and report how the PVE decomposition drifts. The PVE
+# (σ²_j·trace(K_j)/n, normalised) is analytically invariant to K↦cK and to
+# affine y transforms given an intercept in X, so a non-trivial drift on the
+# kernel-norm or y axis flags an optimizer problem (local optimum /
+# unconverged) rather than statistical instability — hence each cell keeps
+# optimizer_status / n_iter / boundary_components, with n_starts=10 as the
+# robust anchor. LRT / bootstrap are not rerun per cell.
 
 
 _Y_MODES = ("raw", "zscore")
@@ -973,8 +922,8 @@ def _as_int(v: object, what: str) -> int:
 class SensitivityGridResult:
     """PVE sensitivity grid over (y transform × kernel norm × n_starts)."""
     table: pd.DataFrame              # one row per grid cell
-    drift_table: pd.DataFrame        # per (component × axis) PVE drift attribution
-    reference_cell: dict[str, object]  # {"y_mode","kernel_norm","n_starts"}
+    drift_table: pd.DataFrame        # per (component × axis) PVE drift
+    reference_cell: dict[str, object]
     genetic_components: list[str]    # kernel names (PVE_e excluded)
     all_components: list[str]        # kernel names + ["e"]
 
@@ -993,35 +942,34 @@ def pve_sensitivity_grid(
 ) -> SensitivityGridResult:
     """Re-fit the full multi-kernel REML over a preprocessing/optimizer grid.
 
-    Demonstrates that the PVE decomposition (the headline subgenome split) is
-    robust to arbitrary input-scale choices. PVE is analytically invariant to
-    K↦cK and to affine y transforms (given an intercept in X); a non-trivial
-    drift therefore flags an optimizer issue, cross-checked via the per-cell
-    ``optimizer_status`` column (and the n_starts axis, n_starts=10 = anchor).
+    Demonstrates that the PVE decomposition is robust to input-scale choices.
+    PVE is analytically invariant to K↦cK and to affine y transforms given an
+    intercept in X, so a non-trivial drift flags an optimizer issue,
+    cross-checked via the per-cell ``optimizer_status`` and the n_starts axis.
 
     Args:
-        y: phenotype (n,) — RAW values; transforms are applied internally.
+        y: phenotype (n,), raw values; transforms are applied internally.
         X: fixed-effect design (n, p); should contain an intercept column for
             the z-score invariance argument to hold.
-        kernels: {name: K} — RAW base kernels (un-normalized); the grid applies
-            each normalization itself. Passing pre-normalized kernels makes the
+        kernels: {name: K} raw base kernels (un-normalized); the grid applies
+            each normalization itself, so pre-normalized kernels make the
             "none" cell meaningless. Inputs are not mutated.
         y_modes / kernel_norms / n_starts_grid: grid axes.
-        reference: (y_mode, kernel_norm, n_starts) cell that deltas are measured
+        reference: (y_mode, kernel_norm, n_starts) cell deltas are measured
             against; must lie in the grid.
         random_state: passed to every fit_multi_reml (fixed across cells so the
             grid carries no Monte-Carlo noise).
-        fit_kwargs: extra kwargs for fit_multi_reml (e.g. maxiter); must NOT
-            include n_starts / random_state (grid-controlled). Each cell also
-            gets scale-aware ``init`` / ``bounds`` (rescaled by n/trace(K_j) so
-            the σ²_j optimum stays reachable for any kernel norm); passing
-            explicit ``init`` / ``bounds`` here overrides that.
+        fit_kwargs: extra kwargs for fit_multi_reml (e.g. maxiter); must not
+            set n_starts / random_state (grid-controlled). Each cell also gets
+            scale-aware ``init`` / ``bounds`` (rescaled by n/trace(K_j) so the
+            σ²_j optimum stays reachable for any kernel norm) unless explicit
+            ``init`` / ``bounds`` are passed here.
 
     Returns:
         SensitivityGridResult with ``table`` (one row per cell) and
         ``drift_table`` (per component × axis PVE range). Each row carries
         ``optimizer_status`` and ``genetic_upper_bound_hit`` so a numerically
-        unreliable cell is never mistaken for genuine PVE instability.
+        unreliable cell is not mistaken for genuine PVE instability.
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
@@ -1070,20 +1018,18 @@ def pve_sensitivity_grid(
     kernel_names = list(kernels.keys())
     all_components = kernel_names + ["e"]
 
-    # ---- run the grid -------------------------------------------------
     rows: list[dict] = []
     cell_pve: dict[tuple[str, str, int], dict[str, float]] = {}
     for y_mode, k_norm, n_starts in product(y_modes, kernel_norms, n_starts_grid):
         y_c = _transform_y(y, y_mode)
         K_dict = {name: _apply_kernel_norm(kernels[name], k_norm) for name in kernel_names}
 
-        # Scale-aware init / bounds: fit_multi_reml's var(y)-based defaults live
-        # in raw-σ² space, but the data-equivalent scale is σ²_j·trace(K_j)/n.
-        # Rescaling by n/trace(K_j) keeps the σ²_j optimum reachable regardless
-        # of kernel norm (esp. the un-normalized "none" cell with extreme scale).
-        # For trace-norm kernels (trace == n) this is the identity, so trace
-        # cells stay bit-identical to fit_multi_reml defaults. Explicit
-        # fit_kwargs (init / bounds / ...) override these.
+        # Scale-aware init / bounds. fit_multi_reml's var(y)-based defaults are
+        # in raw-σ² space, but the data-equivalent scale is σ²_j·trace(K_j)/n;
+        # rescaling by n/trace(K_j) keeps the σ²_j optimum reachable for any
+        # kernel norm (notably the un-normalized "none" cell). For trace-norm
+        # kernels (trace == n) this is the identity. Explicit fit_kwargs
+        # init / bounds override these.
         var_yc = float(np.var(y_c, ddof=1))
         init_cell: dict[str, float] = {"e": 0.7 * var_yc}
         bounds_cell: dict[str, tuple[float, float]] = {"e": (var_yc * 1e-8, var_yc * 1e4)}
@@ -1098,10 +1044,9 @@ def pve_sensitivity_grid(
             y_c, X, K_dict, n_starts=n_starts, random_state=random_state, **cell_fk,
         )
         cell_pve[(y_mode, k_norm, n_starts)] = dict(res.pve)
-        # Genetic σ²_j pinned at its upper bound ⇒ fit unreliable; surface it so
-        # a pinned-fit drift is never misread as instability. Check against the
-        # bounds actually passed to fit_multi_reml (a user fit_kwargs["bounds"]
-        # wins), falling back to fit_multi_reml's own default for missing keys.
+        # Flag genetic σ²_j pinned at its upper bound so a pinned-fit drift is
+        # not misread as instability. Check against the bounds actually passed
+        # to fit_multi_reml, falling back to its default for missing keys.
         eff_bounds = cell_fk["bounds"]
         ub_hit = False
         for name in kernel_names:
@@ -1135,8 +1080,8 @@ def pve_sensitivity_grid(
             row[f"pve_{comp}"] = float(res.pve[comp])
         rows.append(row)
 
-    # ---- deltas vs reference (PVE only; log_lik is NOT comparable across
-    #      y transforms because the y scale shifts the likelihood) --------
+    # Deltas vs reference, PVE only: log_lik is not comparable across y
+    # transforms because the y scale shifts the likelihood.
     ref_pve = cell_pve[(ref_y, ref_norm, ref_starts)]
     for row in rows:
         max_abs_genetic = 0.0
@@ -1150,9 +1095,8 @@ def pve_sensitivity_grid(
 
     table = pd.DataFrame(rows)
 
-    # ---- drift attribution -------------------------------------------
-    # Isolate each axis by holding the other two at the reference level;
-    # 'global' ranges over the whole grid.
+    # Drift attribution: isolate each axis by holding the other two at the
+    # reference level; 'global' ranges over the whole grid.
     drift_rows: list[dict] = []
     for comp in all_components:
         col = f"pve_{comp}"

@@ -1,21 +1,17 @@
-"""Composite kernels for HomoeoGWAS multi-subgenome LMM (M2.2).
+"""Composite kernels for the HomoeoGWAS multi-subgenome LMM.
 
-Two kernel constructions over per-subgenome GRMs:
+Two constructions over per-subgenome GRMs:
 
-- ``sum_kernel``:    K_sum = Σ_s w_s · G_s
-- ``hadamard_kernel``: K_hom = G_{s1} ⊙ G_{s2} ⊙ … (elementwise across subgenomes)
+- ``sum_kernel``:      K_sum = Σ_s w_s · G_s
+- ``hadamard_kernel``: K_hom = G_{s1} ⊙ G_{s2} ⊙ … (elementwise)
 
-The Hadamard kernel encodes homoeolog co-association: two samples score
-high only if they are jointly related in all subgenomes. ``sum_kernel``
-is the conventional additive null comparison (each subgenome contributes
-independently).
+K_hom encodes homoeolog co-association: two samples score high only if
+jointly related in all subgenomes. K_sum is the conventional additive null
+(subgenomes contribute independently). By the Schur product theorem the
+elementwise product of PSD matrices is PSD, so K_hom stays a valid kernel.
 
-By Schur product theorem, the elementwise product of PSD matrices is PSD,
-so ``K_hom`` stays a valid covariance kernel.
-
-Plus ``normalize_kernel`` scales a kernel so trace == n (or Frobenius == n),
-which makes variance-component magnitudes comparable across kernels in
-downstream REML.
+``normalize_kernel`` rescales a kernel to trace == n (or Frobenius == n) so
+variance-component magnitudes are comparable across kernels in REML.
 """
 from __future__ import annotations
 
@@ -69,19 +65,17 @@ def hadamard_kernel(grms: dict[str, np.ndarray]) -> np.ndarray:
 def pairwise_mean_kernel(grms: dict[str, np.ndarray]) -> np.ndarray:
     """Mean of pairwise Hadamard products: K_pair = (1/C(n,2)) Σ_{i<j} G_i ⊙ G_j.
 
-    For ≥4 subgenomes (strawberry 8n, oat 6n with 3 sub × 2 copies, etc.) the
-    full Hadamard product G_1 ⊙ G_2 ⊙ … becomes numerically sparse
-    (off-diagonal entries decay multiplicatively) and fits poorly in REML.
-    The pairwise-mean variant preserves the cross-subgenome epistasis
-    signal while keeping a usable dynamic range and remaining PSD (each
-    pair-product is PSD by Schur, sum of PSD is PSD).
+    For ≥4 subgenomes the full Hadamard product goes numerically sparse
+    (off-diagonals decay multiplicatively) and fits poorly in REML. The
+    pairwise mean keeps a usable dynamic range, preserves the cross-subgenome
+    epistasis signal, and stays PSD (each pair-product PSD by Schur, sum PSD).
 
     Args:
-        grms: {subgenome -> GRM (n,n)}. Requires ≥2 subgenomes; same shape /
-            finiteness constraints as ``hadamard_kernel``.
+        grms: {subgenome -> GRM (n,n)}, ≥2 subgenomes; same shape / finiteness
+            constraints as ``hadamard_kernel``.
 
     Returns:
-        K_pair: float64 (n,n). PSD.
+        K_pair: float64 (n,n), PSD.
     """
     n, keys = _validate_kernel_dict(grms)
     n_keys = len(keys)
@@ -108,21 +102,17 @@ def build_homoeolog_kernel(
 ) -> tuple[np.ndarray | None, str]:
     """Construct the homoeolog co-association kernel from per-subgenome GRMs.
 
-    Returns ``(K_hom, mode_used)``. When ``mode_used == "none"`` (or there is
-    only one subgenome), the returned kernel is ``None`` and the caller
-    should skip the homoeolog random effect entirely — the additive-only
-    LMM is then the correct null.
+    Returns ``(K_hom, mode_used)``. When ``mode_used == "none"`` (single
+    subgenome or ``mode="none"``) the kernel is ``None`` and the caller should
+    drop the homoeolog random effect; the additive-only LMM is then the null.
 
-    Decision logic (``mode="auto"``):
-      - 1 subgenome  → ``(None, "none")``  (degenerate; nothing to multiply)
-      - 2–``auto_threshold_n`` subgenomes (default 3) → full Hadamard ⊙
-      - >``auto_threshold_n`` subgenomes → pairwise-mean fallback
-        (Hadamard product of ≥4 GRMs is too sparse to be useful in REML)
+    Auto decision:
+      - 1 subgenome → ``(None, "none")`` (nothing to multiply)
+      - 2..``auto_threshold_n`` (default 3) → full Hadamard
+      - >``auto_threshold_n`` → pairwise-mean (≥4-way Hadamard too sparse)
 
-    Explicit modes (``hadamard`` / ``pairwise_mean`` / ``none``) bypass the
-    decision; this lets the paper Methods report a single deterministic mode
-    while the framework still defaults to a numerically safe choice for new
-    species.
+    Explicit modes bypass the decision so Methods can report a single
+    deterministic mode while auto stays numerically safe for new species.
     """
     if mode == "none":
         return None, "none"
@@ -133,7 +123,6 @@ def build_homoeolog_kernel(
         return hadamard_kernel(grms), "hadamard"
     if mode == "pairwise_mean":
         return pairwise_mean_kernel(grms), "pairwise_mean"
-    # auto
     if n_sub <= auto_threshold_n:
         return hadamard_kernel(grms), "hadamard"
     return pairwise_mean_kernel(grms), "pairwise_mean"
@@ -149,8 +138,7 @@ def sum_kernel(
 
     Args:
         grms: {subgenome -> GRM (n,n)}, same constraints as hadamard_kernel.
-        weights: optional {subgenome -> float}. Missing keys default to 1.0
-            so partial weighting is ergonomic.
+        weights: optional {subgenome -> float}; missing keys default to 1.0.
 
     Returns:
         K_sum: float64 (n,n).

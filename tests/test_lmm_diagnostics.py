@@ -1,4 +1,4 @@
-"""Unit tests for diagnostics.py — Phase 2 M2.4.2 Step 2."""
+"""Unit tests for diagnostics.py."""
 from __future__ import annotations
 
 import numpy as np
@@ -50,11 +50,11 @@ def test_residual_only_reml_matches_ols_variance():
     """σ²_e_hat = RSS/(n-p) from OLS."""
     n = 100
     rng = np.random.default_rng(0)
-    y = 3.0 + rng.standard_normal(n) * 2.0   # σ_e=2, σ²_e=4
+    y = 3.0 + rng.standard_normal(n) * 2.0   # sigma_e=2, sigma2_e=4
     X = np.ones((n, 1))
     res = residual_only_reml(y, X)
     assert isinstance(res, ResidualOnlyResult)
-    # OLS: β=mean, σ²_e_hat ≈ var(y) (ddof=1)
+    # OLS: beta=mean, sigma2_e_hat ~ var(y) with ddof=1
     expected_sigma2 = float(np.var(y, ddof=1))
     assert abs(res.sigma2["e"] - expected_sigma2) < 1e-9
     assert res.pve == {"e": 1.0}
@@ -87,9 +87,7 @@ def test_compare_nested_reml_4_models_J2():
     cmp = compare_nested_reml(y, X, {"A": K_A, "C": K_C}, strategy="exhaustive")
     assert isinstance(cmp, NestedREMLComparison)
     assert set(cmp.fits.keys()) == {"e", "A+e", "C+e", "A+C+e"}
-    # likelihood_table 应有 4 行
     assert len(cmp.likelihood_table) == 4
-    # 列名
     expected_cols = {"model", "kernels", "n", "p", "log_lik", "n_components", "n_params"}
     assert expected_cols <= set(cmp.likelihood_table.columns)
 
@@ -130,10 +128,6 @@ def test_compare_nested_reml_fit_kwargs_propagate():
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
-
-# =====================================================================
-# Phase 2 M2.4.2 Step 3 — Boundary-Corrected LRT tests
-# =====================================================================
 
 def test_lrt_boundary_pvalue_k1_at_3_84_gives_one_half_chi2_sf():
     """k=1 at chi²_1 95% crit (T=3.841): p_naive ≈ 0.05, p_mix ≈ 0.025."""
@@ -188,9 +182,9 @@ def test_boundary_lrt_full_vs_null_horvath_style():
     assert res.is_nested is True
     assert res.statistic >= 0
     assert res.statistic_raw == 2.0 * (res.ll_alt - res.ll_null)
-    # 2-kernel test 在 simulated data (强 signal) 上 p < 0.05
+    # Strong simulated signal, so the 2-kernel test should be significant
     assert res.p_mixture < 0.05
-    # p_mixture < p_naive (boundary correction tightens)
+    # boundary correction tightens the p-value
     assert res.p_mixture <= res.p_naive + 1e-12
 
 
@@ -203,7 +197,7 @@ def test_boundary_lrt_rejects_non_nested():
     # Same model
     with pytest.raises(ValueError, match="not strictly nested"):
         boundary_lrt(cmp, "A+e", "A+e")
-    # reverse order (alt 嵌套 null,不行)
+    # reversed order: alt nested in null
     with pytest.raises(ValueError, match="not strictly nested"):
         boundary_lrt(cmp, "A+C+e", "A+e")
 
@@ -213,9 +207,8 @@ def test_boundary_lrt_warns_on_negative_statistic(monkeypatch):
     import warnings
     y, K_A, K_C, X = _simulate_2kernel(n=100, sig2_A=0.4, sig2_C=0.3, sig2_e=0.3, seed=2)
     cmp = compare_nested_reml(y, X, {"A": K_A, "C": K_C})
-    # 人为造负:把 alt log_lik 改小
+    # Force a negative statistic by lowering the alt log_lik
     cmp.fits["A+C+e"] = cmp.fits["A+C+e"]
-    # 用 __setattr__ since dataclass might be frozen — actually MultiREMLResult is NOT frozen
     object.__setattr__(cmp.fits["A+C+e"], "log_lik", cmp.fits["e"].log_lik - 1.0)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -238,7 +231,7 @@ def test_boundary_lrt_table_default_pairs_horvath():
         "clipped", "both_converged", "bootstrap_p",
     }
     assert expected_cols <= set(table.columns)
-    # 应包含 (e, A+C+e) with df=2
+    # should include (e, A+C+e) with df=2
     assert any(
         (table.null_model == "e") & (table.alt_model == "A+C+e") & (table.df_added == 2)
     )
@@ -265,18 +258,12 @@ def test_boundary_lrt_null_boundary_components_positive_case():
     verify boundary_lrt surfaces it in null_boundary_components."""
     y, K_A, K_C, X = _simulate_2kernel(n=150, sig2_A=0.5, sig2_C=0.3, sig2_e=0.2, seed=5)
     cmp = compare_nested_reml(y, X, {"A": K_A, "C": K_C})
-    # 强制把 'A' 加入 A+e null fit 的 boundary_components
+    # Force 'A' into the boundary_components of the A+e null fit
     null_fit = cmp.fits["A+e"]
-    # MultiREMLResult 不是 frozen,直接赋值
     null_fit.boundary_components = list(null_fit.boundary_components) + ["A"]
     res = boundary_lrt(cmp, "A+e", "A+C+e")
-    # null_kernels = {"A"}, boundary ∩ null_kernels = {"A"}
     assert res.null_boundary_components == ("A",)
 
-
-# =====================================================================
-# Phase 2 M2.4.2 Step 4 — Parametric Bootstrap LRT tests
-# =====================================================================
 
 def test_parametric_bootstrap_lrt_returns_valid_p():
     """B=50 small sim, default n_jobs=1, p ∈ [1/(B+1), 1]."""
@@ -324,24 +311,21 @@ def test_parametric_bootstrap_lrt_phipson_smyth_lower_bound():
 
 
 def test_parametric_bootstrap_lrt_under_null_uniform_T_distribution():
-    """When K_A真值 σ²=0 (true null), T_b should have many zeros / small values
-    and bootstrap p should NOT be small (most T_b >= T_obs)."""
+    """Under a true null (sigma2_A=0), bootstrap p should not be small."""
     # Sim: K_A=0 but include K_A in model
     y, K_A, K_C, X = _simulate_2kernel(n=200, sig2_A=0.0, sig2_C=0.5, sig2_e=0.5, seed=3)
     cmp = compare_nested_reml(y, X, {"A": K_A, "C": K_C})
-    # Test A on top of (C+e), null is "C+e": sigma_A=0 真值 → bootstrap p 应该不显著
+    # Test A on top of (C+e); true sigma2_A=0 so the p-value should be non-significant
     res = parametric_bootstrap_lrt(
         cmp, "C+e", "A+C+e", y=y, X=X, kernels={"A": K_A, "C": K_C},
         B=80, seed=7, n_jobs=1, min_success_rate=0.5,
     )
-    # 真 null,p 不应该很小;不强 < 1.0 because sample randomness
-    # 但 T_obs 应该不在 T_b 极右侧
-    # 不强校验 p > 0.05,但 p > 1/B (i.e. > 1.25%) 应可靠
+    # Don't enforce p > 0.05 given sample randomness, but p > 1/B should hold reliably
     assert res.bootstrap_p > 1.0 / (res.B_success + 1.0)
 
 
 def test_bh_adjust_monotone_in_input_ranking():
-    """BH q values 单调不增 when sorted by p."""
+    """BH q values are monotone non-decreasing when sorted by p."""
     p = np.array([0.001, 0.04, 0.08, 0.10, 0.50])
     q = _bh_adjust(p)
     # q[order] sorted should be monotonic
@@ -374,13 +358,9 @@ def test_bootstrap_lrt_table_includes_columns():
             "B_success", "B_usable", "mcse", "success_rate", "usable_rate",
             "jitter_used", "n_starts_bootstrap", "boundary_method", "bootstrap_q_bh"}
     assert cols <= set(table.columns)
-    # BH q ≥ raw bootstrap_p element-wise (after monotone) but generally q≥p
-    # at least, both in [0,1]
+    # BH q should stay within [0, 1]
     assert (table["bootstrap_q_bh"].values >= 0).all()
     assert (table["bootstrap_q_bh"].values <= 1).all()
-
-
-# --- M2.4.2 Step 4 codex-review remediation tests --------------------
 
 
 def test_parametric_bootstrap_lrt_backfills_bootstrap_p():
@@ -452,10 +432,6 @@ def test_bh_adjust_rejects_nan():
     with pytest.raises(ValueError, match="finite"):
         _bh_adjust(np.array([0.1, np.nan, 0.3]))
 
-
-# =====================================================================
-# Phase 2 M2.4.2 Step 5 — PVE Sensitivity Grid tests
-# =====================================================================
 
 def test_pve_sensitivity_grid_row_count_and_columns():
     """Default grid = 2 y_modes × 3 norms × 2 n_starts = 12 cells."""

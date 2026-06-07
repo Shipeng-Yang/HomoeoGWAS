@@ -1,15 +1,14 @@
-"""Simulation benchmark utilities for HomoeoGWAS (Phase 2 M2.6).
+"""Simulation benchmark utilities for the per-subgenome causal-SNP study.
 
-This module holds the *pure* (no external binaries, no torch) building blocks
-for the per-subgenome causal-SNP simulation benchmark:
+Pure-Python building blocks (no external binaries, no torch):
 
   * phenotype simulation under a subgenome-stratified random-effect model,
   * causal-SNP truth windows (physical + LD-tagging),
   * power / FDR evaluation with discovery-locus collapsing,
-  * paired bootstrap for "HomoeoGWAS beats baseline" significance.
+  * paired bootstrap for method-vs-baseline significance.
 
-Generative model (replicate r, arm a)
--------------------------------------
+Generative model (replicate r, arm a):
+
     y = Xβ + η_A + η_C + u_bg + ε
 
     η_s   = Σ_{j∈causal_s} z_sj b_sj         per-subgenome oligogenic QTL signal
@@ -20,15 +19,13 @@ Generative model (replicate r, arm a)
               null       : same background as stratified, but η_A=η_C=0
     ε     ~ N(0,σ²_e I)
 
-Each component is drawn then *rescaled* so its realized sample variance equals
-the target heritability fraction — so realized PVE is exact per replicate. The
-benchmark's scientific claim: when the true background has unequal subgenome
-variance (σ²_A ≠ σ²_C), a subgenome-stratified multi-kernel LMM has higher
-power at matched empirical FDR than single pooled-GRM methods. The pooled /
-balanced / null arms are honesty controls where the stratified model must NOT
-inflate FDR or lose power.
-
-Everything here is unit-testable with toy arrays — no Horvath data, no GEMMA.
+Each component is drawn then rescaled so its realized sample variance equals
+the target heritability fraction, so realized PVE is exact per replicate. The
+claim under test: when the true background has unequal subgenome variance
+(σ²_A ≠ σ²_C), a subgenome-stratified multi-kernel LMM has higher power at
+matched empirical FDR than a single pooled-GRM method. The pooled / balanced /
+null arms are controls where the stratified model must not inflate FDR or lose
+power.
 """
 from __future__ import annotations
 
@@ -36,17 +33,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# =====================================================================
-# Arm / causal-set / phenotype dataclasses
-# =====================================================================
-
 
 @dataclass(frozen=True)
 class SimArm:
     """One simulation arm = a fixed variance-component budget.
 
     Heritability fractions are on the unit-variance phenotype scale and must
-    sum to ≤ 1; the remainder is the residual variance ``h_e``.
+    sum to <= 1; the remainder is the residual variance ``h_e``.
     """
     name: str
     kind: str                 # "stratified" | "pooled" | "hadamard" | "null"
@@ -92,15 +85,15 @@ class SimArm:
 
 
 def default_arms() -> dict[str, SimArm]:
-    """The canonical M2.6 benchmark arms (see docs/09_phase2_progress.md).
+    """The canonical benchmark arms.
 
-    Pre-registered parameters (fixed before the production run by a pilot
-    power calculation, not tuned to method-vs-method results): per-subgenome
-    QTL heritability h_qtl = 0.18 split equally over q = 4 causal SNPs gives
-    per-SNP h² ≈ 0.045. The Horvath pilot measured per-SNP χ² ≈ 400·h²_snp at
-    n = 429, so this lands the median causal SNP at χ² ≈ 16 — the informative
-    mid-power regime where roughly half the causal loci clear genome-wide
-    significance and method curves are not at floor or ceiling.
+    Parameters are fixed before the production run by a pilot power
+    calculation, not tuned to method-vs-method results: per-subgenome QTL
+    heritability h_qtl = 0.18 split equally over q = 4 causal SNPs gives
+    per-SNP h2 ~ 0.045. The pilot measured per-SNP chi2 ~ 400*h2_snp at
+    n = 429, landing the median causal SNP at chi2 ~ 16 — the mid-power
+    regime where roughly half the causal loci clear genome-wide significance
+    and method curves are neither at floor nor ceiling.
     """
     return {
         "S1_C_dominant": SimArm(
@@ -140,8 +133,8 @@ class CausalSet:
     chrom: np.ndarray         # (q,) original chromosome label
     pos: np.ndarray           # (q,) int64 bp
     marker_index: np.ndarray  # (q,) column index into that subgenome's matrix
-    effect: np.ndarray        # (q,) signed standardized QTL effect (filled in
-                              #      by simulate_phenotype; zeros until then)
+    effect: np.ndarray        # (q,) signed standardized QTL effect, filled in
+                              #      by simulate_phenotype (zeros until then)
 
     @property
     def n_causal(self) -> int:
@@ -155,11 +148,6 @@ class SimPhenotype:
     causal: CausalSet                 # with .effect filled in
     realized_var: dict[str, float]    # realized sample variance per component
     arm_name: str
-
-
-# =====================================================================
-# Genotype standardization & QC
-# =====================================================================
 
 
 def standardize_dosage(
@@ -192,7 +180,7 @@ def standardize_dosage(
     with np.errstate(invalid="ignore", divide="ignore"):
         col_sum = np.where(obs, G, 0.0).sum(axis=0)
         col_mean = np.where(n_obs > 0, col_sum / np.maximum(n_obs, 1), np.nan)
-    Gi = np.where(obs, G, col_mean[None, :])           # mean-imputed
+    Gi = np.where(obs, G, col_mean[None, :])
     with np.errstate(invalid="ignore"):
         af = np.nanmean(Gi, axis=0) / 2.0
         sd = np.nanstd(Gi, axis=0)                      # ddof=0
@@ -210,11 +198,6 @@ def standardize_dosage(
     return Z, keep, maf, call_rate
 
 
-# =====================================================================
-# Causal-SNP selection
-# =====================================================================
-
-
 def select_causal_snps(
     rng: np.random.Generator,
     eligible: np.ndarray,
@@ -225,10 +208,10 @@ def select_causal_snps(
     min_sep_bp: int = 1_000_000,
     max_tries: int = 10_000,
 ) -> np.ndarray:
-    """Pick ``q`` causal SNP indices, spaced ≥ min_sep_bp apart on a chromosome.
+    """Pick ``q`` causal SNP indices, spaced >= min_sep_bp apart on a chromosome.
 
     The spacing keeps each causal SNP in its own discovery neighbourhood so the
-    power / FDR truth windows do not overlap ambiguously.
+    truth windows do not overlap ambiguously.
 
     Args:
         rng: numpy Generator (reproducible).
@@ -244,7 +227,7 @@ def select_causal_snps(
     """
     eligible = np.asarray(eligible, dtype=np.int64)
     if q < 0:
-        raise ValueError(f"q must be ≥ 0, got {q}")
+        raise ValueError(f"q must be >= 0, got {q}")
     if q == 0:
         return np.empty(0, dtype=np.int64)
     if eligible.size < q:
@@ -259,7 +242,7 @@ def select_causal_snps(
     tries = 0
     while len(chosen) < q and tries < max_tries:
         tries += 1
-        if cursor >= pool.size:                       # exhausted: reshuffle
+        if cursor >= pool.size:                       # exhausted; reshuffle
             rng.shuffle(pool)
             cursor = 0
         cand = int(pool[cursor])
@@ -278,13 +261,8 @@ def select_causal_snps(
     return np.sort(np.array(chosen, dtype=np.int64))
 
 
-# =====================================================================
-# Component draws & phenotype simulation
-# =====================================================================
-
-
 def kernel_factor(K: np.ndarray, *, eig_tol: float = 1e-8) -> np.ndarray:
-    """Return L such that L @ L.T ≈ K (eigen square-root, PSD-projected).
+    """Return L such that L @ L.T ~ K (eigen square-root, PSD-projected).
 
     Used to draw u ~ N(0, K) as u = L @ z, z ~ N(0, I). Negative eigenvalues
     in [-eig_tol, 0) are clipped to 0; anything more negative raises.
@@ -314,20 +292,19 @@ def _draw_component(rng: np.random.Generator, factor: np.ndarray,
 
 def _draw_qtl(rng: np.random.Generator, Z_causal: np.ndarray,
               h2_target: float) -> tuple[np.ndarray, np.ndarray]:
-    """Draw oligogenic QTL signal η = Z_causal @ b, rescaled to var = h2_target.
+    """Draw oligogenic QTL signal eta = Z_causal @ b, rescaled to var = h2_target.
 
-    Effects are *equal-magnitude with random sign* — the standard design for a
-    power benchmark: every injected causal SNP is then an equally hard test
-    (per-SNP h² ≈ h2_target / q), instead of the N(0,1) effect-size lottery
-    where most causal SNPs are undetectably small. The shared magnitude is set
-    by rescaling η to the exact target variance.
+    Effects are equal-magnitude with random sign, so every injected causal SNP
+    is an equally hard test (per-SNP h2 ~ h2_target / q) rather than the N(0,1)
+    effect-size lottery where most causal SNPs are undetectably small. The
+    shared magnitude follows from rescaling eta to the exact target variance.
 
     Returns (eta, effects) where effects is the post-rescale signed b vector.
     """
     n, q = Z_causal.shape
     if q == 0 or h2_target <= 0:
         return np.zeros(n, dtype=np.float64), np.zeros(q, dtype=np.float64)
-    b = rng.choice(np.array([-1.0, 1.0]), size=q)        # equal magnitude
+    b = rng.choice(np.array([-1.0, 1.0]), size=q)
     eta = Z_causal @ b
     eta = eta - eta.mean()
     v = float(np.var(eta, ddof=1))
@@ -357,13 +334,12 @@ def simulate_phenotype(
         factors: kernel square-root factors, keys among
             {"A","C","pooled","hom"} as required by the arm kind.
 
-    Each random component is drawn then rescaled to its *exact* target sample
-    variance; the phenotype is the sum, then standardized to unit variance.
-    Because the components are independent draws their finite-sample
-    cross-covariances are small but nonzero, so the *realized* PVE of each
-    component (``pve_*`` in ``realized_var``) deviates slightly from its target
-    fraction — these realized values, not the nominal targets, are what the
-    benchmark reports.
+    Each component is drawn then rescaled to its exact target sample variance;
+    the phenotype is their sum, then standardized to unit variance. Since the
+    components are independent draws, their finite-sample cross-covariances are
+    small but nonzero, so the realized PVE of each component (``pve_*`` in
+    ``realized_var``) deviates slightly from its target fraction; these
+    realized values, not the nominal targets, are what the benchmark reports.
 
     Returns:
         SimPhenotype with the unit-variance phenotype, the causal set with
@@ -393,7 +369,7 @@ def simulate_phenotype(
     total_var = float(np.var(y, ddof=1))
     if total_var <= 0:
         raise ValueError("degenerate phenotype draw (zero total variance)")
-    y = y / np.sqrt(total_var)                          # unit-variance scale
+    y = y / np.sqrt(total_var)
 
     comp_var = {
         "qtl_A": float(np.var(eta_A, ddof=1)),
@@ -405,11 +381,11 @@ def simulate_phenotype(
         "residual": float(np.var(eps, ddof=1)),
     }
     realized = {f"var_{k}": v for k, v in comp_var.items()}
-    # realized PVE = component variance / total phenotype variance (pre-scale);
-    # Σ pve ≈ 1, deviating by the finite-sample cross-covariance term.
+    # realized PVE = component variance / total (pre-scale) phenotype variance;
+    # sums to ~1 up to the finite-sample cross-covariance term.
     realized.update({f"pve_{k}": v / total_var for k, v in comp_var.items()})
     realized["total_var_prescale"] = total_var
-    # effects divided by the same sqrt(total_var) as y, so the stored signed
+    # divide effects by the same sqrt(total_var) as y, so the stored signed
     # effects are on the returned unit-variance phenotype scale.
     effect = (np.concatenate([eff_A, eff_C]) / np.sqrt(total_var)
               if causal.n_causal else np.zeros(0, dtype=np.float64))
@@ -421,16 +397,11 @@ def simulate_phenotype(
                         arm_name=arm.name)
 
 
-# =====================================================================
-# LD & causal truth windows
-# =====================================================================
-
-
 def ld_r2(z_target: np.ndarray, Z_block: np.ndarray) -> np.ndarray:
-    """r² between one standardized SNP and a block of standardized SNPs.
+    """r2 between one standardized SNP and a block of standardized SNPs.
 
-    Both inputs must be unit-variance standardized over the SAME n samples
-    (as produced by standardize_dosage). r² = corr².
+    Both inputs must be unit-variance standardized over the same n samples
+    (as produced by standardize_dosage). r2 = corr**2.
     """
     n = z_target.shape[0]
     corr = (Z_block.T @ z_target) / n
@@ -449,9 +420,9 @@ def build_truth_windows(
     """Build, per causal SNP, the set of marker snp_ids that count as a hit.
 
     A marker tags causal ``c`` iff it is on the same subgenome+chromosome and
-    either within ``window_bp`` physically or in LD r² ≥ ``r2_min`` (LD only
-    evaluated within ±``r2_search_bp`` for speed). The causal marker itself
-    always tags itself.
+    either within ``window_bp`` physically or in LD r2 >= ``r2_min`` (LD only
+    evaluated within +/-``r2_search_bp`` for speed). The causal marker always
+    tags itself.
 
     Args:
         causal: the replicate CausalSet.
@@ -488,11 +459,6 @@ def build_truth_windows(
     return out
 
 
-# =====================================================================
-# Discovery-locus collapsing & power / FDR evaluation
-# =====================================================================
-
-
 @dataclass(frozen=True)
 class ThresholdEval:
     """Power / FDR at one p-value threshold for one (replicate, method)."""
@@ -520,7 +486,7 @@ def _collapse_loci(sub: np.ndarray, chrom: np.ndarray, pos: np.ndarray,
     """
     order = np.argsort(p, kind="stable")
     loci: list[list[int]] = []
-    locus_meta: list[list[tuple]] = []   # per locus: list of (sub,chrom,pos)
+    locus_meta: list[list[tuple]] = []   # per locus: (sub, chrom, pos) entries
     for i in order:
         si, ci, pi = sub[i], chrom[i], int(pos[i])
         placed = False
@@ -578,7 +544,7 @@ def evaluate_threshold(
     s_chr, s_pos, s_p = chrom[sig], pos[sig], p[sig]
     loci = _collapse_loci(s_sub, s_chr, s_pos, s_p, collapse_window_bp)
 
-    # reverse map: snp_id -> set of causal ids it tags (per subgenome)
+    # snp_id -> set of causal ids it tags (per subgenome)
     tag_index: dict[tuple[str, object], set[int]] = {}
     for cid, (csub, sids) in truth.items():
         for sid in sids:
@@ -601,7 +567,7 @@ def evaluate_threshold(
         elif locus_causals:                  # only already-claimed -> duplicate
             n_dup += 1
             n_fp += 1
-        else:                                # tags nothing -> false positive
+        else:                                # tags nothing -> FP
             n_fp += 1
 
     n_loci = len(loci)
@@ -615,7 +581,7 @@ def evaluate_threshold(
 
 
 def bh_adjust(p: np.ndarray) -> np.ndarray:
-    """Benjamini-Hochberg FDR q-values (monotone-enforced)."""
+    """Benjamini-Hochberg FDR q-values (monotonicity enforced)."""
     p = np.asarray(p, dtype=np.float64)
     n = p.size
     if n == 0:
@@ -638,7 +604,7 @@ def bh_adjust(p: np.ndarray) -> np.ndarray:
 
 
 def bh_threshold(p: np.ndarray, q_level: float) -> float:
-    """Largest p-value whose BH q-value ≤ q_level (0.0 if none significant)."""
+    """Largest p-value whose BH q-value <= q_level (0.0 if none significant)."""
     p = np.asarray(p, dtype=np.float64)
     q = bh_adjust(p)
     ok = np.isfinite(q) & (q <= q_level)
@@ -662,7 +628,7 @@ def power_fdr_curve(
 
 def power_at_fdr(mean_power: np.ndarray, mean_fdr: np.ndarray,
                  target_fdr: float) -> float:
-    """Max mean power over thresholds whose mean empirical FDR ≤ target_fdr."""
+    """Max mean power over thresholds whose mean empirical FDR <= target_fdr."""
     mean_power = np.asarray(mean_power, dtype=np.float64)
     mean_fdr = np.asarray(mean_fdr, dtype=np.float64)
     ok = np.isfinite(mean_fdr) & (mean_fdr <= target_fdr) & np.isfinite(mean_power)
@@ -673,9 +639,9 @@ def power_at_fdr(mean_power: np.ndarray, mean_fdr: np.ndarray,
 
 def partial_auc(mean_power: np.ndarray, mean_fdr: np.ndarray,
                 fdr_cap: float = 0.10) -> float:
-    """Partial area under the power-vs-FDR curve for FDR ∈ [0, fdr_cap].
+    """Partial area under the power-vs-FDR curve for FDR in [0, fdr_cap].
 
-    Normalized by fdr_cap so the value is a mean power, in [0,1].
+    Normalized by fdr_cap so the value is a mean power, in [0, 1].
     """
     mean_power = np.asarray(mean_power, dtype=np.float64)
     mean_fdr = np.asarray(mean_fdr, dtype=np.float64)
@@ -685,10 +651,10 @@ def partial_auc(mean_power: np.ndarray, mean_fdr: np.ndarray,
         return 0.0
     order = np.argsort(fp)
     fp, pw = fp[order], pw[order]
-    # monotone envelope: best power achievable at FDR ≤ x
+    # monotone envelope: best power achievable at FDR <= x
     pw_env = np.maximum.accumulate(pw)
-    # anchor at (0,0): power is 0 below the smallest attainable FDR, so the
-    # pAUC never credits power at an FDR no operating point can reach.
+    # anchor at (0, 0) so the pAUC never credits power at an FDR no operating
+    # point can reach.
     fp = np.concatenate([[0.0], fp])
     pw_env = np.concatenate([[0.0], pw_env])
     grid = np.linspace(0.0, fdr_cap, 101)
@@ -696,11 +662,6 @@ def partial_auc(mean_power: np.ndarray, mean_fdr: np.ndarray,
     # np.trapz was renamed np.trapezoid in NumPy 2.0
     _trapz = getattr(np, "trapezoid", None) or np.trapz
     return float(_trapz(vals, grid) / fdr_cap)
-
-
-# =====================================================================
-# Paired significance tests
-# =====================================================================
 
 
 def paired_bootstrap(

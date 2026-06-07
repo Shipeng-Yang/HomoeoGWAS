@@ -1,23 +1,21 @@
-"""Genomic Relationship Matrices (GRM) for HomoeoGWAS.
+"""Genomic Relationship Matrices (GRM), computed per subgenome.
 
-最小实现:VanRaden (2008) GRM,per-subgenome 计算.
-
-VanRaden GRM:
-    Z = X - 2p          (centered dosage, X ∈ {0,1,2}, p = counted allele freq)
+VanRaden (2008) GRM:
+    Z = X - 2p          (centered dosage, X in {0,1,2}, p = counted allele freq)
     G = Z Z' / Σ 2p(1-p)
 
 Properties:
-- trace(G) ≈ n_samples (常数)
-- diagonal = sample inbreeding * (relative to assumed HWE)
+- trace(G) ~ n_samples
+- diagonal reflects sample inbreeding relative to assumed HWE
 - works on any standard biallelic SNP matrix
 
-LOCO support (Phase 3, M3.1):
+LOCO support:
     ``compute_grm_parts`` returns the unnormalised numerator (Z Z') and
     denominator (Σ 2pq) as a ``GRMPart``; ``compute_loco_grm_parts`` does the
     same per ``chrom`` of the input chunk in one pass; ``loco_grm_from_parts``
-    constructs the leave-one-chromosome-out raw GRM by subtraction
-    (algebraically identical to ``sum_other_chrom_parts`` in exact arithmetic,
-    with a build-time checksum that catches any chrom-dependent QC drift).
+    builds the leave-one-chromosome-out raw GRM by subtraction (algebraically
+    identical to ``sum_other_chrom_parts`` in exact arithmetic, with a
+    build-time checksum that catches any chrom-dependent QC drift).
 """
 from __future__ import annotations
 
@@ -30,19 +28,12 @@ from .io import GenoChunk
 
 
 def _impute_mean(dosage: np.ndarray) -> np.ndarray:
-    """Impute NaN dosage with per-variant mean. Returns new array."""
+    """Impute NaN dosage with per-variant mean. Returns a new array."""
     X = dosage.copy()
-    # 用 nanmean (按列, axis=0) 算每个 variant 的 mean
     col_means = np.nanmean(X, axis=0)
-    # broadcast 替换 NaN
     inds = np.where(np.isnan(X))
     X[inds] = np.take(col_means, inds[1])
     return X
-
-
-# ---------------------------------------------------------------------
-# LOCO building blocks (Phase 3 — M3.1)
-# ---------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -74,11 +65,11 @@ class GRMPart:
 def _compute_grm_part_from_dosage(
     X: np.ndarray, maf_min: float, *, chrom: str | None, allow_empty: bool,
 ) -> GRMPart:
-    """Shared core: NaN-impute → low-MAF drop → Z Z' numerator + Σ 2pq denom.
+    """Shared core: NaN-impute, low-MAF drop, Z Z' numerator + Σ 2pq denom.
 
     Returns a zero-filled ``GRMPart`` when ``allow_empty`` and the (sub-)chunk
-    contributes nothing — needed so a chrom block with no surviving variants
-    in some subgenome does not break the LOCO accumulator.
+    contributes nothing, so a chrom block with no surviving variants in some
+    subgenome does not break the LOCO accumulator.
     """
     n, m = X.shape
     zero = GRMPart(
@@ -219,17 +210,17 @@ def loco_grm_from_parts(
     min_denominator_fraction: float = 1e-6,
     warn_retained_fraction: float = _LOCO_RETAINED_FRACTION_WARN,
 ) -> tuple[np.ndarray, dict]:
-    """Construct the leave-one-chromosome-out **raw** GRM via subtraction.
+    """Construct the leave-one-chromosome-out raw GRM via subtraction.
 
     .. math:: K_j(-c) = \\frac{Z_j Z_j' - Z_{j,c} Z_{j,c}'}
                               {\\mathrm{denom}_j - \\mathrm{denom}_{j,c}}
 
-    Algebraically identical to ``sum_other_chrom_parts``. Float64 cancellation
-    on PSD sums is bounded by ~ε·n·||S||, which for n≤10⁴ is ~1e-11 relative —
-    far below the REML PSD jitter ladder. The build-time checksum in
-    :func:`compute_loco_grm_parts` already verifies that the parts add up
-    cleanly, so subtraction is safe and O(1) per chrom (~20× faster than
-    summing all other chrom parts for a 21-chrom panel).
+    Algebraically identical to summing all other chrom parts. Float64
+    cancellation on PSD sums is bounded by ~eps*n*||S|| (~1e-11 relative for
+    n<=1e4), far below the REML PSD jitter ladder. The build-time checksum in
+    :func:`compute_loco_grm_parts` verifies the parts add up cleanly, so
+    subtraction is safe and O(1) per chrom (~20x faster than summing all other
+    chrom parts on a 21-chrom panel).
 
     Args:
         global_part: ``GRMPart`` for the full subgenome (all chrom).
@@ -301,14 +292,14 @@ def compute_grm(chunk: GenoChunk, maf_min: float = 0.01) -> tuple[np.ndarray, di
 
     Returns:
         (G, info):
-        - G: shape (n, n), float64, trace(G) ≈ n
+        - G: shape (n, n), float64, trace(G) ~ n
         - info: dict with n_samples, n_variants_used, mean_diag, trace
 
     Notes:
-        - NaN imputed by per-variant mean (standard practice when missingness is low).
-        - Σ 2p(1-p) 用 imputed-recomputed allele freq.
-        - Internally delegates to :func:`compute_grm_parts` for a single,
-          float64-throughout code path shared with the LOCO building blocks.
+        - NaN imputed by per-variant mean (fine when missingness is low).
+        - Σ 2p(1-p) uses allele frequencies recomputed from imputed dosage.
+        - Delegates to :func:`compute_grm_parts` for a single float64 code path
+          shared with the LOCO building blocks.
     """
     n, m = chunk.dosage.shape
     part = compute_grm_parts(chunk, maf_min=maf_min)
@@ -365,7 +356,7 @@ def compute_grm_panel(
 
     Expects layout:
         <panel_dir>/<SUB>/all.{bed,bim,fam}
-    或 if .bed missing, vcf_to_bed will convert from all.vcf.gz.
+    If .bed is missing, vcf_to_bed converts from all.vcf.gz.
 
     Args:
         panel_dir: e.g. data/processed/rapeseed/horvath

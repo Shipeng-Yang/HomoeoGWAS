@@ -54,7 +54,7 @@ homoeogwas validate -c your_config.yaml     # schema + path preflight, no comput
 ```
 
 See `examples/minimal/demo.yaml` for a complete minimal config, and
-`configs/species/*.yaml` / `configs/panels/*.yaml` for species/panel templates.
+`configs/species/*.yaml` for species templates.
 
 ## Outputs (`outputs.out_dir`)
 

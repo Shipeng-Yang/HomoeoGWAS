@@ -1,7 +1,6 @@
-"""homoeogwas ``interact`` — gene-resolution homoeolog-pair burden-product interaction scan.
+"""Gene-resolution homoeolog-pair burden-product interaction scan.
 
-This promotes the Phase-7 research per-pair interaction method into a first-class CLI
-module. For each homoeolog pair (X in subgenome S_x, Y in S_y) it fits the whitened GLS
+For each homoeolog pair (X in subgenome S_x, Y in S_y) it fits the whitened GLS
 
     y_w ~ 1 + b_X + b_Y + b_X * b_Y
 
@@ -9,9 +8,8 @@ where b_* are gene burdens (capped block-mean of standardized dosages) and the w
 comes from a subgenome-stratified null LMM (multi-kernel REML over {K_sub}); it then tests
 the interaction coefficient and aggregates per-pair p-values with ACAT. INT is the primary
 transform; ``raw`` is a sensitivity transform. Empirical calibration uses y-shuffle
-permutation (lambda_perm + empirical ACAT). Extension hooks (frozen, y-independent):
-``--weights`` (DL/HEB pair priors -> weighted hypothesis testing) and ``--multi-trait``
-(ACAT across a predeclared trait set) are layered on top without touching this core.
+permutation. Optional y-independent extensions: ``--weights`` (DL/HEB pair priors for
+weighted hypothesis testing) and ``--multi-trait`` (ACAT across a predeclared trait set).
 
 Config (YAML)::
 
@@ -39,16 +37,13 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-# ----------------------------------------------------------------------------- stats helpers
-
 
 def _acat_tan_terms(p: np.ndarray) -> np.ndarray:
     """Cauchy terms tan((0.5-p)*pi) with precision-safe branches at the extremes (Liu & Xie 2020).
 
-    For p < 1e-15, ``(0.5 - p)`` rounds to exactly 0.5 in float64 so ``tan`` saturates near pi/2 and
-    loses all information; use the cotangent identity tan((0.5-p)*pi) = cot(p*pi) ~ 1/(p*pi). Symmetric
-    branch for p near 1. In the normal range the plain ``tan`` term is returned, so ACAT is bit-exact
-    for non-extreme p (the only values that change are raw-scale outlier p far below 1e-15)."""
+    For p < 1e-15, ``(0.5 - p)`` rounds to exactly 0.5 in float64 and ``tan`` saturates, so we use
+    the cotangent identity tan((0.5-p)*pi) = cot(p*pi) ~ 1/(p*pi), with a symmetric branch near 1.
+    In the normal range the plain ``tan`` term is returned."""
     small = p < 1e-15
     big = p > 1.0 - 1e-15
     t = np.tan((0.5 - p) * np.pi)
@@ -58,8 +53,8 @@ def _acat_tan_terms(p: np.ndarray) -> np.ndarray:
 
 
 def _acat_p_from_t(tbar: float) -> float:
-    """Invert the mean Cauchy statistic to a p-value; the |t|-large branches p ~ 1/(t*pi) (t>0) and
-    p ~ 1 - 1/(|t|*pi) (t<0) avoid arctan saturation when one extreme p dominates the combination."""
+    """Invert the mean Cauchy statistic to a p-value, with |t|-large branches to avoid arctan
+    saturation when one extreme p dominates the combination."""
     if tbar > 1e15:
         return float(1.0 / (tbar * np.pi))
     if tbar < -1e15:
@@ -77,9 +72,8 @@ def acat(pvals: np.ndarray) -> float:
 
 
 def acat_weighted(pvals: np.ndarray, weights: np.ndarray) -> float:
-    """Weighted ACAT combination. Weights must be y-INDEPENDENT (e.g. zero-shot DL variant
-    priors or homoeolog expression bias, frozen before the association test) so the
-    combination stays calibrated while up-weighting prior-favoured pairs."""
+    """Weighted ACAT combination. Weights must be y-independent (e.g. zero-shot DL variant priors
+    or homoeolog expression bias, frozen before the association test) to stay calibrated."""
     p = np.asarray(pvals, float)
     w = np.asarray(weights, float)
     m = np.isfinite(p) & np.isfinite(w) & (w > 0)
@@ -151,11 +145,9 @@ def grm_from_X(X: np.ndarray) -> np.ndarray:
 def whiten_multi(kernels: dict[str, np.ndarray], y: np.ndarray, X: np.ndarray = None, seed: int = 42):
     """Subgenome-stratified whitener from a multi-kernel null LMM (REML variance components).
 
-    ``X`` is the fixed-effect mean model for the null LMM. Default ``None`` => intercept-only
-    ``ones((n,1))`` (reproduces the legacy covariate-free behaviour bit-exactly). Passing a
-    covariate block ``[1, PCs, covariates]`` makes the variance components estimated *conditional*
-    on those fixed effects, so population/environment structure is not absorbed into sigma^2_sub
-    (the statistically complete covariate-adjusted whitener)."""
+    ``X`` is the fixed-effect mean model for the null LMM; default ``None`` => intercept-only.
+    Passing a covariate block ``[1, PCs, covariates]`` estimates the variance components
+    conditional on those fixed effects, so structure is not absorbed into sigma^2_sub."""
     from .lmm import fit_multi_reml
 
     n = next(iter(kernels.values())).shape[0]
@@ -175,11 +167,10 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
                    C: np.ndarray = None) -> np.ndarray:
     """Per-pair interaction p (whitened GLS t-test on the b_X*b_Y coefficient).
 
-    ``C`` is the fixed-effect covariate block (n, p_c) that ALREADY INCLUDES the intercept
-    column (e.g. ``[1, PC1..PCk, env...]``). Default ``None`` => intercept-only, which runs the
-    exact legacy design ``[1, b_X, b_Y, b_X*b_Y]`` (bit-exact reproduction of covariate-free runs).
-    When ``C`` is given, the design is ``[C, b_X, b_Y, b_X*b_Y]`` (covariates as fixed effects,
-    so the interaction is tested conditional on them) and the residual df is ``n - (p_c + 3)``."""
+    ``C`` is the fixed-effect covariate block (n, p_c) that already includes the intercept column
+    (e.g. ``[1, PC1..PCk, env...]``); default ``None`` => intercept-only, i.e. design
+    ``[1, b_X, b_Y, b_X*b_Y]``. With ``C`` given the design is ``[C, b_X, b_Y, b_X*b_Y]`` and the
+    residual df is ``n - (p_c + 3)``."""
     n, G = BX.shape
     yw = Wh @ y
     BXw = Wh @ BX
@@ -197,8 +188,8 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
         Xw = np.column_stack([Cw, BXw[:, g], BYw[:, g], INTw[:, g]])
         beta, _res, rank, _sv = np.linalg.lstsq(Xw, yw, rcond=None)
         df = n - rank                        # rank-aware df (== n-(p_c+3) when full rank)
-        if rank < p_full or df < 1:          # rank-deficient design => interaction not estimable
-            pv[g] = 1.0                      # conservative: cannot test a non-identified coefficient
+        if rank < p_full or df < 1:          # rank-deficient: interaction not estimable
+            pv[g] = 1.0                      # conservative
             continue
         resid = yw - Xw @ beta
         s2 = float(resid @ resid) / df
@@ -213,9 +204,8 @@ def _neglog10(p: np.ndarray) -> np.ndarray:
 
 
 def _decile_bin(x: np.ndarray) -> np.ndarray:
-    """Decile bin (0..9) of a 1-D vector by rank (descriptive convenience column only — the
-    authoritative matched-null binning is re-derived downstream from the pre-registered design).
-    Ties share a bin; an all-constant vector maps to bin 0."""
+    """Decile bin (0..9) of a 1-D vector by rank (descriptive column only). Ties share a bin;
+    an all-constant vector maps to bin 0."""
     x = np.asarray(x, float)
     n = x.size
     if n == 0:
@@ -225,8 +215,7 @@ def _decile_bin(x: np.ndarray) -> np.ndarray:
 
 
 def _write_ranking_tsv(path, header: list, rows: list) -> None:
-    """Persist the FULL genome-wide ranking (every callable unit), deterministically ordered.
-    This is the only side effect of the dump flag; legacy JSON output is untouched (bit-exact)."""
+    """Write the full genome-wide ranking (every callable unit), deterministically ordered."""
     import csv
 
     p = Path(path)
@@ -238,9 +227,9 @@ def _write_ranking_tsv(path, header: list, rows: list) -> None:
 
 
 def _rank_with_ties(pv: np.ndarray, keys: list) -> tuple:
-    """Deterministic ascending-p order (p, then original index via stable sort) and a tie-group id
-    per row (rows sharing an identical p get the same tie_group). Returns (order, rank_of_row,
-    tie_group_of_row) where rank/tie are indexed by ORIGINAL row position."""
+    """Deterministic ascending-p order (stable sort) plus a tie-group id per row (rows sharing an
+    identical p get the same tie_group). Returns (order, rank_of_row, tie_group_of_row), with
+    rank/tie indexed by original row position."""
     pv = np.asarray(pv, float)
     G = pv.size
     order = np.argsort(pv, kind="stable")            # stable => ties keep original (gene) order
@@ -257,9 +246,6 @@ def _rank_with_ties(pv: np.ndarray, keys: list) -> tuple:
     return order, rank_of, tie_of
 
 
-# ----------------------------------------------------------------------------- data structures
-
-
 @dataclass
 class SubgenomeData:
     X: np.ndarray                       # (n_samples, n_snp) for this subgenome
@@ -272,10 +258,9 @@ class SubgenomeData:
 class FrozenTraitSet:
     """Immutable, ordered, predeclared trait set for multi-trait (pleiotropy) scans.
 
-    Freezing the trait list in a hashable object (insertion order preserved, content digest
-    recorded) makes the "multiplicity = G not G x T" claim auditable: the set must be declared
-    before the association test and cannot be silently reordered, deduplicated, or expanded.
-    This is the code-level firewall for the leakage risk flagged for the multi-trait extension."""
+    Freezing the trait list in a hashable object (order preserved, content digest recorded) keeps
+    the "multiplicity = G, not G x T" claim auditable: the set is declared before the association
+    test and cannot be silently reordered, deduplicated, or expanded."""
 
     traits: tuple
     digest: str
@@ -316,9 +301,6 @@ class InteractResult:
     covariates: dict = None
 
 
-# ----------------------------------------------------------------------------- core engine
-
-
 def _load_subgenome(plink_prefix: str, npz_path: str) -> SubgenomeData:
     from .io import load_bed_hardcall
 
@@ -333,10 +315,8 @@ def _load_subgenome(plink_prefix: str, npz_path: str) -> SubgenomeData:
 
 
 def _build_grm(sd: SubgenomeData, sample_idx: np.ndarray, method: str, maf_min: float) -> np.ndarray:
-    """Subgenome GRM restricted to valid samples, trace-normed. ``method`` is explicit
-    (Codex: GRM choice must be a documented config knob, not an implicit implementation
-    detail) — ``compute_grm_maf`` reuses the package GRM (reproduces the research scripts);
-    ``grm_from_X`` is the all-SNP PSD-clipped variant (sensitivity)."""
+    """Subgenome GRM restricted to valid samples, trace-normed. ``compute_grm_maf`` reuses the
+    package GRM; ``grm_from_X`` is the all-SNP PSD-clipped variant (sensitivity)."""
     n_t = sample_idx.size
     if method == "compute_grm_maf":
         from .grm import compute_grm
@@ -352,10 +332,9 @@ def _build_grm(sd: SubgenomeData, sample_idx: np.ndarray, method: str, maf_min: 
 def genotype_pcs(kernels: dict[str, np.ndarray], n_pcs: int) -> np.ndarray:
     """Top-``n_pcs`` genotype principal components from the combined (mean) subgenome GRM.
 
-    Reuses the already-built per-subgenome GRMs (no genotype re-read): the additive relatedness
-    matrix K_comb = mean_s K_s shares its leading eigenvectors with standard genotype PCA. PCs are
-    a y-INDEPENDENT covariate (functions of genotype only) and are standardized to unit scale so
-    the fixed-effect block is well conditioned."""
+    Reuses the already-built per-subgenome GRMs (no genotype re-read): K_comb = mean_s K_s shares
+    its leading eigenvectors with standard genotype PCA. PCs are y-independent (genotype only) and
+    standardized to unit scale."""
     n = next(iter(kernels.values())).shape[0]
     if n_pcs <= 0:
         return np.empty((n, 0))
@@ -374,10 +353,9 @@ def build_covariate_block(kernels: dict[str, np.ndarray], n_t: int, *, n_pcs: in
                           extra: np.ndarray = None) -> tuple:
     """Assemble the fixed-effect covariate design ``C = [1, PC1..PCk, extra...]`` (intercept first).
 
-    Returns ``(C, meta)``. With ``n_pcs==0`` and ``extra is None`` returns ``(None, ...)`` so the
-    engine takes the exact legacy intercept-only path (bit-exact). ``extra`` is an optional already
-    sample-aligned, y-independent covariate matrix (n_t, q) (e.g. environment/batch), standardized
-    here. The intercept is always column 0; the interaction df becomes ``n - (C.shape[1] + 3)``."""
+    With ``n_pcs==0`` and ``extra is None`` returns ``(None, ...)`` so the engine takes the
+    intercept-only path. ``extra`` is an optional sample-aligned, y-independent covariate matrix
+    (n_t, q) (e.g. environment/batch), standardized here."""
     blocks = [np.ones((n_t, 1))]
     cols = ["intercept"]
     actual_pcs = 0
@@ -430,22 +408,20 @@ def run_pair_scan(
     full_dump_path: str = None,         # if set, write FULL per-pair ranking TSV (else top-N only)
 ) -> InteractResult:
     """Whitened per-pair burden-product interaction scan with ACAT + permutation calibration.
-    Optional ``pair_weights`` (y-independent DL/HEB priors) enable weighted-hypothesis testing:
-    weighted Bonferroni p_i < alpha*w_i/G and weighted ACAT, reported ALONGSIDE the unweighted
-    results (never replacing them). FWER stays controlled because weights do not depend on y.
-    Optional ``covariates`` (y-independent genotype PCs and/or extra fixed effects) enters BOTH the
-    null-LMM mean model (whitener) AND the per-pair GLS design; ``None`` => exact legacy intercept-
-    only path. Permutation switches to Freedman-Lane (residualize on C, permute residuals) so the
-    covariate-phenotype structure is preserved under the null while the genotype link is broken;
-    with C=intercept this reduces exactly to the legacy y-shuffle."""
+
+    Optional ``pair_weights`` (y-independent DL/HEB priors) enable weighted-hypothesis testing
+    (weighted Bonferroni p_i < alpha*w_i/G and weighted ACAT), reported alongside the unweighted
+    results; FWER stays controlled because weights do not depend on y. Optional ``covariates``
+    (y-independent genotype PCs and/or extra fixed effects) enter both the null-LMM mean model and
+    the per-pair GLS design; ``None`` => intercept-only. Permutation switches to Freedman-Lane
+    (residualize on C, permute residuals), which reduces to y-shuffle when C is intercept-only."""
     from joblib import Parallel, delayed
 
     rng = np.random.default_rng(seed)
     subs = list(subdata.keys())
     n_t = sample_idx.size
-    # subgenome GRMs restricted to valid samples (GRM method is an explicit config knob)
     kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
-    # fixed-effect covariate block C = [1, PCs, extra] (None = legacy intercept-only, bit-exact)
+    # fixed-effect covariate block C = [1, PCs, extra] (None = intercept-only)
     cov_meta = dict(policy="none")
     C = None
     if covariates:
@@ -488,9 +464,8 @@ def run_pair_scan(
     top = [dict(pair=kept_pairs[int(i)], p=float(pv[i])) for i in order[:5]]
 
     if full_dump_path:
-        # FULL genome-wide ranking (descriptive; inference is the pre-registered enrichment, NOT
-        # per-row Bonferroni). gene_len is NOT emitted here (the engine has no coordinates) -> NA;
-        # it is joined downstream from the annotation (no fabrication).
+        # Full genome-wide ranking (descriptive). gene_len is emitted as NA (the engine has no
+        # coordinates) and joined downstream from the annotation.
         nx, ny = np.asarray(nsnp_x), np.asarray(nsnp_y)
         _, rank_of, tie_of = _rank_with_ties(pv, kept_pairs)
         nl = _neglog10(pv)
@@ -508,7 +483,6 @@ def run_pair_scan(
 
     weighted = None
     if w is not None:
-        # weighted Bonferroni: pair i significant if p_i < alpha * w_i / G
         wsig = [dict(pair=kept_pairs[int(i)], p=float(pv[i]), weight=float(w[i]),
                      p_weighted=float(pv[i] / w[i]))
                 for i in order if pv[i] < bonf * w[i]]
@@ -524,9 +498,8 @@ def run_pair_scan(
                   "normalization (sum w = G) up-weighting prioritized pairs reallocates alpha from "
                   "the rest (their effective weight < 1)."))
 
-    # Freedman-Lane permutation calibration: y* = C@beta_hat + (y - C@beta_hat)[perm].
-    # With C=None (intercept only) beta_hat=mean(y) so y* == y[perm] exactly (legacy y-shuffle);
-    # with covariates it preserves the covariate mean structure while breaking the genotype link.
+    # Freedman-Lane permutation: y* = C@beta_hat + (y - C@beta_hat)[perm]. With C=None this is
+    # exactly y[perm] (y-shuffle); with covariates it preserves the covariate mean structure.
     if C is None:
         fl_fit, fl_resid = None, None
     else:
@@ -583,10 +556,10 @@ def run_triad_scan(
     full_dump_path: str = None,         # if set, write FULL per-triad ranking TSV (else top-N only)
 ) -> dict:
     """Hexaploid triad burden-product scan: full {K_A,K_B,K_D} whitening, the 3 within-triad
-    pairwise interactions (s0-s1, s0-s2, s1-s2), and a triad-level ACAT (= hexaploid omnibus).
-    Requires all three homoeologs of a triad retained (dense panels, e.g. wheat WGS).
-    ``covariates`` (genotype PCs / extra fixed effects) enters the whitener mean model AND every
-    pairwise GLS; ``None`` = exact legacy intercept-only path. Permutation is Freedman-Lane."""
+    pairwise interactions (s0-s1, s0-s2, s1-s2), and a triad-level ACAT omnibus. Requires all
+    three homoeologs of a triad retained (dense panels, e.g. wheat WGS). ``covariates`` enter the
+    whitener mean model and every pairwise GLS; ``None`` = intercept-only. Permutation is
+    Freedman-Lane."""
     from joblib import Parallel, delayed
 
     rng = np.random.default_rng(seed)
@@ -631,21 +604,17 @@ def run_triad_scan(
     pw_p = {}
     for sx, sy in pairwise_defs:
         pw_p[f"{sx}{sy}"] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C)
-    # triad-level ACAT over the 3 pairwise p per triad
     triad_acat = np.array([acat([pw_p[f"{sx}{sy}"][i] for sx, sy in pairwise_defs])
                            for i in range(G)])
     triad_omnibus = acat(triad_acat)
 
     if full_dump_path:
-        # FULL genome-wide per-triad ranking, ordered by ascending triad-ACAT (descriptive; the
-        # inferential test is the pre-registered enrichment, NOT per-triad Bonferroni). gene_len is
-        # NOT emitted (engine has no coordinates) -> NA, joined downstream from the GFF.
+        # Full genome-wide per-triad ranking by ascending triad-ACAT (descriptive). gene_len is
+        # emitted as NA (engine has no coordinates) and joined downstream from the GFF.
         tags = [f"{sx}{sy}" for sx, sy in pairwise_defs]
         pmat = np.column_stack([pw_p[t] for t in tags])      # (G, 3) per-pairwise p
-        pmat = np.where(np.isfinite(pmat), pmat, 1.0)         # Fix4: sanitize before ranking
-        # local finite copy of the per-triad ACAT for ranking (persisted stats untouched). rank is a
-        # 0-based ordinal after a STABLE ascending sort; tie_group = the first ordinal of an exact-p
-        # tie (exact float equality, meaningful only for genuine ties e.g. p==1.0), NOT a shared rank.
+        pmat = np.where(np.isfinite(pmat), pmat, 1.0)         # sanitize before ranking
+        # local finite copy of the per-triad ACAT for ranking (persisted stats untouched)
         acat_rank = np.where(np.isfinite(triad_acat), triad_acat, 1.0)
         min_pair = pmat.min(1)
         min_tag = np.array(tags)[pmat.argmin(1)]
@@ -685,7 +654,7 @@ def run_triad_scan(
             pw_res[tag]["weighted"] = dict(acat_weighted=float(acat_weighted(pv, w)),
                                            bonferroni_n_sig=len(wsig), sig=wsig)
 
-    # Freedman-Lane permutation (reduces to legacy y-shuffle when C is intercept-only)
+    # Freedman-Lane permutation (reduces to y-shuffle when C is intercept-only)
     if C is None:
         fl_fit, fl_resid = None, None
     else:
@@ -740,20 +709,17 @@ def _ols_rss(Xd: np.ndarray, yv: np.ndarray):
 
 def pair_conditional_diagnostics(Wh: np.ndarray, y: np.ndarray, bx: np.ndarray, by: np.ndarray,
                                  C: np.ndarray = None) -> dict:
-    """Conditional-on-marginals sanity panel for ONE homoeolog pair in the *whitened* GLS
+    """Conditional-on-marginals sanity panel for one homoeolog pair in the whitened GLS
     ``y_w ~ C + bX + bY + bX*bY`` (the exact design the scan tests). ``bx``/``by`` are the
-    column-standardized gene burdens; ``C`` is the fixed-effect covariate block INCLUDING the
-    intercept (default ``None`` => intercept-only ``[1]``, bit-exact legacy). Returns:
-      - the interaction Wald p/t/beta (must reproduce the deployed hit p);
+    column-standardized gene burdens; ``C`` is the fixed-effect covariate block including the
+    intercept (default ``None`` => intercept-only). Returns:
+      - the interaction Wald p/t/beta;
       - projection-based collinearity in whitened space: R2_int|marg = 1 - SSE(cI~C0+cX+cY)/
-        SSE(cI~C0) and VIF_int = 1/(1-R2) (C0 = Wh@C is the whitened covariate block, not a
-        constant — use partial/projection R2, not TSS-around-mean);
-      - a nested-model F panel: (a) interaction | marginals (= headline, F==t^2 check),
-        (b) JOINT main effects null[C0] vs [C0,cX,cY] (single-gene visibility), (c) total pair model;
-      - single-gene **burden-GLS marginal** p (each burden alone under the same covariance + C):
-        the 'pair-only / single-gene-invisible' evidence.
-    All quantities use the identical whitener/burdens/covariates as the production scan, so the
-    panel stays a faithful persisted diagnostic under covariate (PC) adjustment too."""
+        SSE(cI~C0) and VIF_int = 1/(1-R2) (C0 = Wh@C; partial/projection R2, not TSS-around-mean);
+      - a nested-model F panel: interaction | marginals (with the F==t^2 check), joint main effects,
+        and the total pair model;
+      - single-gene burden-GLS marginal p (each burden alone under the same covariance + C).
+    All quantities use the same whitener/burdens/covariates as the production scan."""
     n = int(y.shape[0])
     C0 = (Wh @ np.ones(n)).reshape(-1, 1) if C is None else Wh @ np.asarray(C, float).reshape(n, -1)
     p_c = C0.shape[1]                                   # covariate-block width (1 = intercept only)
@@ -770,7 +736,7 @@ def pair_conditional_diagnostics(Wh: np.ndarray, y: np.ndarray, bx: np.ndarray, 
     bmain, rss_main = _ols_rss(Xmain, yw)
     _, rss_null = _ols_rss(Xnull, yw)
 
-    # rank-aware df (== n-(p_c+3) when the design is full rank; guards collinear covariates)
+    # rank-aware df (== n-(p_c+3) when full rank; guards collinear covariates)
     rank_full = int(np.linalg.matrix_rank(Xfull))
     rank_main = int(np.linalg.matrix_rank(Xmain))
     estimable = bool(rank_full == p_c + 3)
@@ -780,7 +746,7 @@ def pair_conditional_diagnostics(Wh: np.ndarray, y: np.ndarray, bx: np.ndarray, 
     t_I = float(bfull[j_int] / se_I)
     p_int = float(2.0 * stats.t.sf(abs(t_I), df))
 
-    # projection-based partial R2 / VIF of the interaction column vs the covariate+marginal columns
+    # partial R2 / VIF of the interaction column vs the covariate+marginal columns
     _, sse0 = _ols_rss(Xnull, cI)                       # cI ~ C0
     _, sse1 = _ols_rss(Xmain, cI)                       # cI ~ C0 + cX + cY
     r2_im = float(1.0 - sse1 / sse0) if sse0 > 0 else float("nan")
@@ -792,7 +758,7 @@ def pair_conditional_diagnostics(Wh: np.ndarray, y: np.ndarray, bx: np.ndarray, 
 
     df_main = n - rank_main
     F_int, pF_int = _F(rss_main, rss_full, 1, df)        # interaction | marginals (== Wald)
-    F_main, pF_main = _F(rss_null, rss_main, 2, df_main)  # joint main effects (single-gene visibility)
+    F_main, pF_main = _F(rss_null, rss_main, 2, df_main)  # joint main effects
     F_pair, pF_pair = _F(rss_null, rss_full, 3, df)      # total pair model
 
     # single-gene burden-GLS marginal p (each burden alone, same whitener + covariates)
@@ -808,8 +774,8 @@ def pair_conditional_diagnostics(Wh: np.ndarray, y: np.ndarray, bx: np.ndarray, 
     p_mainX = float(2.0 * stats.t.sf(abs(bmain[p_c] / se_main[p_c]), df_main))
     p_mainY = float(2.0 * stats.t.sf(abs(bmain[p_c + 1] / se_main[p_c + 1]), df_main))
 
-    # Frisch-Waugh-Lovell confirmation: the interaction t computed on the part of cI ORTHOGONAL to
-    # the marginals (+covariates) equals the full-model interaction t.
+    # Frisch-Waugh-Lovell check: the interaction t on the part of cI orthogonal to the marginals
+    # (+covariates) equals the full-model interaction t.
     b_proj, _ = _ols_rss(Xmain, cI)
     cI_resid = cI - Xmain @ b_proj
     Xres = np.column_stack([C0, cX, cY, cI_resid])
@@ -851,18 +817,16 @@ def run_multitrait_pair_scan(
 ) -> dict:
     """Multi-trait (pleiotropy) pairwise scan: ACAT-across-traits.
 
-    For each homoeolog pair, the per-trait whitened interaction p-values over a PREDECLARED,
-    frozen trait set are combined with ACAT into a single per-pair pleiotropy p. Multiplicity
-    is over G pairs only (each pair yields exactly one combined p), NOT G x T. ACAT is
-    dependence-robust so the combination stays calibrated under cross-trait correlation; it is
-    not the optimal combiner for dense weak same-direction effects, so the discover-more gain is
-    conditional (relative to G x T single-trait Bonferroni when signal is shared across traits).
+    For each homoeolog pair, the per-trait whitened interaction p-values over a predeclared, frozen
+    trait set are combined with ACAT into a single per-pair pleiotropy p. Multiplicity is over G
+    pairs only (each pair yields exactly one combined p), not G x T. ACAT is dependence-robust so
+    the combination stays calibrated under cross-trait correlation, but is not the optimal combiner
+    for dense weak same-direction effects.
 
-    Calibration uses a SHARED permutation: one row permutation per replicate applied to every
-    trait's phenotype vector, preserving the empirical cross-trait correlation while breaking the
+    Calibration uses a shared permutation: one row permutation per replicate applied to every
+    trait's phenotype vector, preserving cross-trait correlation while breaking the
     genotype-phenotype link. The whitener depends on y (REML), so each trait is re-whitened in
-    each permutation (exact procedural null). ``audit_min_trait_*`` fields are reported for
-    transparency and are NOT inferential (no significance is called on them)."""
+    each permutation. ``audit_min_trait_*`` fields are reported for transparency only."""
     from joblib import Parallel, delayed
 
     if pair_subs is None:
@@ -884,7 +848,7 @@ def run_multitrait_pair_scan(
             raise ValueError(f"trait '{t}' contains non-finite values; pass complete-case "
                              "(NA-filtered across the whole trait set) phenotypes")
 
-    # genotype-only objects built ONCE (trait-independent)
+    # genotype-only objects built once (trait-independent)
     kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
     bx_cols, by_cols, kept_pairs = [], [], []
     for gx, gy in pairs:
@@ -900,8 +864,8 @@ def run_multitrait_pair_scan(
     BY = scols_safe(np.column_stack(by_cols))
 
     # per-trait observed transform + whitened per-pair interaction p (whitener depends on y).
-    # Observed whitening uses a deterministic per-trait seed (perms use the rep seed); REML is
-    # 3-start (picks best logL) so the optimum is stable regardless of seed.
+    # Observed whitening uses a deterministic per-trait seed; REML is 3-start so the optimum is
+    # stable regardless of seed.
     y_t = {t: (rank_int(np.asarray(y_by_trait[t], float)) if transform == "INT"
                else np.asarray(y_by_trait[t], float)) for t in traits}
     P = np.empty((G, len(traits)))
@@ -919,7 +883,7 @@ def run_multitrait_pair_scan(
     pleio_omnibus = acat(pleio_p)
     minp_obs = float(pleio_p.min())
     lam_obs = lambda_gc(pleio_p)
-    bonf = 0.05 / G                                     # multiplicity over G pairs, not G x T
+    bonf = 0.05 / G                                     # multiplicity over G pairs only
     order = np.argsort(pleio_p)
     sig = [dict(pair=kept_pairs[int(i)], pleio_p=float(pleio_p[i]),
                 per_trait_p={t: float(P[i, j]) for j, t in enumerate(traits)})
@@ -974,14 +938,10 @@ def run_multitrait_pair_scan(
               "relative to G x T single-trait Bonferroni."))
 
 
-# ----------------------------------------------------------------------------- CLI
-
-
 def _load_pairs(path: str, subs: list[str]):
     import pandas as pd
 
     df = pd.read_csv(path, sep="\t")
-    # accept gene_<S> columns; for 2 subgenomes use (gene_<s0>, gene_<s1>)
     cols = [f"gene_{s}" for s in subs]
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -990,9 +950,8 @@ def _load_pairs(path: str, subs: list[str]):
 
 
 def _load_pair_weights(path: str, subs: list[str]) -> dict:
-    """Load y-independent pair priors -> {(gene_s0, gene_s1): weight}. Columns:
-    gene_<S> per subgenome + 'weight'. Weights must be computed WITHOUT the phenotype
-    (DL zero-shot scores, homoeolog expression bias), frozen before this scan."""
+    """Load y-independent pair priors -> {(gene_s0, gene_s1): weight}. Columns: gene_<S> per
+    subgenome + 'weight'. Weights must be computed without the phenotype and frozen before the scan."""
     import pandas as pd
 
     df = pd.read_csv(path, sep="\t")
@@ -1005,7 +964,7 @@ def _load_pair_weights(path: str, subs: list[str]) -> dict:
 
 def _build_cov_arg(cov_cfg, valid: list):
     """Parse the ``interact.covariates`` config into the ``covariates`` dict {n_pcs, extra} that the
-    scan functions accept. Returns ``(None, "none")`` when absent (exact legacy reproduction).
+    scan functions accept. Returns ``(None, "none")`` when absent.
 
     Config::
 
@@ -1015,8 +974,8 @@ def _build_cov_arg(cov_cfg, valid: list):
           sample_col: sample
           columns: [env, batch]     # optional subset; default = all non-sample columns
 
-    The covariate file MUST be y-independent and frozen before association (same firewall as
-    weights). Extra covariates are aligned to the complete-case ``valid`` sample order."""
+    The covariate file must be y-independent and frozen before association. Extra covariates are
+    aligned to the complete-case ``valid`` sample order."""
     if not cov_cfg:
         return None, "none"
     n_pcs = int(cov_cfg.get("n_pcs", 0))
@@ -1041,8 +1000,8 @@ def _build_cov_arg(cov_cfg, valid: list):
 def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     """Multi-trait (pleiotropy) CLI path: complete-case across a frozen trait set, ACAT-across-traits.
 
-    The trait set is frozen (FrozenTraitSet) before any association; missing traits raise rather
-    than silently drop (a leakage guard), so multiplicity is honestly over G pairs."""
+    The trait set is frozen before any association; missing traits raise rather than silently drop,
+    so multiplicity is honestly over G pairs."""
     import hashlib
 
     import pandas as pd
@@ -1051,14 +1010,14 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     tlist = list(trait_set.traits)
     missing_tr = [t for t in tlist if t not in ph.columns]
     if missing_tr:
-        print(f"❌ interact multi_trait: traits not in phenotype {missing_tr} "
+        print(f"ERROR: interact multi_trait: traits not in phenotype {missing_tr} "
               f"(available {list(ph.columns)[:20]}...)")
         return 1
 
-    # complete-case: rows non-NA across ALL frozen traits (one shared sample set)
+    # complete-case: rows non-NA across all frozen traits (one shared sample set)
     valid = [s for s in samples if s in ph.index and bool(ph.loc[s, tlist].notna().all())]
     if len(valid) < 10:
-        print(f"❌ interact multi_trait: only {len(valid)} complete-case samples across "
+        print(f"ERROR: interact multi_trait: only {len(valid)} complete-case samples across "
               f"{len(tlist)} traits (need >=10)")
         return 1
     sample_idx = np.array([samples.index(s) for s in valid])
@@ -1114,7 +1073,7 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                    subgenomes=subs, traits=tlist, provenance=provenance, results=results)
     fp = out_dir / f"interact_multitrait_{trait_set.digest}.json"
     fp.write_text(json.dumps(payload, indent=2, default=float))
-    print(f"✅ homoeogwas interact (multi-trait) -> {fp} ({time.time()-t0:.1f}s)")
+    print(f"homoeogwas interact (multi-trait) -> {fp} ({time.time()-t0:.1f}s)")
     return 0
 
 
@@ -1129,11 +1088,11 @@ def cmd_interact(args) -> int:
     subs = list(ic["subgenomes"])
     mode = ic.get("mode", "pairwise")
     if mode == "pairwise" and len(subs) != 2:
-        print(f"❌ interact mode=pairwise needs exactly 2 subgenomes; got {subs}. "
+        print(f"ERROR: interact mode=pairwise needs exactly 2 subgenomes; got {subs}. "
               f"For hexaploids use mode=triad with 3 subgenomes.")
         return 1
     if mode == "triad" and len(subs) != 3:
-        print(f"❌ interact mode=triad needs exactly 3 subgenomes; got {subs}.")
+        print(f"ERROR: interact mode=triad needs exactly 3 subgenomes; got {subs}.")
         return 1
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1145,14 +1104,14 @@ def cmd_interact(args) -> int:
     samples = subdata[subs[0]].samples
     for s in subs[1:]:
         if subdata[s].samples != samples:
-            print(f"❌ interact: sample order mismatch between {subs[0]} and {s}")
+            print(f"ERROR: interact: sample order mismatch between {subs[0]} and {s}")
             return 1
 
     ph = pd.read_csv(ic["phenotype"], sep="\t").set_index(ic.get("sample_col", "sample"))
 
     if ic.get("multi_trait") is not None:
         if mode != "pairwise":
-            print(f"❌ interact: multi_trait is pairwise-only; mode={mode} not supported (future).")
+            print(f"ERROR: interact: multi_trait is pairwise-only; mode={mode} not supported (future).")
             return 1
         return _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0)
 
@@ -1165,24 +1124,23 @@ def cmd_interact(args) -> int:
     cap = int(burden.get("cap", 150))
     perm_B = int(ic.get("calibration", {}).get("perm_B", 2000))
     grm_cfg = ic.get("grm", {})
-    grm_method = grm_cfg.get("method", "compute_grm_maf")   # default reproduces research scripts
+    grm_method = grm_cfg.get("method", "compute_grm_maf")
     maf_min = float(grm_cfg.get("maf_min", 0.01))
     n_jobs = int(args.n_jobs)
 
-    # optional fixed-effect covariates (genotype PCs and/or a y-independent covariate file).
-    # Absent => covariate_policy "none" (exact legacy reproduction). PCs are opt-in.
+    # optional fixed-effect covariates (genotype PCs and/or a y-independent covariate file)
     cov_arg, cov_label = _build_cov_arg(ic.get("covariates"), valid)
     if cov_arg:
         print(f"  covariates: {cov_label}", flush=True)
 
-    # opt-in FULL genome-wide ranking dump (outputs.full_ranking: true). Off => legacy bit-exact.
+    # opt-in full genome-wide ranking dump (outputs.full_ranking: true)
     dump_on = bool(cfg.get("outputs", {}).get("full_ranking", False))
 
     def _dump_path(transform):
         return str(out_dir / f"interact_{trait}_ranking_{mode}_{transform}.tsv") if dump_on else None
 
     if mode == "triad":
-        triads = _load_pairs(ic["triads"], subs)            # gene_<S> columns -> (g0,g1,g2)
+        triads = _load_pairs(ic["triads"], subs)            # gene_<S> columns -> (g0, g1, g2)
         triad_weights = _load_pair_weights(ic.get("weights"), subs) if ic.get("weights") else None
         print(f"  n={len(valid)} triads(raw)={len(triads)}"
               + (f" weights={len(triad_weights)}" if triad_weights else "")
@@ -1264,7 +1222,7 @@ def cmd_interact(args) -> int:
                    provenance=provenance, results=results)
     fp = out_dir / f"interact_{trait}.json"
     fp.write_text(json.dumps(payload, indent=2, default=float))
-    print(f"✅ homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")
+    print(f"homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")
     return 0
 
 

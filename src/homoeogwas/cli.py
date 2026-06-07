@@ -1,21 +1,19 @@
-"""HomoeoGWAS command-line interface (Phase 2 EXIT — ``homoeogwas fit``).
+"""HomoeoGWAS command-line interface (``homoeogwas fit``).
 
-A YAML-config-driven wrapper around the frozen core engine. The whole
-subgenome-stratified LMM GWAS runs from one config plus <= 5 flags:
+A YAML-config-driven wrapper around the core engine. The whole
+subgenome-stratified LMM GWAS runs from one config plus a few flags:
 
     homoeogwas fit --config run.yaml [--out-dir DIR] [--backend cpu|gpu|auto]
                    [--dry-run] [--force]
 
-Pipeline (generalised to J subgenomes — Horvath A/C, wheat A/B/D, ...):
+Pipeline (generalised to J subgenomes, e.g. A/C, A/B/D):
 
-    per-subgenome VanRaden GRM  (cached .npz or computed from BED)
+    per-subgenome VanRaden GRM (cached .npz or computed from BED)
       -> normalize_kernel  [+ optional homoeolog Hadamard kernel]
       -> fit_multi_reml    (multi-kernel REML variance components)
       -> build_scan_context (fixed-V projection P)
-      -> scan_snps (in-memory) | scan_bed_stream (wheat-scale streaming)
+      -> scan_snps (in-memory) | scan_bed_stream (streaming)
       -> per-SNP sumstats + QQ + Manhattan + lambda_GC + summary JSON
-
-The engine modules (io / grm / kernel / lmm / scan) are imported unchanged.
 """
 from __future__ import annotations
 
@@ -44,9 +42,7 @@ from .scan import (
     scan_snps_loco,
 )
 
-# ---------------------------------------------------------------------
 # config loading
-# ---------------------------------------------------------------------
 
 
 def _require_yaml():
@@ -73,7 +69,7 @@ def _get(d: dict, path: str, default=None):
 
 def load_config(config_path: str | Path) -> dict:
     """Load a fit run-config (YAML), merging defaults from an optional
-    ``panel_manifest`` reference. Returns the resolved config dict."""
+    ``panel_manifest`` reference, and return the resolved config dict."""
     yaml = _require_yaml()
     config_path = Path(config_path)
     if not config_path.exists():
@@ -153,7 +149,7 @@ def validate_config(cfg: dict) -> None:
     if nstarts is not None and (not isinstance(nstarts, int) or nstarts < 1):
         raise SystemExit(f"ERR: config reml.n_starts must be an integer >= 1, "
                          f"got {nstarts!r}")
-    # LOCO config (Phase 3 — M3.1)
+    # LOCO config
     loco_cfg = _get(cfg, "scan.loco")
     if loco_cfg is not None:
         if not isinstance(loco_cfg, dict):
@@ -188,9 +184,7 @@ def validate_config(cfg: dict) -> None:
                 "bed_prefix_template at the pruned per-subgenome BED).")
 
 
-# ---------------------------------------------------------------------
 # preflight
-# ---------------------------------------------------------------------
 
 
 def _scan_bed_prefix(cfg: dict, sg: str) -> Path:
@@ -227,9 +221,7 @@ def preflight(cfg: dict) -> list[str]:
     return problems
 
 
-# ---------------------------------------------------------------------
 # phenotype + sample join
-# ---------------------------------------------------------------------
 
 
 def _check_unique(samples: np.ndarray, label: str) -> np.ndarray:
@@ -298,9 +290,7 @@ def join_samples(cfg: dict):
     return np.array(analysis, dtype=object), y, X
 
 
-# ---------------------------------------------------------------------
 # GRM + kernels
-# ---------------------------------------------------------------------
 
 
 def build_kernels(cfg: dict, analysis_samples: np.ndarray):
@@ -353,9 +343,8 @@ def build_kernels(cfg: dict, analysis_samples: np.ndarray):
                     f"{len(missing)} analysis samples (e.g. {missing[:3]})")
             idx = np.array([pos[str(s)] for s in analysis_samples], dtype=np.int64)
             from .io import GenoChunk
-            # cast to float64: load_bed_hardcall yields float32, and a
-            # float32 VanRaden GRM carries ~1e-7 eigenvalue noise that trips
-            # the REML PSD check (eig_tol 1e-8).
+            # cast to float64: a float32 VanRaden GRM carries ~1e-7 eigenvalue
+            # noise that trips the REML PSD check (eig_tol 1e-8).
             sub = GenoChunk(samples=np.asarray(analysis_samples, dtype=object),
                             variant_ids=geno.variant_ids, chrom=geno.chrom,
                             pos=geno.pos,
@@ -378,22 +367,19 @@ def build_loco_kernels(
     cfg: dict, analysis_samples: np.ndarray,
 ) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, np.ndarray],
            dict[str, str], dict]:
-    """Build per-chrom LOCO kernels + global kernels.
+    """Build per-chrom LOCO kernels and the global kernels.
 
-    LOCO needs both:
-      • ``global_kernels`` — the conventional ``{name -> K (n,n)}`` used to fit
-        the variance components (σ² is global, not refit per chrom).
-      • ``kernels_by_chrom`` — ``{chrom -> {name -> K_(-c) (n,n)}}`` for
-        :func:`scan.build_loco_scan_contexts`.
+    LOCO needs both ``global_kernels`` (``{name -> K (n,n)}``, used to fit the
+    variance components, which are global and not refit per chrom) and
+    ``kernels_by_chrom`` (``{chrom -> {name -> K_(-c) (n,n)}}``, consumed by
+    :func:`scan.build_loco_scan_contexts`).
 
-    Reads each subgenome's GRM BED once, runs ``compute_loco_grm_parts`` to
-    get the global part + per-chrom partials, then builds K_j(-c) by
-    subtraction.  For a non-affected subgenome at chrom c (``sub_j != sub_c``)
-    we reuse the global raw GRM as K_j(-c) — leaving it out costs only
-    elementwise Hadamard recomputation, not a full GRM rebuild.
+    Reads each subgenome's GRM BED once, runs ``compute_loco_grm_parts`` for the
+    global part plus per-chrom partials, then builds K_j(-c) by subtraction. A
+    subgenome not affected at chrom c (``sub_j != sub_c``) reuses the global raw
+    GRM, so only the Hadamard kernel is recomputed, not the full GRM.
 
-    Returns:
-        ``(kernels_by_chrom, global_kernels, chrom_to_subgenome, grm_info)``.
+    Returns ``(kernels_by_chrom, global_kernels, chrom_to_subgenome, grm_info)``.
     """
     from .io import GenoChunk
 
@@ -414,7 +400,7 @@ def build_loco_kernels(
     grm_info: dict = {"source": source, "normalize": norm,
                        "loco_enabled": True, "raw": {}, "loco": {}}
 
-    # 1. Read each subgenome's BED, align samples, accumulate parts
+    # read each subgenome's BED, align samples, accumulate parts
     global_parts: dict[str, GRMPart] = {}
     parts_per_sub: dict[str, dict[str, GRMPart]] = {}
     chrom_to_sub: dict[str, str] = {}
@@ -453,7 +439,7 @@ def build_loco_kernels(
             "denominator_total": float(global_part.denominator),
         }
 
-    # 2. Global normalised kernels (for REML σ² fit)
+    # global normalised kernels (for the REML variance-component fit)
     raw_global = {sg: global_parts[sg].grm for sg in subg}
     global_kernels = {
         sg: normalize_kernel(raw_global[sg], mode=norm) for sg in subg
@@ -462,10 +448,10 @@ def build_loco_kernels(
         K_hom_global = hadamard_kernel({sg: raw_global[sg] for sg in subg})
         global_kernels[had_name] = normalize_kernel(K_hom_global, mode=norm)
 
-    # 3. Per-chrom LOCO kernels
+    # per-chrom LOCO kernels
     kernels_by_chrom: dict[str, dict[str, np.ndarray]] = {}
     for c, sub_c in chrom_to_sub.items():
-        # raw_loco: subgenome sub_c is LOCO-subtracted; the others reuse global
+        # subgenome sub_c is LOCO-subtracted; the others reuse the global GRM
         raw_loco: dict[str, np.ndarray] = {}
         loco_info_c: dict = {}
         for sg in subg:
@@ -504,9 +490,7 @@ def build_loco_kernels(
     return kernels_by_chrom, global_kernels, chrom_to_sub, grm_info
 
 
-# ---------------------------------------------------------------------
 # scan
-# ---------------------------------------------------------------------
 
 
 def _count_markers(cfg: dict, subg: list[str]) -> int:
@@ -609,22 +593,19 @@ def run_scan(cfg: dict, ctx, subg: list[str], backend: str, out_dir: Path,
             "filter_counts": filt, "loco": is_loco}
 
 
-# ---------------------------------------------------------------------
 # scan summary (bounded memory) + plots
-# ---------------------------------------------------------------------
 
 
 def scan_summary(scan_out: dict, subg: list[str], *,
                  plot_target: int = 200_000, plot_keep_p: float = 1e-3):
     """One bounded-memory pass over the scan output.
 
-    Returns (lambda_df, plot_df, qc). χ² is streamed into a single
+    Returns ``(lambda_df, plot_df, qc)``. chi2 is streamed into a single
     preallocated float64 array (sized from ``n_markers_kept``) plus an int16
-    subgenome-code array — no per-chunk duplication, ~0.85 GB even at wheat
-    83M scale. The plot frame is systematically thinned to ≈ ``plot_target``
-    markers PLUS every marker with p ≤ ``plot_keep_p``, so plotting never has
-    to render tens of millions of points. Streaming output is read chunk by
-    chunk; the full sumstats DataFrame is never materialised.
+    subgenome-code array, so memory stays ~0.85 GB even at the 83M-marker wheat
+    scale. The plot frame is thinned to roughly ``plot_target`` markers plus
+    every marker with p <= ``plot_keep_p``; the full sumstats DataFrame is never
+    materialised.
     """
     n_total = max(int(scan_out.get("n_markers_kept", 0)), 1)
     thin = max(1, n_total // max(plot_target, 1))
@@ -760,9 +741,7 @@ def make_plots(df: pd.DataFrame, subg: list[str], out_dir: Path, prefix: str,
     return paths
 
 
-# ---------------------------------------------------------------------
 # fit command
-# ---------------------------------------------------------------------
 
 
 def _json_default(o):
@@ -812,8 +791,8 @@ def cmd_fit(args) -> int:
             print(f"  ERR preflight: {p}")
         raise SystemExit("ERR: preflight failed — fix the paths above")
 
-    # refuse ANY non-empty output dir without --force — a crashed partial run
-    # (sumstats/plots but no summary) must not be silently overwritten.
+    # refuse a non-empty output dir without --force, so a crashed partial run
+    # is not silently overwritten.
     if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
         raise SystemExit(
             f"ERR: output dir {out_dir} is not empty; pass --force to overwrite")
@@ -825,14 +804,14 @@ def cmd_fit(args) -> int:
         acceptance.append({"check": name, "passed": bool(ok), "message": msg})
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {msg}" if msg else ""))
 
-    # --- samples + phenotype -----------------------------------------
+    # samples + phenotype
     analysis, y, X = join_samples(cfg)
     n = len(analysis)
     print(f"\n[1] analysis set: n={n}  var(y)={np.var(y, ddof=1):.4g}")
     pd.DataFrame({"sample": analysis}).to_csv(
         out_dir / "analysis_samples.tsv", sep="\t", index=False)
 
-    # --- GRM + kernels -----------------------------------------------
+    # GRM + kernels
     loco_enabled = bool(_get(cfg, "scan.loco.enabled", False))
     kernels_by_chrom: dict[str, dict[str, np.ndarray]] | None = None
     chrom_to_sub: dict[str, str] | None = None
@@ -850,7 +829,7 @@ def cmd_fit(args) -> int:
         kernels, grm_info = build_kernels(cfg, analysis)
         print(f"  kernels: {list(kernels.keys())}")
 
-    # --- multi-kernel REML (GLOBAL σ² — LOCO does not refit per chrom) -----
+    # multi-kernel REML (global variance components; LOCO does not refit per chrom)
     print("[3] multi-kernel REML")
     n_starts = int(_get(cfg, "reml.n_starts", 10))
     seed = int(_get(cfg, "reml.seed", 2026))
@@ -860,23 +839,20 @@ def cmd_fit(args) -> int:
     check("reml_converged", bool(reml.optimizer_status))
     check("reml_pve_sums_to_1", abs(sum(reml.pve.values()) - 1.0) < 1e-6)
 
-    # --- scan context ------------------------------------------------
+    # scan context
     if loco_enabled:
         assert kernels_by_chrom is not None
         ctx = build_loco_scan_contexts(
             y, X, kernels_by_chrom, reml.sigma2, sample_ids=analysis)
         jitter_vals = list(ctx.jitter_by_chrom.values())
         max_jitter = float(max(jitter_vals)) if jitter_vals else 0.0
-        # Checks the per-chrom V_(-c) Cholesky succeeds without jitter; this
-        # is a necessary (not sufficient) condition for K_(-c) PSD. K_(-c)
-        # itself is PSD by construction (sum of PSD chrom parts), so a stricter
-        # min-eigvalue gate would be redundant at this layer.
+        # checks each per-chrom V_(-c) Cholesky succeeds without jitter; K_(-c)
+        # is PSD by construction, so a stricter min-eigenvalue gate is redundant.
         check("loco_all_chrom_V_pd",
               max_jitter < 1e-6,
               f"max per-chrom V Cholesky jitter {max_jitter:.3g}")
-        # Aggregate low-retained-chrom warning (statistical thinness, not
-        # numerical degeneracy — the latter would have raised in
-        # loco_grm_from_parts).
+        # warn on chroms with thin retained denominator (statistical, not
+        # numerical -- degeneracy would already have raised in loco_grm_from_parts)
         low_risk = [c for c, info in grm_info["loco"].items()
                     if info.get("retained_fraction_low_risk", False)]
         check("loco_all_chrom_retained_above_warn",
@@ -887,7 +863,7 @@ def cmd_fit(args) -> int:
         ctx = build_scan_context(y, X, kernels, reml.sigma2,
                                  sample_ids=analysis)
 
-    # --- scan --------------------------------------------------------
+    # scan
     scan_mode, mode_info = resolve_scan_mode(cfg, subg, n)
     print(f"[4] per-SNP scan  mode={scan_mode}  backend={backend}")
     scan_out = run_scan(cfg, ctx, subg, backend, out_dir, prefix, scan_mode)
@@ -895,7 +871,7 @@ def cmd_fit(args) -> int:
           f"{scan_out['n_markers_kept']} kept  backend={scan_out['backend_used']}")
     check("scan_has_markers", scan_out["n_markers_kept"] > 0)
 
-    # --- lambda + plots (bounded-memory pass over scan output) -------
+    # lambda + plots (bounded-memory pass over scan output)
     lam_df, plot_df, qc = scan_summary(scan_out, subg)
     check("p_in_unit_interval", qc["p_ok"])
     check("chi2_nonneg", qc["chi2_ok"])
@@ -912,7 +888,7 @@ def cmd_fit(args) -> int:
         for pth in plot_paths:
             print(f"  wrote {pth}")
 
-    # --- resolved config + summary -----------------------------------
+    # resolved config + summary
     yaml = _require_yaml()
     clean_cfg = {k: v for k, v in cfg.items() if not k.startswith("_")}
     with open(out_dir / "resolved_config.yaml", "w") as fh:
@@ -972,16 +948,14 @@ def cmd_fit(args) -> int:
     print(f"acceptance: {n_pass}/{len(acceptance)} checks passed  "
           f"(runtime {summary['runtime_sec']}s)")
     if all_passed:
-        print("✅ homoeogwas fit completed")
+        print("homoeogwas fit completed")
         return 0
     failed = [c["check"] for c in acceptance if not c["passed"]]
-    print(f"❌ homoeogwas fit — failed checks: {failed}")
+    print(f"ERROR: homoeogwas fit — failed checks: {failed}")
     return 1
 
 
-# ---------------------------------------------------------------------
 # parser / entry point
-# ---------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1005,11 +979,11 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--force", action="store_true",
                      help="overwrite a non-empty output directory")
 
-    # Phase 5a Step 2: generalized subgenome split driven by species YAML
+    # generalized subgenome split driven by a species YAML
     from .species_split import add_split_subparser
     add_split_subparser(sub)
 
-    # Phase 7: homoeolog-pair burden-product interaction scan
+    # homoeolog-pair burden-product interaction scan
     from .interact import add_interact_subparser
     add_interact_subparser(sub)
 
