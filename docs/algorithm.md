@@ -1,6 +1,6 @@
 # Algorithm
 
-This page summarizes the statistical model and the design choices. The frozen claim hierarchy is in [Project Charter](00_charter.md); revision history is in `docs/00_charter.md` §9.
+This page summarizes the statistical model and the design choices. The frozen claim hierarchy is in the project charter (under `reproducibility/paper/notes/`); revision history is in the project charter §9.
 
 ## 1. Subgenome-partitioned LMM (main claim)
 
@@ -51,7 +51,7 @@ If you are extending this project, the charter lists three Tier-2 revival paths:
 
 - **C + G**: synteny-aware **local K_hom** — Hadamard within syntenic ortholog blocks instead of global GRM; requires building `homoeolog_map`
 - **B**: epistasis-rich trait class re-test — wheat heading date (Ppd × Vrn known digenic), cotton lint × fiber joint, disease R-gene panels
-- See `docs/00_charter.md` §2.1 for the 5-item hard gate that revival must satisfy before K_hom can be promoted to main claim
+- See the project charter §2.1 for the 5-item hard gate that revival must satisfy before K_hom can be promoted to main claim
 
 ### n-subgenome auto-fallback
 

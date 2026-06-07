@@ -12,7 +12,6 @@ from homoeogwas.khom_tier1 import (
     recall_at_k,
     self_liang_lrt,
     simulate_additive_plus_epistasis,
-    spike_in_power_grid,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,34 +142,17 @@ def test_simulate_rejects_unnormalized_by_default():
         simulate_additive_plus_epistasis(K_pool, K_hom, sc)
 
 
-def test_spike_in_power_grid_smoke():
-    """Just verify the grid runs end-to-end on a tiny problem.
+def test_placeholder_spike_in_grid_removed():
+    """The fabricated spike-in power grid (PLACEHOLDER REML) was removed (2026-06-02).
+    Guard that the fake public symbols are gone so no caller can resurrect fake numbers;
+    the simulator (simulate_additive_plus_epistasis) stays. Real power = Phase 7
+    scripts/phase7/d2_khom_recoverability.py + diagnostics.boundary_lrt."""
+    import homoeogwas.khom_tier1 as kt
 
-    Uses the placeholder REML in khom_tier1._run_one_replicate; production
-    grade comes when fit_multi_reml is wired (TODO in module docstring).
-    """
-    rng = np.random.default_rng(42)
-    n = 60
-    A = rng.standard_normal((n, 20))
-    K_pool = (A @ A.T) / 20
-    B = rng.standard_normal((n, 20))
-    K_hom = (B @ B.T) / 20
-    df = spike_in_power_grid(
-        K_pool, K_hom,
-        n_grid=(30, 50),
-        h2_epi_grid=(0.0, 0.2),
-        n_replicates=5,
-        base_seed=1,
-        skip_normalization_check=True,   # random kernels in test
-    )
-    assert len(df) == 4  # 2 × 2 grid
-    assert set(df.columns) >= {"n", "h2_add", "h2_epi",
-                               "n_replicates", "n_detected", "power",
-                               "mean_sigma2_h", "mean_p",
-                               "backend", "paper_value"}
-    # power monotonicity is NOT enforced (placeholder REML); we just check
-    # values are in valid range
-    assert (df["power"] >= 0).all() and (df["power"] <= 1).all()
-    # Codex Q4 fix: PLACEHOLDER output must be explicitly marked
-    assert (df["backend"] == "PLACEHOLDER").all()
-    assert (df["paper_value"].eq(False)).all()
+    assert not hasattr(kt, "spike_in_power_grid")
+    assert not hasattr(kt, "_run_one_replicate")
+    assert not hasattr(kt, "SpikeInResult")
+    assert "spike_in_power_grid" not in kt.__all__
+    assert "SpikeInResult" not in kt.__all__
+    # the real simulator is retained
+    assert hasattr(kt, "simulate_additive_plus_epistasis")

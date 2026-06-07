@@ -1,0 +1,26 @@
+# Multi-trait (pleiotropy) homoeolog-pair interaction scan — ACAT across a FROZEN trait set.
+# The trait set below is a PREDECLARED a-priori cluster (classic fiber-quality traits), chosen
+# on biological grounds BEFORE any association — NOT by per-trait GWAS significance. This freezing
+# is what makes the multiplicity-over-G (not G*T) claim valid; the tool records its sha256 digest.
+interact:
+  subgenomes: [A, D]
+  genotype:
+    A: data/processed/cotton/A/all
+    D: data/processed/cotton/D/all
+  snp_to_gene:
+    A: results/phase7/bio_full/snp_to_gene_body.npz
+    D: results/phase7/bio_full/snp_to_gene_body.npz
+  pairs: results/phase7/bio_full/pairs_body_same.tsv
+  phenotype: data/processed/cotton/pheno_m3_4_blue.tsv
+  sample_col: sample
+  # predeclared, frozen fiber-quality cluster (order is recorded; do not reorder post-hoc)
+  multi_trait:
+    - fiber_length_BLUE
+    - fiber_strength_BLUE
+    - micronaire_BLUE
+    - elongation_BLUE
+    - length_uniformity_BLUE
+  burden: {cap: 150, min_snp: 3}
+  calibration: {perm_B: 200}
+outputs:
+  out_dir: results/phase7/interact_validate

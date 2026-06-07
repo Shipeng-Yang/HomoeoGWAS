@@ -1008,7 +1008,62 @@ def build_parser() -> argparse.ArgumentParser:
     # Phase 5a Step 2: generalized subgenome split driven by species YAML
     from .species_split import add_split_subparser
     add_split_subparser(sub)
+
+    # Phase 7: homoeolog-pair burden-product interaction scan
+    from .interact import add_interact_subparser
+    add_interact_subparser(sub)
+
+    val = sub.add_parser("validate", help="load + validate a run config and "
+                                          "check input paths, without running")
+    val.add_argument("-c", "--config", required=True, help="YAML run-config path")
+
+    dem = sub.add_parser("demo", help="generate a tiny synthetic dataset and run "
+                                      "an end-to-end fit (install self-test)")
+    dem.add_argument("-o", "--out", default="demo_run",
+                     help="output directory for the demo dataset + fit (default: demo_run)")
+    dem.add_argument("--keep", action="store_true",
+                     help="keep the generated demo dataset after the fit")
     return ap
+
+
+def cmd_validate(args) -> int:
+    """Load + validate a config and run path preflight; report, don't compute."""
+    cfg = load_config(args.config)
+    validate_config(cfg)
+    print(f"[validate] schema OK: {args.config}")
+    if cfg.get("_panel_manifest_resolved"):
+        print(f"  panel_manifest: {cfg['_panel_manifest_resolved']}")
+    problems = preflight(cfg)
+    if not problems:
+        print("[validate] input preflight: OK")
+        return 0
+    print(f"[validate] input preflight: {len(problems)} problem(s):")
+    for p in problems:
+        print(f"  - {p}")
+    return 1
+
+
+def cmd_demo(args) -> int:
+    """Self-test: synthesise a tiny dataset, run a full fit, list outputs."""
+    import shutil
+
+    from .demo_data import make_demo
+    out = Path(args.out)
+    print(f"[demo] generating synthetic allotetraploid dataset in {out} ...")
+    cfg_path = make_demo(out)
+    fit_args = argparse.Namespace(config=str(cfg_path), out_dir=str(out / "demo_out"),
+                                  backend="cpu", dry_run=False, force=True)
+    print("[demo] running homoeogwas fit ...")
+    rc = cmd_fit(fit_args)
+    if rc == 0:
+        print(f"\n[demo] SUCCESS — outputs in {out / 'demo_out'}:")
+        for f in sorted((out / "demo_out").glob("*")):
+            print(f"    {f.name}")
+        print("[demo] install verified end-to-end.")
+    if not args.keep and rc == 0:
+        shutil.rmtree(out, ignore_errors=True)
+        print(f"[demo] cleaned up {out} (use --keep to retain).")
+    return rc
 
 
 def main(argv=None) -> int:
@@ -1018,6 +1073,13 @@ def main(argv=None) -> int:
     if args.subcommand == "split":
         from .species_split import cmd_split
         return cmd_split(args)
+    if args.subcommand == "interact":
+        from .interact import cmd_interact
+        return cmd_interact(args)
+    if args.subcommand == "validate":
+        return cmd_validate(args)
+    if args.subcommand == "demo":
+        return cmd_demo(args)
     return 1
 
 

@@ -1,0 +1,20 @@
+interact:
+  mode: triad
+  subgenomes: [A, B, D]
+  genotype:
+    A: results/phase7/interact_validate/wheat_chr1/A/all
+    B: results/phase7/interact_validate/wheat_chr1/B/all
+    D: results/phase7/interact_validate/wheat_chr1/D/all
+  snp_to_gene:
+    A: results/phase7/interact_validate/wheat_chr1/snp_to_gene_A.npz
+    B: results/phase7/interact_validate/wheat_chr1/snp_to_gene_B.npz
+    D: results/phase7/interact_validate/wheat_chr1/snp_to_gene_D.npz
+  triads: results/phase7/interact_validate/wheat_chr1/triads_chr1.tsv
+  phenotype: data/processed/wheat/pheno_clean.tsv
+  sample_col: sample
+  trait: days_to_emerg
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/phase7/interact_validate

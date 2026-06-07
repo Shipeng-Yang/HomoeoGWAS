@@ -14,14 +14,25 @@ Tier 1 paths
 
 * **Path A — boundary-aware variance test**: Self-Liang (1987) mixture χ²
   for a single variance component at the boundary. Replaces the naive REML
-  σ²_h estimate (pegged at 0 in 4/4 Phase 5c panels) with an honest
-  likelihood-ratio test that respects the boundary.
+  σ²_h estimate with an honest likelihood-ratio test that respects the
+  boundary. (In the Phase 5c per-fold GBLUP fits, σ²_h boundary estimates
+  occurred in only ~20–68% of folds — *not* uniformly — and non-zero
+  estimates were sometimes comparable in scale to the subgenome components
+  in wheat. K_hom
+  is therefore best read as unstable / low-support, not uniformly pegged at
+  zero.)
 
-* **Path H' — spike-in simulation**: inject controlled digenic epistasis
-  between two subgenomes and measure the detection rate of K_hom (σ²_h
-  significantly > 0) as a function of sample size and true epistasis
-  variance fraction. Shows whether Phase 5c's universal null is intrinsic
-  to the K_hom test or only to the panel-trait conditions we tested.
+* **Path H' — spike-in simulation**: this module ships only the *simulator*
+  (``simulate_additive_plus_epistasis``) that injects controlled digenic
+  epistasis between two subgenomes. The earlier in-module power grid
+  (``spike_in_power_grid`` / ``_run_one_replicate``) returned a PLACEHOLDER
+  (fabricated, never real REML) and was **removed (2026-06-02)**. The real
+  spike-in recoverability/power analysis was done with genuine REML in
+  Phase 7 (``scripts/phase7/d2_khom_recoverability.py``): weak power
+  ~0.17–0.21 at PVE_hom=0.20 with ~8–10% upward bias under the null —
+  K_hom variance is barely recoverable even when it is the ground truth.
+  For an in-package boundary-corrected LRT, use
+  ``homoeogwas.diagnostics.compare_nested_reml`` + ``boundary_lrt``.
 
 Citation backbone
 -----------------
@@ -35,8 +46,7 @@ Citation backbone
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -283,35 +293,6 @@ class SpikeInScenario:
                 f"h2_add + h2_epi must be < 1: got {self.h2_add + self.h2_epi}")
 
 
-@dataclass
-class SpikeInResult:
-    """Outcome of a single spike-in REML fit.
-
-    Use ``.detected`` to summarize Tier 1 H' power: fraction of replicates
-    where the boundary-aware LRT rejects H0: σ²_h = 0 at the given alpha.
-
-    The ``backend`` field MUST be set to "PLACEHOLDER" while
-    ``_run_one_replicate`` returns the placeholder REML output
-    (see module docstring TODO). Production wire-up of ``fit_multi_reml``
-    will switch it to "reml". Downstream code should refuse to publish
-    PLACEHOLDER rows without an explicit override.
-    """
-
-    scenario: SpikeInScenario
-    sigma2_h_est: float
-    lrt_p: float
-    lrt_lr_stat: float
-    backend: Literal["PLACEHOLDER", "reml"] = "PLACEHOLDER"
-    paper_value: bool = False     # set True only when backend == "reml"
-    detected: bool = field(init=False)
-
-    def __post_init__(self):
-        self.detected = (self.lrt_p < 0.05) and (self.sigma2_h_est > 0)
-        if self.backend == "reml" and not self.paper_value:
-            # gentle correction; production should set both explicitly
-            self.paper_value = True
-
-
 def _assert_trace_normalized(K: np.ndarray, name: str, tol: float = 0.05) -> None:
     """Codex review Q3 fix: silent normalization drift would make h2_add/h2_epi
     misleadingly different from the requested variance ratios. Hard-fail rather
@@ -335,6 +316,11 @@ def simulate_additive_plus_epistasis(
     skip_normalization_check: bool = False,
 ) -> np.ndarray:
     """Draw a single phenotype y ~ N(0, h2_add·K_pool + h2_epi·K_hom + (1-h2_add-h2_epi)·I).
+
+    This is a **simulator only** — it returns a phenotype, it does NOT fit REML or
+    estimate detection power. For the real spike-in recoverability/power analysis see
+    ``scripts/phase7/d2_khom_recoverability.py`` (Phase 7, genuine REML); for an
+    in-package boundary-corrected LRT use ``homoeogwas.diagnostics.boundary_lrt``.
 
     Uses Cholesky/eigendecomposition factors of K_pool / K_hom to draw
     from the GRM-induced random effect distributions. **Both kernels must be
@@ -366,117 +352,14 @@ def simulate_additive_plus_epistasis(
     return y - y.mean()
 
 
-def spike_in_power_grid(
-    K_pool: np.ndarray,
-    K_hom: np.ndarray,
-    n_grid: Sequence[int],
-    h2_epi_grid: Sequence[float],
-    *,
-    h2_add: float = 0.30,
-    n_replicates: int = 50,
-    base_seed: int = 2026,
-    progress: bool = False,
-    skip_normalization_check: bool = False,
-) -> pd.DataFrame:
-    """For each (n, h2_epi), simulate ``n_replicates`` phenotypes and
-    measure the fraction where Self-Liang LRT for K_hom rejects H0.
-
-    Output columns:
-        n, h2_add, h2_epi, n_replicates, n_detected, power, mean_sigma2_h, mean_p
-
-    Cost note
-    ---------
-    Each replicate requires two ``fit_multi_reml`` calls (null + alt)
-    plus one ``kernel_factor`` on K_hom. For 50 replicates × 5 n_grid ×
-    4 h2_epi_grid that is 1000 REML fits. Default ``n_replicates=50``
-    is enough for a first-pass power curve; bump to 200 for paper.
-
-    This function imports ``fit_multi_reml`` lazily so the module remains
-    importable for pure helper testing without the full LMM dependency.
-    """
-    from .lmm import fit_multi_reml  # noqa: F401 — TODO: wire after impl audit
-
-    rows = []
-    n_max = K_pool.shape[0]
-    iterator = []
-    for n in n_grid:
-        if n > n_max:
-            raise ValueError(f"n={n} exceeds K_pool n={n_max}")
-        for h2_epi in h2_epi_grid:
-            iterator.append((int(n), float(h2_epi)))
-
-    for n, h2_epi in iterator:
-        if progress:
-            print(f"[spike] n={n} h2_epi={h2_epi}", flush=True)
-        scenarios = [
-            SpikeInScenario(n=n, h2_add=h2_add, h2_epi=h2_epi,
-                            seed=base_seed + 1000 * n + int(h2_epi * 1000) + r)
-            for r in range(n_replicates)
-        ]
-        results = [_run_one_replicate(K_pool, K_hom, sc,
-                                       skip_normalization_check=skip_normalization_check)
-                   for sc in scenarios]
-        det = sum(r.detected for r in results)
-        # Codex Q4 fix: surface backend + paper_value at the row level so
-        # downstream readers cannot mistake PLACEHOLDER rows for paper-grade.
-        backends = {r.backend for r in results}
-        paper_value = all(r.paper_value for r in results)
-        rows.append({
-            "n": n,
-            "h2_add": h2_add,
-            "h2_epi": h2_epi,
-            "n_replicates": n_replicates,
-            "n_detected": det,
-            "power": det / n_replicates,
-            "mean_sigma2_h": float(np.mean([r.sigma2_h_est for r in results])),
-            "mean_p": float(np.mean([r.lrt_p for r in results])),
-            "backend": "+".join(sorted(backends)),
-            "paper_value": paper_value,
-        })
-    return pd.DataFrame(rows)
-
-
-def _run_one_replicate(
-    K_pool: np.ndarray,
-    K_hom: np.ndarray,
-    scenario: SpikeInScenario,
-    *,
-    skip_normalization_check: bool = False,
-) -> SpikeInResult:
-    """One spike-in replicate: simulate y, fit null & alt, run LRT.
-
-    TODO(production): wire the actual ``fit_multi_reml`` call when ready.
-    For now we return a placeholder consistent with the API. This stub
-    lets driver scripts import-and-run a smoke pass without doing REML
-    on 50 replicates × 20 cells × 1000s (CPU-heavy, scaffolding only).
-
-    The returned ``SpikeInResult.backend`` is "PLACEHOLDER" and
-    ``paper_value`` is False — downstream readers and the spike_in_power_grid
-    aggregator surface this in the output TSV so the rows can never be
-    silently mistaken for paper-grade results (Codex review Q4 fix).
-    """
-    # Subset kernels to first n samples
-    n = scenario.n
-    K_p = K_pool[:n, :n]
-    K_h = K_hom[:n, :n]
-    # Call retained for its scenario/normalization validation side-effects;
-    # the placeholder REML below does not consume the simulated phenotype.
-    simulate_additive_plus_epistasis(K_p, K_h, scenario,
-                                      skip_normalization_check=skip_normalization_check)
-    # PLACEHOLDER REML output — replace with fit_multi_reml in production
-    # Self-Liang p drawn from a chi-squared mixture under H0 + simple
-    # signal-leak model proportional to h2_epi for sanity in tests.
-    rng = np.random.default_rng(scenario.seed + 999)
-    sigma2_h = max(0.0, scenario.h2_epi + 0.05 * rng.standard_normal())
-    lr_stat = max(0.0, 4.0 * (scenario.h2_epi * np.sqrt(n / 500.0)) ** 2
-                  + rng.chisquare(1) * 0.5)
-    from scipy.stats import chi2
-    p = 0.5 * float(chi2.sf(lr_stat, df=1)) if lr_stat > 0 else 1.0
-    return SpikeInResult(
-        scenario=scenario, sigma2_h_est=float(sigma2_h),
-        lrt_p=float(p), lrt_lr_stat=float(lr_stat),
-        backend="PLACEHOLDER", paper_value=False,
-    )
+# NOTE (2026-06-02): the in-module spike-in power grid (``spike_in_power_grid`` and its
+# ``_run_one_replicate`` helper) was REMOVED. It returned a PLACEHOLDER (it discarded the
+# simulated phenotype and fabricated σ²_h / LR statistics from a toy h2_epi formula — never a
+# real REML fit), so it could only ever emit non-paper-grade numbers. The genuine spike-in
+# recoverability/power analysis lives in ``scripts/phase7/d2_khom_recoverability.py`` (real REML:
+# weak power ~0.17–0.21 at PVE_hom=0.20, ~8–10% upward null bias). To run a real boundary-corrected
+# LRT on a simulated phenotype in-package, draw y with ``simulate_additive_plus_epistasis`` and test
+# it with ``homoeogwas.diagnostics.compare_nested_reml`` + ``boundary_lrt``.
 
 
 __all__ = [
@@ -486,7 +369,5 @@ __all__ = [
     "BoundaryLRT",
     "self_liang_lrt",
     "SpikeInScenario",
-    "SpikeInResult",
     "simulate_additive_plus_epistasis",
-    "spike_in_power_grid",
 ]

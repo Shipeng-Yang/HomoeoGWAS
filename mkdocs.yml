@@ -34,9 +34,9 @@ theme:
 nav:
   - Home: index.md
   - Getting Started: getting_started.md
+  - Inputs & Outputs: io.md
   - Algorithm: algorithm.md
   - API Reference: api.md
-  - Project Charter: 00_charter.md
 
 docs_dir: docs
 

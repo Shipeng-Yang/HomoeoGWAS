@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-260%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-287%20passed-brightgreen.svg)](#testing)
 <!-- DOI badge added after the first Zenodo release: -->
 <!-- [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
@@ -21,7 +21,7 @@ chromosome naming or `chrom_map`) and, for the DL-prior step, a reference FASTA.
 It combines:
 
 1. **Subgenome-partitioned random effects LMM** — `y = Xβ + u_A + u_B [+ u_D ...] + ε`, fit per-subgenome GRM under REML, with LOCO option per logical chromosome.
-2. **Optional homoeolog Hadamard kernel** (`K_hom = K_A ⊙ K_B [⊙ K_D]`) as **scope-conditional** epistasis term — currently treated as transparent negative finding pending synteny-aware revival (see [charter §2.1](docs/00_charter.md)).
+2. **Optional homoeolog Hadamard kernel** (`K_hom = K_A ⊙ K_B [⊙ K_D]`) as **scope-conditional** epistasis term — currently treated as transparent negative finding pending synteny-aware revival (see the project charter §2.1 under `reproducibility/paper/notes/`).
 3. **Zero-shot DL prior re-ranking** — PlantCaduceus + AgroNT log-likelihood fused with GWAS p-value as `z(-log10 p) + β · z(|LLR|)` over suggestive hits + LD blocks (~10⁵ SNPs); per-panel β chosen by LOQO grid.
 4. **Dual-GPU native stack** — per-SNP LMM scan on 2× RTX 3080 20 GB (~90 min for wheat 83.3M markers × 827 samples LOCO);ablation evidence + scalable workflow as the engineering contribution.
 
@@ -54,7 +54,7 @@ Known limitations a reviewer should be aware of:
 | Phase 5a (Species YAML schema + `homoeogwas split` + K_hom n-sub fallback) | ✅ |
 | Phase 5b (strawberry 8n Pincot 2018 validation panel) | ✅ |
 | Phase 5c (GBLUP Table 1 — K_hom universal null finding) | ✅ |
-| Phase 5d (oat AACCDD 6n blind-run, Rahman 2025 OLD panel) | ✅ — `pytest 260 passed + 1 skipped` |
+| Phase 5d (oat AACCDD 6n blind-run, Rahman 2025 OLD panel) | ✅ — `pytest 287 passed + 1 skipped` (CPU suite) |
 | Phase 4 (v1.0 release: repo + Zenodo + Snakemake + mkdocs + CI) | ⏳ this artifact set |
 
 Five panels spanning ploidy 2n→8n run through the same framework with zero
@@ -71,21 +71,22 @@ core-code change per species (subgenome-aware LMM universality).
 
 ```bash
 # 1. Install (CPU)
-pip install -e ".[dev]"
+pip install homoeogwas            # or: pip install -e ".[dev]" from a checkout
 
-# 2. (Optional) GPU extras for per-SNP scan + DL prior
-pip install -e ".[gpu]"   # transformers locked at 4.46.3
+# 2. Verify the install end-to-end (~2 s): synthesise a tiny dataset + run a fit
+homoeogwas demo --keep            # prints acceptance checks + lists the outputs
 
-# 3. Fit a single trait
-homoeogwas fit --config configs/runs/fit_horvath2020_plant_height_loco.yaml
+# 3. Run on your own data
+homoeogwas validate -c my_run.yaml    # check config + input paths first
+homoeogwas fit -c my_run.yaml -o results/my_run
 
-# 4. Configure a new allopolyploid species (zero code change in framework)
-cp configs/species/wheat_aestivum.yaml configs/species/myspecies.yaml
-# edit subgenomes + chrom_map + paths
-homoeogwas split --species configs/species/myspecies.yaml --vcf in.vcf.gz --out-dir data/processed/myspecies/
+# (Optional) GPU extras for the per-SNP scan + DL prior
+pip install "homoeogwas[gpu]"     # transformers locked at 4.46.3
 ```
 
-The CLI exposes **≤ 5 flags** (`--config`, `--out-dir`, `--backend`, `--dry-run`, `--force`) per charter §3.3 release item.
+See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
+config, and [the I/O contract](docs/io.md) for input/output formats. CLI
+subcommands: `fit`, `validate`, `demo`, `split`, `interact`.
 
 ## Adding a new species
 
@@ -137,7 +138,7 @@ src/homoeogwas/
 └── io.py                # io helpers
 ```
 
-See [`docs/00_charter.md`](docs/00_charter.md) for the frozen claim hierarchy and [`docs/03_architecture.md`](docs/03_architecture.md) for tech stack details.
+See [`reproducibility/paper/notes/00_charter.md`](reproducibility/paper/notes/00_charter.md) for the frozen claim hierarchy and [`reproducibility/paper/notes/03_architecture.md`](reproducibility/paper/notes/03_architecture.md) for tech-stack details.
 
 ## DL prior conditional lift (Phase 3.3 / 3.4 result)
 
@@ -158,7 +159,7 @@ Across three panels and four traits, fusing the PlantCaduceus + AgroNT ensemble 
 ```bash
 pytest -m "not gpu and not slow"   # CPU tests (~3-5 min)
 pytest -m "not slow"               # + GPU tests (requires polygwas-gpu env)
-pytest                             # full suite incl. simulation benchmarks (260 passed + 1 skipped)
+pytest                             # CPU suite: 287 passed + 1 skipped (GPU scan test skips without torch)
 ```
 
 CI runs ruff + pytest CPU smoke on Python 3.10 / 3.11 / 3.12. See `.github/workflows/ci.yml`.
@@ -170,16 +171,16 @@ PanGenie, STAAR, deepRVAT) are **not vendored** in this repository (size +
 heterogeneous licenses). Clone them on demand:
 
 ```bash
-bash scripts/reproduce_baselines.sh   # clones into benchmarks/
+bash reproducibility/paper/scripts/reproduce_baselines.sh   # clones into benchmarks/
 ```
 
 Large inputs (`data/`, ~950 GB) and intermediate outputs (`results/`, ~19 GB)
 are git-ignored. Release reproducibility fingerprints (SHA256 of the key paper
-artifacts) are committed at `results/phase4/reproducibility_fingerprints.tsv`;
+artifacts) are committed at `reproducibility/paper/results_phase4/reproducibility_fingerprints.tsv`;
 re-generate the DL-prior figure inputs with:
 
 ```bash
-rm -rf results/phase3/m3_3_dl_prior_v2 && snakemake paper_figures --cores 4
+cd reproducibility && rm -rf ../results/phase3/m3_3_dl_prior_v2 && snakemake paper_figures --cores 4
 ```
 
 ## Citation

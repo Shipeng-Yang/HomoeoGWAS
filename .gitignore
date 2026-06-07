@@ -9,15 +9,25 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
+# Internal / assistant tooling — never part of the public software package
+# (kept on disk for local workflow; scrubbed from history at release).
+# ---------------------------------------------------------------------------
+CLAUDE.md
+codex_isolated.sh
+codex*.sh
+
+# ---------------------------------------------------------------------------
 # Data and large reproducible outputs
 # ---------------------------------------------------------------------------
 data/
 benchmarks/
 
-# results/ excluded except results/phase4/ (release artifacts: reproducibility
-# fingerprints, paper_figures DAG receipt — part of the published package).
-results/*
-!results/phase4/
+# All run outputs are reproducible from reproducibility/ — not tracked.
+# (paper result fingerprints live under reproducibility/paper/results_phase4/.)
+results/
+reports/
+figures/
+tables/
 
 # ---------------------------------------------------------------------------
 # Snakemake metadata + DAG caches
@@ -122,3 +132,13 @@ plink.log
 # Misc
 # ---------------------------------------------------------------------------
 /tmp/
+
+# ---------------------------------------------------------------------------
+# Unpublished manuscript drafts — kept on disk, not tracked until publication
+# ---------------------------------------------------------------------------
+reproducibility/paper/notes/10_*
+reproducibility/paper/notes/11_*
+reproducibility/paper/notes/12_*
+reproducibility/paper/notes/13_*
+reproducibility/paper/notes/14_*
+reproducibility/paper/notes/review/

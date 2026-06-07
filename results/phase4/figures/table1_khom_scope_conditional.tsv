@@ -1,5 +1,0 @@
-panel	trait	n	n_sub	tier0_r2	delta_r2_tier1	ci_lo	ci_hi	sig_95	direction
-wheat_watkins	days_to_emerg	827	3	0.268	-0.0042	-0.0062	-0.0022	True	K_hom hurts
-cotton_hebau	fiber_length_BLUE	419	2	0.319	0.0191	0.0133	0.0253	True	K_hom helps
-rapeseed_horvath2020	bloom_50pct	297	2	0.34	-0.0151	-0.02	-0.0108	True	K_hom hurts
-strawberry_pincot2018	mean_score	564	4	0.506	0.0183	0.0175	0.0191	True	K_hom helps

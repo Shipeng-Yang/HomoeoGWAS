@@ -1,0 +1,21 @@
+# Cotton FULL-RANKING dump (task #1) — production-CLI pair scan over the full callable same-number
+# homoeolog-pair universe (body, fiber length; Hit1 secondary context). perm_B=0 because the ranking
+# TSV is permutation-independent (it persists the observed per-pair p-vector); the empirical-p fields
+# in the JSON are not needed for the dump. outputs.full_ranking turns on the descriptive TSV.
+interact:
+  subgenomes: [A, D]
+  genotype:
+    A: data/processed/cotton/A/all
+    D: data/processed/cotton/D/all
+  snp_to_gene:
+    A: results/phase7/bio_full/snp_to_gene_body.npz
+    D: results/phase7/bio_full/snp_to_gene_body.npz
+  pairs: results/phase7/bio_full/pairs_body_same.tsv
+  phenotype: data/processed/cotton/pheno_m3_4_blue.tsv
+  sample_col: sample
+  trait: fiber_length_BLUE
+  burden: {cap: 150, min_snp: 3}
+  calibration: {perm_B: 0}
+outputs:
+  out_dir: results/phase7/bio/cotton_ranking
+  full_ranking: true
