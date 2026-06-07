@@ -88,6 +88,21 @@ See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. CLI
 subcommands: `fit`, `validate`, `demo`, `split`, `interact`.
 
+## Docker
+
+```bash
+# CPU image (includes plink2 + bcftools, so split/VCF -> fit all work)
+docker build -t homoeogwas:cpu .
+docker run --rm homoeogwas:cpu demo                       # self-test
+docker run --rm -v "$PWD":/work -w /work homoeogwas:cpu fit -c run.yaml
+
+# GPU image (per-SNP scan + DL prior; CUDA 12.1)
+docker build -f Dockerfile.gpu -t homoeogwas:gpu .
+docker run --rm --gpus all -v "$PWD":/work -w /work homoeogwas:gpu fit -c run.yaml --backend gpu
+```
+
+Pass `--build-arg PIP_INDEX_URL=<mirror>` to build through a faster pip mirror.
+
 ## Adding a new species
 
 The framework is **not limited to the validated panels below** — any
