@@ -51,4 +51,4 @@ provenance:
     REF-match against Bra_napus_v2.0 fasta is 45-50% (sequence drift between
     Darmor v4.1 source and v2.0 polish); only REF-validated subset goes to
     DL prior scoring. Future option = use original Darmor v4.1 fasta + own
-    chrom_map (see docs/06 Phase 5/Codex finding #2).
+    chrom_map.

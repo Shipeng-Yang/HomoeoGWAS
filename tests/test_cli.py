@@ -336,13 +336,13 @@ def test_fit_pipeline_loco_in_memory(tmp_path):
     assert summary["loco"]["chrom_count"] >= 2
     # filename gets the _loco suffix in run_scan
     assert (out / "sumstats_trait_loco.tsv").exists()
-    # acceptance includes LOCO gates (Codex MINOR_FIX #2: name reflects what's
+    # acceptance includes LOCO gates (name reflects what's
     # actually checked — V_(-c) Cholesky jitter, not K PSD)
     acc_names = {c["check"] for c in summary["acceptance"]}
     assert "loco_all_chrom_V_pd" in acc_names
     assert "loco_chrom_to_subgenome_unique" in acc_names
     assert "loco_all_chrom_retained_above_warn" in acc_names
-    # Codex MINOR_FIX #1: provenance uses retained/removed (not "excluded")
+    # provenance uses retained/removed (not "excluded")
     one_chrom = next(iter(summary["loco"]["loco_chrom_provenance"].values()))
     assert "denom_retained" in one_chrom
     assert "denom_removed" in one_chrom

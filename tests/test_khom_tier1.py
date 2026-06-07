@@ -124,7 +124,7 @@ def test_simulate_additive_plus_epistasis_shape_and_centering():
     B = rng.standard_normal((n, 10))
     K_hom = (B @ B.T) / 10
     sc = SpikeInScenario(n=n, h2_add=0.3, h2_epi=0.2, seed=1)
-    # Random kernels are not trace-normalized; pass the bypass flag per Codex Q3 fix
+    # Random kernels are not trace-normalized; pass the bypass flag
     y = simulate_additive_plus_epistasis(K_pool, K_hom, sc,
                                           skip_normalization_check=True)
     assert y.shape == (n,)
@@ -132,7 +132,7 @@ def test_simulate_additive_plus_epistasis_shape_and_centering():
 
 
 def test_simulate_rejects_unnormalized_by_default():
-    """Codex Q3 fix: unnormalized kernels raise without bypass flag."""
+    """Unnormalized kernels raise without the bypass flag."""
     n = 30
     # Trace will be ≫ n → fails normalization check
     K_pool = np.eye(n) * 10.0

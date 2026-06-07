@@ -416,7 +416,7 @@ def test_scan_snps_loco_single_snp_matches_explicit_gls_wald():
 def test_scan_snps_loco_does_not_degrade_cis_chi2():
     """LOCO does NOT degrade the χ² at a planted cis-effect (regression test).
 
-    Codex review note: this is the floor — it does not by itself prove the
+    Note: this is the floor — it does not by itself prove the
     LOCO advantage. See test_scan_snps_loco_advantage_under_concentrated_*
     for a stronger fixture that exercises the proximal-contamination escape.
     """
@@ -651,7 +651,7 @@ def test_scan_bed_stream_loco_rejects_unknown_chrom(tmp_path):
     """Streaming LOCO must fail-fast on a BED chunk containing an unknown chrom.
 
     Mirror of test_scan_snps_loco_rejects_unknown_chrom but for the streaming
-    code path (Codex MINOR_FIX #5).
+    code path.
     """
     from bed_reader import to_bed
     y, X, kernels_by_chrom, sigma2, chunk, *_ = _toy_loco_setup(seed=88)
