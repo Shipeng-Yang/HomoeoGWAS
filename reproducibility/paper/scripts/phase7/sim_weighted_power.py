@@ -2,7 +2,7 @@
 """Power simulation for prior-weighted homoeolog-pair interaction testing (the hard
 "discover-more" evidence behind homoeogwas interact --weights).
 
-Question Codex flagged: does a y-INDEPENDENT prior (HEB / DL) that CORRELATES with the
+Question: does a y-INDEPENDENT prior (HEB / DL) that CORRELATES with the
 causal pairs let weighted-hypothesis testing detect MORE true interactions at a fixed
 FWER than unweighted Bonferroni — and does it stay calibrated when the prior is
 uninformative? This isolates the statistical property (whitening-agnostic: identity

@@ -294,7 +294,7 @@ def main():
                  "G drives BOTH power and the alpha/G multiple-testing burden (Part B power sim, separate)"],
         runtime_sec=round(time.time() - t0, 1))
     OUT.write_text(json.dumps(out, indent=2, default=float))
-    print(f"✅ wrote {OUT}  (anchors_all_consistent={anchors_all_consistent}; "
+    print(f"wrote {OUT}  (anchors_all_consistent={anchors_all_consistent}; "
           f"held-out rel-error={heldout_median_rel_error})  ({out['runtime_sec']}s)")
 
 

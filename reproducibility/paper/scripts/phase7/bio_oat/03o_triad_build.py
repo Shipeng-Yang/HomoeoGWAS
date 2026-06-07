@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OAT Step 3: build de-novo 1:1:1 A-C-D homoeolog triads from MCScanX collinearity.
 
-Codex design:
+Design:
   Tier1 (PRIMARY) strict 1:1:1: gene a has a UNIQUE reciprocal C partner (A-C blocks),
     a UNIQUE reciprocal D partner (A-D blocks), and that (c,d) pair is itself a UNIQUE
     reciprocal C-D collinear pair. Each gene used in at most one triad. Ambiguous /

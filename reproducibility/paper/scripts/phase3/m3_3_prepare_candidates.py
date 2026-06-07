@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
-P_MAX_DEFAULT = 1.0e-3                          # Codex plan §4
+P_MAX_DEFAULT = 1.0e-3
 LD_WINDOW_KB = 1000                             # ±1 Mb LD expansion per lead
 LD_MIN_R2 = 0.20
 KNOWN_SENTINEL_FLANK_BP = 100_000
@@ -49,11 +49,6 @@ def _json_default(o):
     if isinstance(o, np.ndarray):
         return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
-
-
-# ---------------------------------------------------------------------
-# Sumstats streaming
-# ---------------------------------------------------------------------
 
 
 def stream_significant(loco_paths: dict[str, Path], p_max: float
@@ -77,11 +72,6 @@ def stream_significant(loco_paths: dict[str, Path], p_max: float
                                        "beta","se","chi2","p"])
     return pd.concat(parts, ignore_index=True).sort_values(
         ["chrom","pos"]).reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------
-# LD expansion (plink2 --r-unphased on full BED)
-# ---------------------------------------------------------------------
 
 
 def expand_ld_partners(
@@ -151,11 +141,6 @@ def expand_ld_partners(
                 "r2": float(r[r2]),
             })
     return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------
-# BIM / FASTA harmonisation
-# ---------------------------------------------------------------------
 
 
 def load_bim_alleles(full_bed_root: Path,
@@ -240,11 +225,6 @@ def harmonize_with_fasta(
     return cand
 
 
-# ---------------------------------------------------------------------
-# Pick known-QTL sentinel SNPs from the 3 BIM files
-# ---------------------------------------------------------------------
-
-
 def known_qtl_sentinels(known_path: Path, full_bed_root: Path,
                          flank_bp: int = KNOWN_SENTINEL_FLANK_BP,
                          per_qtl: int = 10) -> pd.DataFrame:
@@ -275,11 +255,6 @@ def known_qtl_sentinels(known_path: Path, full_bed_root: Path,
                     "qtl_name": q["qtl_name"],
                 })
     return pd.DataFrame(out)
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
 
 
 def main():

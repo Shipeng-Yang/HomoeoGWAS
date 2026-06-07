@@ -6,10 +6,10 @@ K_pair) cannot detect SPARSE gene-scale homoeolog interaction: the few causal
 features are diluted among G null features (oracle true-feature kernel had
 power~1.0, so the signal exists — the failure is the dense-aggregation framing).
 
-Codex pivot: TEST EACH homoeolog pair individually and aggregate, exploiting
+Pivot: TEST EACH homoeolog pair individually and aggregate, exploiting
 synteny to keep the test count ~G (not exhaustive M_A×M_D).
 
-Method (Codex dual-plan):
+Method:
   per replicate:
     1. null LMM y ~ 1 + u + e, u~N(0, σ²_A K_A + σ²_D K_D)  (fit_multi_reml)
        -> V = σ²_A K_A + σ²_D K_D + σ²_e I ; whitening W = V^{-1/2}.
@@ -101,7 +101,7 @@ def _lambda_gc(pvals):
     """Genomic-control inflation factor from two-sided t-test p-values.
 
     Map p -> equivalent 1-df chi-square (z = Phi^{-1}(1-p/2), chi2 = z^2); do NOT
-    use t^2/0.4549 since finite-sample t^2 ~ F(1, n-4), not chi2_1 (Codex point B).
+    use t^2/0.4549 since finite-sample t^2 ~ F(1, n-4), not chi2_1.
     lambda = median(chi2_obs) / qchisq(0.5, 1).
     """
     p = np.clip(np.asarray(pvals, float), 1e-300, 1.0)
@@ -225,7 +225,8 @@ def _offset_partner_index(chrom_num, delta, rng):
 def _offset_rep(KA, KD, cholA, cholD, BA_sub, BD_sub, Uc, pve, seed):
     """Lean rep for pairing sanity: causal stays at rank pairs (Uc fixed); test uses
     offset/permuted D partner (BA_sub, BD_sub). Returns analytic ACAT p (calibration
-    established in patch ①, so power uses analytic acat_p<alpha, not empirical crit)."""
+    established by the tail-calibration block, so power uses analytic acat_p<alpha, not
+    empirical crit)."""
     rng = np.random.default_rng(seed)
     n = KA.shape[0]
     sa = ADDITIVE_PVE / 2
@@ -304,13 +305,13 @@ def run(panel, n_rep, null_rep, n_jobs, block_m, n_causal, bin_mode, bin_size,
                           causal_kind, causal_pairing)
     print(f"  n={n} G={G} block_m={block_m} C={Uc.shape[1]} ({time.time()-t0:.1f}s)")
 
-    # --- ARCHITECTURE PANEL (patch ③): off-model architecture sensitivity at locked
+    # --- ARCHITECTURE PANEL: off-model architecture sensitivity at locked
     #     PVE=0.20. Iterates 3 causal architectures (on-model block burden-product /
     #     single-SNP-pair / mixed-sign residualized), reuses the DEPLOYED burden-product
     #     test (BA_m, BD_m) unchanged, reports power + projection diagnostic + realized
-    #     PVE. Early returns: skips main grid/calib/sweep. Codex TOP_RISK -> cor_with_
-    #     burden_prod diagnostic separates "burden blind to existing signal" from "we
-    #     accidentally built undetectable signal". ---
+    #     PVE. Early returns: skips main grid/calib/sweep. The cor_with_burden_prod
+    #     diagnostic separates "burden blind to existing signal" from "we accidentally
+    #     built undetectable signal".
     if arch_panel:
         archs = [("on_model_concord", "interaction"),
                  ("single_snp_pair", "single_snp_pair"),
@@ -418,10 +419,10 @@ def run(panel, n_rep, null_rep, n_jobs, block_m, n_causal, bin_mode, bin_size,
         print(f"  PVE={pve:.2f} | PER-PAIR acat={rec['acat']:.2f} minp={rec['minp']:.2f} "
               f"|| omnibus hom={rec['hom']:.2f} pair={rec['pair']:.2f} "
               f"|| wrong-pair acat={rec['acat_wrong']:.2f}")
-    # --- TAIL CALIBRATION (patch ①): analytic ACAT p type-I @ multiple alpha +
+    # --- TAIL CALIBRATION: analytic ACAT p type-I @ multiple alpha +
     #     per-pair lambda_GC. type-I uses the ANALYTIC ACAT p (not empirical crit):
     #     empirical-percentile thresholds force type-I == alpha by construction
-    #     (circular; would mask real tail miscalibration — Codex TOP_RISK). ---
+    #     (circular; would mask real tail miscalibration).
     if n_calib > 0:
         probs = np.unique(np.clip(np.logspace(np.log10(1.0 / G), 0.0, 300), 1e-9, 1.0))
         cr = Parallel(n_jobs=n_jobs)(
@@ -457,7 +458,7 @@ def run(panel, n_rep, null_rep, n_jobs, block_m, n_causal, bin_mode, bin_size,
               f"iqr=[{np.percentile(lam_rep, 25):.3f},{np.percentile(lam_rep, 75):.3f}] | "
               f"per-pair pooled type-I={[(a, round(v, 4)) for a, v in pooled_tail.items()]}")
 
-    # --- PAIRING SANITY (patch ②): decouple P_causal (fixed at rank pairs) from
+    # --- PAIRING SANITY: decouple P_causal (fixed at rank pairs) from
     #     P_test (D partner shifted by delta within chrom). delta=0 -> oracle ceiling,
     #     'random' -> permuted floor (=acat_wrong), intermediate -> graceful decay vs
     #     knife-edge. Defuses "test-pairing==causal-pairing tautology". NOTE: only the

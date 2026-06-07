@@ -113,7 +113,7 @@ def main():
         print(f"  log_lik={res.log_lik:.4f}  log_δ={res.log_delta:.4f}")
         print(f"  σ_g²={res.sigma_g2:.4f}  σ_e²={res.sigma_e2:.4f}  h²={res.h2:.4f}")
         print(f"  min_eig(K)={res.min_eig:.4g}  n_eig_clipped={res.n_eig_clipped}")
-        # 0 ≤ h² ≤ 1 acceptance
+        # 0 <= h2 <= 1 acceptance
         assert 0.0 <= res.h2 <= 1.0, f"{name} h²={res.h2} out of [0,1]"
         assert res.sigma_e2 >= 0, f"{name} σ_e² negative"
         fits[name] = res
@@ -159,7 +159,7 @@ def main():
     with open(out_dir / "reml_info.json", "w") as f:
         json.dump(info, f, indent=2, default=str)
     print(f"wrote {out_dir / 'reml_info.json'}")
-    print(f"\n✅ M2.3 acceptance PASS for trait={args.trait}")
+    print(f"\nM2.3 acceptance PASS for trait={args.trait}")
 
 
 if __name__ == "__main__":

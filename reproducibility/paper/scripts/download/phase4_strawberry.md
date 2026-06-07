@@ -127,10 +127,10 @@ When v2 strawberry work starts (~month 9 of project plan):
 
 | Resource | Auto-downloadable? | Reason |
 |---|---|---|
-| FaRR1 ref (GDR) | ❌ | HTTP 403 to non-browser UA; Ft. Lauderdale click-through |
-| FaFM1 ref (NCBI) | ✅ | Could be scripted — see Option A2 |
-| Hardigan PRJNA578384 fastq | ⚠ | Requires sra-toolkit; TB-scale; out of W2 scope |
-| Prohaska SNP array | ⚠ | Journal supplement, not a stable URL |
+| FaRR1 ref (GDR) | | HTTP 403 to non-browser UA; Ft. Lauderdale click-through |
+| FaFM1 ref (NCBI) | | Could be scripted — see Option A2 |
+| Hardigan PRJNA578384 fastq | | Requires sra-toolkit; TB-scale; out of W2 scope |
+| Prohaska SNP array | | Journal supplement, not a stable URL |
 
 The auto-scriptable subset (FaFM1) does not justify a separate `phase4_strawberry.sh` — once you commit to v2, copy the Option A2 snippet inline.
 

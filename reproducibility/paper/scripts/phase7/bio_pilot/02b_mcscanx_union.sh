@@ -1,9 +1,9 @@
 #!/bin/bash
 # Phase A Step 2: diamond blastp self vs self + MCScanX on the UNION retained PEP
-# backbone (Codex Phase A: shared backbone across body / ±2kb modes -> later mode
+# backbone (Phase A: shared backbone across body / ±2kb modes -> later mode
 # differences are pure SNP-assignment differences, not synteny redefinition).
-# Top-20 hits/query (Codex recommendation, up from pilot's top-10); MCScanX defaults
-# m=5 min_anchors, max_gaps=25 (more permissive than pilot's default 5 — Codex notes
+# Top-20 hits/query (up from pilot's top-10); MCScanX defaults
+# m=5 min_anchors, max_gaps=25 (more permissive than pilot's default 5 —
 # MCScanX max_gaps semantics depend on whether gaps are counted in all GFF genes or
 # only retained PEP; 25 matches MCScanX standard usage).
 set -euo pipefail

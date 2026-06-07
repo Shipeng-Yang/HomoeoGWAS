@@ -13,7 +13,7 @@ bias-corrected HEB signal per copy and genotype as d_i(g) = p_i(g) - b_i. Real
 homoeolog bias = consistent deviation of the OBSERVED share from this mapping
 baseline, not from uniformity.
 
-Stats (per Codex review): all four copies are tested vs 0 (pre-specified, no
+Stats: all four copies are tested vs 0 (pre-specified, no
 winner-take-all selection), BH-FDR across copies x quartets; conserved/variable
 require an effect-size floor so low-count argmax noise does not inflate classes.
 

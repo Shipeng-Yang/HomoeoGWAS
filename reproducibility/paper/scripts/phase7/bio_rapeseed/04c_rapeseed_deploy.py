@@ -249,7 +249,7 @@ def main():
                      f"cross-species replication of cotton Phase A framework. Mode={args.mode}, "
                      f"pair_class={args.pair_class}, G={G}. Per-trait NA alignment "
                      "(each trait gets its own sample subset, K_A/K_C, burden matrices). "
-                     "INT primary + raw sensitivity, B=2000 y-shuffle perm. Codex TOP_RISK: "
+                     "INT primary + raw sensitivity, B=2000 y-shuffle perm. Top risk: "
                      "rapeseed SNP density ~10x sparser than cotton + Brassica post-WGD "
                      "fractionation reduces clean same-num collinear pairs => method-level "
                      "calibration replication achievable; discovery-level depends on flowering "

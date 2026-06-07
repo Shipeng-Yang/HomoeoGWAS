@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """hebau cotton CSV -> bgzipped VCF (single chromosome).
 
-CSV 列: CHROM,POS,REF,ALT,maf,B001,B002,...
-基因型字符串: "TT"/"TC"/"--"(缺失)  或半缺失 "T-".
+CSV columns: CHROM,POS,REF,ALT,maf,B001,B002,...
+Genotype string: "TT"/"TC"/"--" (missing) or half-missing "T-".
 
-用法: python _cotton_csv_to_vcf.py <chr_A01.csv.gz> <chr_A01.vcf.gz> <CHROM_id>
+Usage: python _cotton_csv_to_vcf.py <chr_A01.csv.gz> <chr_A01.vcf.gz> <CHROM_id>
 """
 import csv
 import gzip
@@ -47,7 +47,6 @@ def main(csv_path: str, out_vcf: str, chrom_id: str) -> None:
             rec = [chrom_id, pos, '.', ref, alt, '.', '.', '.', 'GT']
             rec += [encode(g, ref, alt) for g in gts]
             o.write('\t'.join(rec) + '\n')
-    # bgzip
     subprocess.run(['bgzip', '-f', tmp_vcf], check=True)
     os.replace(tmp_vcf + '.gz', out_vcf)
 

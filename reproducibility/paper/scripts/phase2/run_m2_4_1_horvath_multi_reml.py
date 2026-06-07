@@ -146,7 +146,7 @@ def main():
         f.write(f"kernel_corr(A,C)={res.kernel_corr['A']['C']:.4f}\n")
         f.write(f"boundary={res.boundary_components}\n")
 
-    print("\n✅ M2.4.1 acceptance PASS")
+    print("\nM2.4.1 acceptance PASS")
 
 
 if __name__ == "__main__":

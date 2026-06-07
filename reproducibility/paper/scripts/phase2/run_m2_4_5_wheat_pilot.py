@@ -418,10 +418,10 @@ def main():
           f"(total runtime {total_rt:.0f}s, peak RSS {_peak_rss_gb():.1f} GB, "
           f"peak VRAM {canary.get('peak_vram_gb')})")
     if all_passed:
-        print("✅ M2.4.5 wheat Watkins pilot acceptance PASS")
+        print("M2.4.5 wheat Watkins pilot acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.4.5 acceptance FAIL — {failed}")
+        print(f"M2.4.5 acceptance FAIL — {failed}")
         sys.exit(1)
 
 

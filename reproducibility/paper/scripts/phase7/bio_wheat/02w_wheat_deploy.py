@@ -10,7 +10,7 @@ NOT curated ortholog. burden SNP CAP applied (WGS density -> max 890 SNP/gene; c
 prevents mean-burden from being dominated by long LD blocks).
 
 Each pairwise X-Y: GLS y_w ~ 1 + bX + bY + bX*bY, t-test interaction; whitening from
-the FULL hexaploid null LMM {K_A,K_B,K_D} (Codex: never drop the 3rd subgenome).
+the FULL hexaploid null LMM {K_A,K_B,K_D} (never drop the 3rd subgenome).
 triad-level ACAT over the 3 pairwise p = hexaploid omnibus.
 """
 from __future__ import annotations
@@ -280,7 +280,7 @@ def main():
                       "GRM from gene-region SNPs (pilot approx; genome-wide LD-pruned GRM = "
                       "full-run). Single trait (emergence) -> calibration stress test, NOT "
                       "discovery screen. INT primary + raw sensitivity, B=2000 y-shuffle perm. "
-                      "Codex TOP_RISK: emergence biology weakly linked, result supports "
+                      "Top risk: emergence biology weakly linked, result supports "
                       "calibration not 2nd positive discovery."))
     fp = out / f"deploy_wheat_pilot_{args.mode}.json"
     fp.write_text(json.dumps(full, indent=2, default=float))

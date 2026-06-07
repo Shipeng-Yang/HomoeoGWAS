@@ -464,10 +464,10 @@ def main():
           f"(runtime {summary['runtime_sec']}s)")
     print(f"scientific finding: K_hom inclusion → {khom_verdict}")
     if all_passed:
-        print("✅ M2.4.4 Horvath Hadamard-kernel acceptance PASS")
+        print("M2.4.4 Horvath Hadamard-kernel acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.4.4 acceptance FAIL — {failed}")
+        print(f"M2.4.4 acceptance FAIL — {failed}")
         sys.exit(1)
 
 

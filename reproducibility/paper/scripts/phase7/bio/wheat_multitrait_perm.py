@@ -18,7 +18,7 @@ Steps (LOCKED):
 (4) PER-ENV : emergence (CFLN06/10/14/20) + heading_date/grain_width per sheet -> SENSITIVITY only,
               observed p, no discovery claim.
 
-HONESTY (Codex dual-plan fix): permutation empirical p has a finite-resolution floor 1/(B+1); it
+HONESTY: permutation empirical p has a finite-resolution floor 1/(B+1); it
 confirms the asymptotic p sits in the extreme tail / the genome-wide FWER-corrected p, it does NOT
 re-estimate a 1e-6 asymptotic p. The genome-wide minP perm targets the FWER-adjusted p (~0.01-0.03 for
 the Bonferroni hits), which B_gw resolves.

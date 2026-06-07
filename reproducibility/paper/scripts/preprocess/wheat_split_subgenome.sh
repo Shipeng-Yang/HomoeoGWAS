@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # wheat_split_subgenome.sh
-# 把 21 个 IWGSC v1.0 染色体 (chr1A..chr7D) 按 A/B/D 三亚基因组分别合并 + QC。
-# 输出: data/processed/wheat/{A,B,D}/all.{vcf.gz,pgen,pvar,psam}
+# Merge + QC the 21 IWGSC v1.0 chromosomes (chr1A..chr7D) into the three A/B/D subgenomes.
+# Output: data/processed/wheat/{A,B,D}/all.{vcf.gz,pgen,pvar,psam}
 #
-# 用法:
+# Usage:
 #   bash scripts/preprocess/wheat_split_subgenome.sh
-# 可选 env vars:
+# Optional env vars:
 #   THREADS=16  MAF=0.01  GENO=0.1  HWE=1e-6  ROOT=/mnt/7302share/fast_ysp/U7_GWAS
 
 set -euo pipefail
@@ -17,8 +17,8 @@ LOG="$ROOT/logs/preprocess"
 THREADS=${THREADS:-16}
 MAF=${MAF:-0.01}
 GENO=${GENO:-0.1}
-# wheat Watkins 是 inbred landrace + cultivar 集合, 普通 HWE 测试默认 reject ~95% SNP.
-# 默认禁用 HWE (HWE=""); 可显式覆盖 e.g. HWE=1e-50.
+# wheat Watkins is an inbred landrace + cultivar collection; a plain HWE test rejects ~95% of SNPs by default.
+# HWE is disabled by default (HWE=""); override explicitly, e.g. HWE=1e-50.
 HWE=${HWE:-}
 
 mkdir -p "$OUT" "$LOG"
@@ -37,7 +37,7 @@ run_subgenome() {
   for i in 1 2 3 4 5 6 7; do
     local F="$RAW/chr${i}${SUB}${SUFFIX}"
     [ -f "$F" ] || { echo "MISSING: $F" >&2; exit 1; }
-    # wheat 染色体 > 512Mb 超 tbi 限制, 用 csi
+    # wheat chromosomes > 512Mb exceed the tbi limit, use csi
     [ -f "$F.tbi" ] || [ -f "$F.csi" ] || tabix --csi -p vcf "$F"
     FILES+=("$F")
   done
@@ -69,7 +69,7 @@ run_subgenome() {
 
   local N=$(bcftools view -H "$DST/all.vcf.gz" | wc -l)
   echo "[$(date)] wheat $SUB done. final SNPs = $N" | tee -a "$LOG/wheat.log"
-  # 释放: 默认保留 merged.vcf.gz 方便排错; 大约 100GB 量级, 验证 OK 后手动 rm -rf $TMP
+  # Cleanup: keep merged.vcf.gz by default for debugging; on the order of 100GB, manually rm -rf $TMP once verified OK
 }
 
 for SUB in A B D; do

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 等 aria2 下载到 /mnt/nvme 完成 → bgzip -t 在本地 SSD 验证完整性
-# → 通过的 mv 到 NFS data/raw/wheat/vcf/  → 重建 tabix → 触发 closeout wrapper.
-# 设计目的: 绕过 NFS 大文件写入字节级 race.
+# Wait for the aria2 download to /mnt/nvme to finish -> verify integrity with bgzip -t on the local SSD
+# -> mv the passing files to NFS data/raw/wheat/vcf/ -> rebuild tabix -> trigger the closeout wrapper.
+# Purpose: bypass the byte-level NFS large-file write race.
 set -euo pipefail
 
 ROOT=/mnt/7302share/fast_ysp/U7_GWAS
@@ -18,7 +18,7 @@ while pgrep -af 'aria2c.*/mnt/nvme/wheat_repair' > /dev/null 2>&1; do
 done
 echo "[$(ts)] aria2c gone, validating on /mnt/nvme ..." | tee -a "$LOG"
 
-# 验证 + 移到 NFS
+# Validate + move to NFS
 shopt -s nullglob
 NVME_FILES=("$NVME"/*.vcf.gz)
 shopt -u nullglob
@@ -43,9 +43,9 @@ for f in "${NVME_FILES[@]}"; do
   echo "[$(ts)] move $short to NFS ..." | tee -a "$LOG"
   # rm old NFS copy if exists
   [ -f "$dst" ] && rm -f "$dst" "${dst}.tbi"
-  # 大文件 mv across mount = cp + unlink. 用 cp 然后 unlink 显式控制
+  # mv of a large file across mounts = cp + unlink; use explicit cp then unlink for control
   cp "$f" "$dst"
-  # 写到 NFS 后立即再 bgzip -t 验证
+  # Re-validate with bgzip -t immediately after writing to NFS
   if ! bgzip -t "$dst" 2>>"$LOG"; then
     echo "[$(ts)] ERR: NFS copy of $short corrupted during write — NFS write race confirmed" | tee -a "$LOG"
     exit 7
@@ -55,7 +55,7 @@ for f in "${NVME_FILES[@]}"; do
     exit 8
   fi
   echo "[$(ts)] OK $short on NFS + tabix" | tee -a "$LOG"
-  # 成功才删 NVMe 副本(保险)
+  # Only delete the NVMe copy on success (safety)
   rm -f "$f"
 done
 

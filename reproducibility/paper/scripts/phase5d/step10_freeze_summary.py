@@ -1,4 +1,4 @@
-"""Phase 5d Step 10 — frozen summary (Codex review #3 NEXT_STEP).
+"""Phase 5d Step 10 — frozen summary.
 
 No new experiments. Aggregate 3-trait JSONs from LOCO + M3.2 + M3.3 into:
   * `phase5d_master_summary.tsv` — 1 row per trait × {raw, pcadj}
@@ -6,7 +6,7 @@ No new experiments. Aggregate 3-trait JSONs from LOCO + M3.2 + M3.3 into:
   * `phase5d_dl_delta_supp.png` — compact bar plot of recall lift + rank-improvement ratio
   * `phase5d_top_rank_flips.tsv` — top per-QTL rank flips (cross-trait, for Supp table)
 
-Codex review #3 lock points enforced:
+Lock points enforced:
 - SOC negative lift explicit (no 'variant prioritization' label hiding -0.087)
 - 3-trait pattern = "heterogeneous behavior", NOT "average +0.029"
 - DL prior = "non-universal p-value amplifier" (observational, not mechanistic)
@@ -209,9 +209,9 @@ fig.savefig(OUT / "phase5d_dl_delta_supp.pdf", bbox_inches="tight")
 plt.close(fig)
 print(f"\nwrote {OUT}/phase5d_dl_delta_supp.{{png,pdf}}")
 
-# --- 5) Codex review #3 framing notes (paper-ready text) ---
+# --- 5) framing notes (paper-ready text) ---
 framing = """\
-# Phase 5d Frozen Framing (Codex review #3 locked, 2026-05-25)
+# Phase 5d Frozen Framing (locked 2026-05-25)
 
 ## NC paper Methods text (copy-paste ready)
 
@@ -260,7 +260,7 @@ between same-chromosome segments. M3.2 known-QTL gating used physical
 1 Mb clumping rather than LD-r² based clumping; the GBS-derived marker
 density makes both approaches yield similar independent-locus counts.
 
-## Banned descriptions (Codex review #3 explicit prohibition)
+## Banned descriptions (explicit prohibition)
 
 - "average lift +0.029 across oat traits"           ← misleading aggregation
 - "DL-enhanced GWAS across oat traits"              ← SOC is negative, not enhanced

@@ -79,7 +79,7 @@ def main() -> None:
               ("K_sum_AC (norm trace)", K_sum),
               ("K_hom_AC (norm trace)", K_hom)]
     for ax, (title, M) in zip(axes, panels, strict=True):
-        # 共享色阶但裁极值
+        # shared colour scale, but clip extreme values
         vmin = float(np.percentile(M, 1))
         vmax = float(np.percentile(M, 99))
         im = ax.imshow(M, cmap="RdBu_r", vmin=vmin, vmax=vmax, aspect="auto")
@@ -99,7 +99,7 @@ def main() -> None:
     assert abs(np.trace(K_sum) - n) < 1e-6, f"K_sum trace != n: {np.trace(K_sum)}"
     assert eig_hom_min > -1e-6, f"K_hom not PSD: min eig={eig_hom_min}"
     assert eig_sum_min > -1e-6, f"K_sum not PSD: min eig={eig_sum_min}"
-    print("\n✅ M2.2 acceptance PASS")
+    print("\nM2.2 acceptance PASS")
 
 
 if __name__ == "__main__":

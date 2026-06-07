@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Phase 1 Step E — baseline 烟雾测试.
-# 在 Horvath2020 horvath/C 子集 + bloom_50pct trait 上跑 GEMMA + regenie,
-# 输出 sumstats + Manhattan + QQ. 目的是验证数据流通, 不是出科学结果.
+# Phase 1 Step E — baseline smoke test.
+# Run GEMMA + regenie on the Horvath2020 horvath/C subset + bloom_50pct trait,
+# emitting sumstats + Manhattan + QQ. Purpose is to verify the data flow, not
+# to produce scientific results.
 
 set -euo pipefail
 
@@ -10,7 +11,7 @@ ENV=${ENV:-$HOME/.local/share/mamba/envs/polygwas-cpu}
 export PATH=$ENV/bin:$PATH
 
 PANEL=rapeseed_horvath2020
-SUB=${SUB:-C}                        # 32k SNP, A 只 19k
+SUB=${SUB:-C}                        # 32k SNP, A only has 19k
 TRAIT=${TRAIT:-bloom_50pct}
 THREADS=${THREADS:-4}
 
@@ -21,30 +22,31 @@ mkdir -p "$OUTDIR"/{gemma,regenie,tmp}
 
 echo "[$(date)] Step E: $PANEL / $SUB / $TRAIT"
 
-# 1) 写两种 pheno:
-#    - pheno_plink.tsv (#IID trait) 给 plink2 (psam 只有 IID 列, 用 --no-input-fid)
-#    - pheno_regenie.tsv (FID IID trait) 给 regenie (要求 FID IID)
+# 1) Write two pheno files:
+#    - pheno_plink.tsv (#IID trait) for plink2 (psam has only the IID column, use --no-input-fid)
+#    - pheno_regenie.tsv (FID IID trait) for regenie (requires FID IID)
 python - << PYEOF
 import pandas as pd
 df = pd.read_csv("$PHENO", sep="\t")
-# 重复 sample 取均值 (Horvath ars403 有两条 site 数据)
+# average duplicate samples (Horvath ars403 has two site records)
 df = df.groupby("sample", as_index=False)["$TRAIT"].mean()
 plink_out = pd.DataFrame({"#IID": df["sample"], "$TRAIT": df["$TRAIT"]})
 plink_out.to_csv("$OUTDIR/tmp/pheno_plink.tsv", sep="\t", index=False, na_rep="NA")
-reg_out = pd.DataFrame({"FID": "0", "IID": df["sample"], "$TRAIT": df["$TRAIT"]})  # FID=0 与 plink2 fam 一致
+reg_out = pd.DataFrame({"FID": "0", "IID": df["sample"], "$TRAIT": df["$TRAIT"]})  # FID=0 matches the plink2 fam
 reg_out.to_csv("$OUTDIR/tmp/pheno_regenie.tsv", sep=" ", index=False, na_rep="NA")
 print("pheno rows (after dedup):", len(df), "non-NA $TRAIT:", df["$TRAIT"].notna().sum())
 PYEOF
 
-# 2) pgen -> bed: drop pheno 缺失样本, 再重算 MAF/missing/HWE
+# 2) pgen -> bed: drop pheno-missing samples, then recompute MAF/missing/HWE
 plink2 --pfile "$PFILE" \
   --pheno "$OUTDIR/tmp/pheno_plink.tsv" --pheno-name "$TRAIT" \
   --prune --maf 0.05 --geno 0.1 --hwe 1e-6 \
   --make-bed --out "$OUTDIR/tmp/bfile" --threads "$THREADS" 2>&1 | tail -8
 BFILE="$OUTDIR/tmp/bfile"
 
-# 2b) 把 chrC01..chrC09 / chrA01..chrA10 改成纯数字 (regenie 要求, GEMMA/plot 也接受)
-#     备份原 chr 名映射, 便于 plot 时 map 回去
+# 2b) Rename chrC01..chrC09 / chrA01..chrA10 to plain numbers (required by regenie,
+#     also accepted by GEMMA/plot). Keep the original chr-name map so plotting
+#     can map back.
 python - << PYEOF
 chrom_map = {}
 with open("$BFILE.bim") as f:
@@ -64,7 +66,7 @@ with open("$BFILE.bim", "w") as f:
 print("chrom map:", chrom_map)
 PYEOF
 
-# 3) GEMMA: 计算 kinship + LMM
+# 3) GEMMA: compute kinship + LMM
 (cd "$OUTDIR/gemma" \
   && gemma -bfile "$BFILE" -gk 1 -o kinship -outdir output 2>&1 | tail -3 \
   && gemma -bfile "$BFILE" -k output/kinship.cXX.txt -lmm 4 -o lmm -outdir output 2>&1 | tail -3)
@@ -78,7 +80,7 @@ PYEOF
        --phenoFile "$OUTDIR/tmp/pheno_regenie.tsv" --phenoCol "$TRAIT" --qt \
        --pred step1_pred.list --bsize 200 --threads "$THREADS" --minMAC 5 --out step2 2>&1 | tail -5)
 
-# 5) 画 Manhattan + QQ
+# 5) Plot Manhattan + QQ
 python - << PYEOF
 import pandas as pd, numpy as np, matplotlib
 matplotlib.use("Agg")
@@ -118,7 +120,7 @@ def plot_pair(df, label, prefix):
     fig.savefig(f"{prefix}_manhattan.png", dpi=120, bbox_inches="tight")
     plt.close()
 
-    # QQ + lambda  (两数组都升序, 排在一起 -> 标准 QQ)
+    # QQ + lambda  (both arrays sorted ascending and paired -> standard QQ)
     n = len(df)
     expected = -np.log10((np.arange(1, n + 1) - 0.5) / n)
     expected.sort()                           # ascending
@@ -136,7 +138,7 @@ def plot_pair(df, label, prefix):
     plt.close()
     return lam
 
-# 读 chrom_map
+# read chrom_map
 chrom_map = {}
 try:
     with open(f"{OUT}/tmp/chrom_map.tsv") as f:
@@ -146,7 +148,7 @@ try:
 except FileNotFoundError:
     pass
 
-# GEMMA: output/lmm.assoc.txt (chr 是数字 1..9, 转回 chrC0x 用于 manhattan ordering)
+# GEMMA: output/lmm.assoc.txt (chr is numeric 1..9, mapped back to chrC0x for manhattan ordering)
 gem = pd.read_csv(f"{OUT}/gemma/output/lmm.assoc.txt", sep="\t")
 gem = gem.rename(columns={"chr": "chrom", "ps": "pos", "p_wald": "p"})
 gem["chrom"] = gem["chrom"].astype(str).map(lambda c: chrom_map.get(c, c))
@@ -154,8 +156,8 @@ gem.to_csv(f"{OUT}/gemma/sumstats.tsv", sep="\t", index=False)
 lam_g = plot_pair(gem, "GEMMA", f"{OUT}/gemma/gwas")
 print(f"GEMMA: N={len(gem)} lambda={lam_g:.3f}")
 
-# regenie: step2_<TRAIT>.regenie (chr 也是数字, 同样映射回)
-# regenie 输出可能空格或 tab, 用 \s+ 容错
+# regenie: step2_<TRAIT>.regenie (chr is also numeric, mapped back the same way)
+# regenie output may be space- or tab-separated; use \s+ to be tolerant
 reg_file = f"{OUT}/regenie/step2_{TRAIT}.regenie"
 reg = pd.read_csv(reg_file, sep=r"\s+", engine="python")
 reg = reg.rename(columns={"CHROM": "chrom", "GENPOS": "pos"})

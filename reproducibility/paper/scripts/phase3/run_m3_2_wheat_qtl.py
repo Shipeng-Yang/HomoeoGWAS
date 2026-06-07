@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[2]
 _CHI2_1_MEDIAN = 0.4549364231195724
 WHEAT_CHROM_ORDER = [f"chr{i}{s}" for i in range(1, 8) for s in ("A", "B", "D")]
 
-# Thresholds (from M3.2 plan, reconciled with Codex dual-plan)
+# Thresholds (from M3.2 plan)
 P_GENOME_WIDE = 5.0e-8                # novel candidate / significant seed
 P_SUGGESTIVE = 5.0e-5                 # known QTL recovery floor
 KNOWN_WINDOW_BP = 500_000             # ±500 kb around each known QTL
@@ -58,10 +58,7 @@ def _json_default(o):
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
-# =====================================================================
 # Known QTL table
-# =====================================================================
-
 def load_known_qtls(path: Path) -> pd.DataFrame:
     """Load known_qtl_wheat.tsv; validate chrom names + integer coords."""
     df = pd.read_csv(path, sep="\t")
@@ -80,10 +77,7 @@ def load_known_qtls(path: Path) -> pd.DataFrame:
     return df
 
 
-# =====================================================================
 # Sumstats streaming
-# =====================================================================
-
 def stream_sumstats_for_chrom(path: Path, chrom: str, chunksize: int = 1_000_000):
     """Yield DataFrame chunks of `path` (gzip tsv) filtered to `chrom`.
 
@@ -397,10 +391,7 @@ def filter_novel_candidates(leads: pd.DataFrame) -> pd.DataFrame:
     return novel
 
 
-# =====================================================================
 # Manhattan with QTL annotations
-# =====================================================================
-
 def make_manhattan_qtl(
     loco_paths: dict[str, Path], qtls: pd.DataFrame,
     novel_leads: pd.DataFrame, out_path: Path, trait: str,
@@ -483,10 +474,7 @@ def make_manhattan_qtl(
     plt.close(fig)
 
 
-# =====================================================================
 # Main
-# =====================================================================
-
 def main():
     ap = argparse.ArgumentParser(description="M3.2 wheat known-QTL recovery")
     ap.add_argument("--trait", default="days_to_emerg")
@@ -654,10 +642,10 @@ def main():
     print(f"acceptance: {n_pass}/{len(acceptance)} gates passed  "
           f"(runtime {runtime:.0f}s)")
     if all_passed:
-        print("✅ M3.2 wheat QTL recovery (v1) acceptance PASS")
+        print("M3.2 wheat QTL recovery (v1) acceptance PASS")
         return 0
     failed = [c['check'] for c in acceptance if not c['passed']]
-    print(f"❌ M3.2 acceptance FAIL — {failed}")
+    print(f"M3.2 acceptance FAIL — {failed}")
     return 1
 
 

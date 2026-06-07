@@ -7,7 +7,7 @@ instrument confounded with the residual. arm-2 asks: if the truth is SPARSE
 homoeolog-pair interaction, does a SYNTENY-AWARE homoeolog-pair kernel recover it
 where the global K_hom cannot?
 
-Design (Codex arm-2 dual-plan):
+Design (arm-2):
   - chromosome-level homoeology A_k <-> D_k (cotton 13 pairs); split each into W
     equal-count windows; pair window w of A_k with window w of D_k -> G window-pairs.
   - per pair g: regional burden b_A,g = mean(standardized A-window dosage),
@@ -179,7 +179,7 @@ def _causal_features(mode, C, XA, XD, winA_m, winD_m, chrom_num, Z_true, rng,
     position), placed at RANDOM positions OFFSET from the kernel's window grid -> the
     fair test of whether K_pair recovers region-scale signal it was NOT handed.
 
-    gene_block causal_kind branches (for patch ③ architecture sensitivity):
+    gene_block causal_kind branches (architecture sensitivity):
       interaction (default, on-model): gA*gD where gA,gD are plain block burdens
         -> truth matches the burden-product test form (concordant, all-positive).
       main_only: gA+gD (additive control, no interaction).
@@ -253,7 +253,7 @@ def _causal_features(mode, C, XA, XD, winA_m, winD_m, chrom_num, Z_true, rng,
                 ZA = _scale_cols(XA[:, blkA]); ZD = _scale_cols(XD[:, blkD])
                 SA = ZA @ signs_A; SD = ZD @ signs_D
                 # residualize signed combos against the plain burden direction so
-                # cor(S_resid, burden) == 0 sample-wise (Codex requirement)
+                # cor(S_resid, burden) == 0 sample-wise
                 SA -= SA.mean(); SD -= SD.mean()
                 bA_dot = float(gA @ gA)
                 bD_dot = float(gD @ gD)
@@ -264,9 +264,9 @@ def _causal_features(mode, C, XA, XD, winA_m, winD_m, chrom_num, Z_true, rng,
                 ccol = (gA + gD) if causal_kind == "main_only" else burden_prod
             cols.append(ccol)
             if diag_out is not None:
-                # projection of true causal signal onto burden-product form (Codex
-                # TOP_RISK: without this, "power dropped" can't separate "burden blind
-                # to existing signal" from "we built a near-undetectable signal").
+                # projection of true causal signal onto burden-product form: without
+                # this, "power dropped" can't separate "burden blind to existing signal"
+                # from "we built a near-undetectable signal".
                 bp_c = burden_prod - burden_prod.mean(); cc_c = ccol - ccol.mean()
                 sd1, sd2 = bp_c.std(ddof=0), cc_c.std(ddof=0)
                 cor = float((bp_c @ cc_c) / (sd1 * sd2 * bp_c.size)) if sd1 > 1e-12 and sd2 > 1e-12 else 0.0

@@ -122,7 +122,7 @@ def main():
             names.append(g)
         return (np.column_stack(cols) if cols else np.empty((n, 0))), names
 
-    # .bim SNP positions per subgenome (for local single-SNP / SNP-PC conditioning, Codex fix #5)
+    # .bim SNP positions per subgenome (for local single-SNP / SNP-PC conditioning)
     def bim_pos(s):
         return np.array([int(ln.split("\t")[3]) for ln in (CHR1DIR / s / "all.bim").read_text().splitlines()])
     posSNP = {s: bim_pos(s) for s in ("B", "D")}

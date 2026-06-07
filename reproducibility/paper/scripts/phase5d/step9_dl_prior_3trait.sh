@@ -2,8 +2,8 @@
 # scripts/phase5d/step9_dl_prior_3trait.sh
 # Step 9 — M3.3 v1.5 DL prior (PlantCaduceus + AgroNT) across 3 oat traits.
 # Per trait: prepare candidates → plantcad score (GPU0) → agront score (GPU1) → fuse + evaluate.
-# Codex review #2 Q5: framing = oat internal robustness across env traits,
-# NOT NC main figure (main figure stays "三 panel × 一 trait" wheat/cotton/horvath).
+# Framing = oat internal robustness across env traits,
+# NOT NC main figure (main figure stays "3 panels x 1 trait" wheat/cotton/horvath).
 
 set -uo pipefail
 PROJ=/mnt/7302share/fast_ysp/U7_GWAS

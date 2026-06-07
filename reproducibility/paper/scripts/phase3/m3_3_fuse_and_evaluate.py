@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 3 M3.3 — fuse DL-prior with GWAS p, evaluate, framing decision.
 
-Fusion (Codex plan §5):  fusion_score = z(-log10(p_gwas)) + beta * z(|LLR|)
+Fusion:  fusion_score = z(-log10(p_gwas)) + beta * z(|LLR|)
   - z = robust z-score (median + MAD-based)
   - beta = leave-one-known-QTL-out grid-search in {0, 0.1, 0.25, 0.5, 1.0}
   - if optimisation unstable (<5 known recovered), lock conservative beta=0.25
@@ -46,11 +46,6 @@ def _json_default(o):
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
-# ---------------------------------------------------------------------
-# Robust z-score
-# ---------------------------------------------------------------------
-
-
 def robust_z(x: np.ndarray) -> np.ndarray:
     """Median-MAD robust z-score (NaN-preserving)."""
     x = np.asarray(x, dtype=np.float64)
@@ -63,11 +58,6 @@ def robust_z(x: np.ndarray) -> np.ndarray:
         sd = np.std(x[finite]) or 1.0
         return (x - med) / sd
     return (x - med) / (1.4826 * mad)
-
-
-# ---------------------------------------------------------------------
-# Candidate / known QTL mapping
-# ---------------------------------------------------------------------
 
 
 def known_qtl_for_snp(cand_df: pd.DataFrame, qtls: pd.DataFrame,
@@ -102,11 +92,6 @@ def known_qtl_for_snp(cand_df: pd.DataFrame, qtls: pd.DataFrame,
     return out
 
 
-# ---------------------------------------------------------------------
-# Fusion + recall
-# ---------------------------------------------------------------------
-
-
 def recall_at_n(ranking: pd.DataFrame, top_n: int,
                   recoverable_qtls: set[str]) -> tuple[float, int, int]:
     """Top-N recall of known QTLs:  unique nearest_known_qtl in top N rows.
@@ -130,7 +115,7 @@ def fit_beta_loqo(cand_with_scores: pd.DataFrame,
 
     For each beta value: for each QTL, hold it out, rank by fusion_score,
     measure recall@N over the remaining QTLs. Pick beta with max mean recall.
-    If fewer than 5 recoverable QTLs, lock beta=0.25 (Codex plan §5).
+    If fewer than 5 recoverable QTLs, lock beta=0.25 (conservative default).
     """
     diagnostics: dict = {"grid": list(beta_grid), "recalls": {}}
     if len(recoverable_qtls) < 5:
@@ -154,7 +139,7 @@ def fit_beta_loqo(cand_with_scores: pd.DataFrame,
     baseline_recall = mean_recalls.get(0.0, 0.0)
     if mean_recalls[best_beta] - baseline_recall < 1e-6:
         # recall@N plateau: LOQO cannot discriminate beta. Fall back to
-        # conservative beta=0.25 (Codex plan §5) — flagged in diagnostics.
+        # conservative beta=0.25 — flagged in diagnostics.
         diagnostics["mode"] = "locked_beta_recall_plateau"
         diagnostics["plateau_recall"] = baseline_recall
         diagnostics["loqo_search_recalls"] = mean_recalls
@@ -163,11 +148,6 @@ def fit_beta_loqo(cand_with_scores: pd.DataFrame,
     diagnostics["best_beta"] = best_beta
     diagnostics["best_mean_recall"] = mean_recalls[best_beta]
     return best_beta, diagnostics
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
 
 
 def main():

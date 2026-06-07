@@ -3,7 +3,7 @@
 
 Annotates the 4 cotton homoeolog-interaction hit genes (NDM8 assembly) with: NDM8 coordinates
 (genes.tsv), closest Arabidopsis homolog via BLASTp of the NDM8 peptide vs TAIR10 (tiered confidence
-per the dual-eval protocol), and a PRE-DECLARED fibre-pathway cross-check. Claim ceiling = candidate-
+tiered by confidence), and a PRE-DECLARED fibre-pathway cross-check. Claim ceiling = candidate-
 gene plausibility + functional class, NOT causality/mechanism/expression. Hit2 is primary; Hit1 is a
 caveated secondary (influence-sensitive, A06 TM-1 crosswalk failed). Expression (per-stage fibre TPM /
 NDM8-native HEB) is BLOCKED: the 4 hit genes are absent from the only local NDM8 fibre file (a curated
@@ -87,7 +87,7 @@ def _tair_meta():
 
 
 def _classify(best, second):
-    """Codex-tiered homology confidence from one-way BLASTp (no full-proteome RBH available)."""
+    """Tiered homology confidence from one-way BLASTp (no full-proteome RBH available)."""
     if best is None:
         return "no_hit", "no TAIR10 hit at e<=1e-3"
     e, pid, qcov, scov, bit = best["evalue"], best["pident"], best["qcov"], best["scov"], best["bitscore"]

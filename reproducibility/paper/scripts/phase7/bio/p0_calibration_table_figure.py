@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""P0 deliverable: 4-panel permutation-calibration summary table + figure (dual-planned, Codex
-option C). Harvests the already-persisted per-pair lambda_gc (observed + permutation median/IQR) from
+"""P0 deliverable: 4-panel permutation-calibration summary table + figure.
+Harvests the already-persisted per-pair lambda_gc (observed + permutation median/IQR) from
 each panel's deploy JSON into tables/lambda_perm_summary.tsv, and builds a 3-panel calibration figure:
 (A) wheat per-pair interaction QQ, (B) cotton (Hit2 length-uniformity) per-pair QQ — both from the
 already-dumped OBSERVED p-vectors (NOT permutation-empirical p; labelled as such) — and (C) a λ forest
 of λ_obs vs λ_perm(median, IQR) across all 4 panels × modes, the cross-ploidy calibration claim.
 
-Honesty (Codex fixes): QQ = observed scan p, explicitly not permutation QQ; the sparse boundary panels
+Honesty: QQ = observed scan p, explicitly not permutation QQ; the sparse boundary panels
 (rapeseed/oat, G≈2–69) have too few callable pairs for an informative QQ and are shown only in the λ
 forest; the degenerate rapeseed body_same mode (G=2) is flagged and excluded from the forest.
 """

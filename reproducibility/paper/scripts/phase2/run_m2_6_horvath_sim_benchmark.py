@@ -79,9 +79,7 @@ CURVE_THRESHOLDS = np.logspace(-2.0, -8.0, 49)
 EXIT_GATE_ARMS = ("S1_C_dominant", "S2_A_dominant")   # stratified evidence
 
 
-# =====================================================================
 # small helpers
-# =====================================================================
 
 def _json_default(o):
     if isinstance(o, (np.integer,)):
@@ -119,9 +117,7 @@ def _arm_table(arm: sim.SimArm) -> dict:
             "description": arm.description}
 
 
-# =====================================================================
 # prepare — merged BED, kinship, kernels, marker metadata
-# =====================================================================
 
 def cmd_prepare(args) -> None:
     out = Path(args.out_dir)
@@ -319,9 +315,7 @@ def _run(cmd: list[str], timeout: int = 1800) -> tuple[int, str]:
         return 124, f"TIMEOUT after {timeout}s\n{e}"
 
 
-# =====================================================================
 # simulate — causal sets + phenotypes
-# =====================================================================
 
 def cmd_simulate(args) -> None:
     out = Path(args.out_dir)
@@ -445,9 +439,7 @@ def _load_standardized(args):
     return Z, keep_common, keep_causal, meta, samples
 
 
-# =====================================================================
 # run-homoeo — HomoeoGWAS multi-kernel scan + pooled-GRM EMMAX ablation
-# =====================================================================
 
 _GENO_CACHE: dict = {}
 _KERN_CACHE: dict = {}
@@ -534,9 +526,7 @@ def cmd_run_homoeo(args) -> None:
         _log(f"  FAIL arm={r['arm']} rep={r['rep']}: {r['status']}")
 
 
-# =====================================================================
 # run-baselines — GEMMA + regenie per replicate
-# =====================================================================
 
 def _baseline_worker(task: dict) -> dict:
     """Run GEMMA + regenie for one (arm, rep)."""
@@ -662,9 +652,7 @@ def cmd_run_baselines(args) -> None:
         _log(f"  FAIL arm={r['arm']} rep={r['rep']}: {r['status']}")
 
 
-# =====================================================================
 # shared task / runtime plumbing
-# =====================================================================
 
 def _arm_idx(name: str) -> int:
     return list(sim.default_arms()).index(name)
@@ -735,9 +723,7 @@ def _append_runtime(out: Path, results: list[dict]) -> None:
     df.sort_values(["arm", "method", "rep"]).to_csv(path, sep="\t", index=False)
 
 
-# =====================================================================
 # summarize — power/FDR curves, paired tests, figures
-# =====================================================================
 
 METHODS = ("homoeo", "pooled_emmax", "gemma", "regenie")
 BASELINES = ("gemma", "regenie")
@@ -1015,10 +1001,10 @@ def cmd_summarize(args) -> None:
     n_pass = sum(c["passed"] for c in acceptance)
     print(f"\nacceptance: {n_pass}/{len(acceptance)} checks passed")
     if all_pass:
-        print("✅ M2.6 simulation benchmark acceptance PASS")
+        print("M2.6 simulation benchmark acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.6 acceptance FAIL — {failed}")
+        print(f"M2.6 acceptance FAIL — {failed}")
         sys.exit(1)
 
 
@@ -1129,9 +1115,7 @@ def _exit_gate(arm_summaries: dict, *, fdp_cap: float = 0.10,
             "arms_evaluated": arms_eval, "headline": headline, "lines": lines}
 
 
-# =====================================================================
 # plotting
-# =====================================================================
 
 _COLORS = {"homoeo": "#d62728", "pooled_emmax": "#9467bd",
            "gemma": "#1f77b4", "regenie": "#2ca02c"}
@@ -1222,9 +1206,7 @@ def _plot_runtime(out: Path, path):
     plt.close(fig)
 
 
-# =====================================================================
 # run — chain everything
-# =====================================================================
 
 def cmd_run(args) -> None:
     cmd_prepare(args)
@@ -1234,9 +1216,7 @@ def cmd_run(args) -> None:
     cmd_summarize(args)
 
 
-# =====================================================================
 # CLI
-# =====================================================================
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="M2.6 Horvath2020 simulation benchmark")

@@ -47,9 +47,7 @@ from homoeogwas.diagnostics import (  # noqa: E402
     pve_sensitivity_grid,
 )
 
-# ---------------------------------------------------------------------
 # I/O helpers
-# ---------------------------------------------------------------------
 
 def _json_default(o):
     """Make numpy scalars / arrays JSON-serializable."""
@@ -117,9 +115,7 @@ def make_canonical_kernels(raw_kernels: dict[str, np.ndarray]) -> dict[str, np.n
     return {name: normalize_kernel(K, mode="trace") for name, K in raw_kernels.items()}
 
 
-# ---------------------------------------------------------------------
 # Plots
-# ---------------------------------------------------------------------
 
 def _neglog10(p) -> float:
     return float(-np.log10(max(float(p), 1e-300)))
@@ -188,9 +184,7 @@ def make_plots(out_dir: Path, trait: str, full_pve: dict, lrt_table: pd.DataFram
     return paths
 
 
-# ---------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="M2.4.2 Horvath2020 end-to-end diagnostics")
@@ -412,10 +406,10 @@ def main():
     print(f"\nacceptance: {n_pass}/{len(acceptance)} checks passed  "
           f"(runtime {summary['runtime_sec']}s)")
     if all_passed:
-        print("✅ M2.4.2 Horvath diagnostics acceptance PASS")
+        print("M2.4.2 Horvath diagnostics acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.4.2 acceptance FAIL — {failed}")
+        print(f"M2.4.2 acceptance FAIL — {failed}")
         sys.exit(1)
 
 

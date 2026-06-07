@@ -30,7 +30,7 @@ def fix_bim(sg: str):
     df = pd.read_csv(bim_path, sep="\t", header=None,
                      names=["chrom","snp_id","cm","pos","a1","a2"],
                      dtype={"snp_id": str, "chrom": str})
-    # Codex review fix: skip only when ALL ids are non-dot. Mixed states
+    # Skip only when ALL ids are non-dot. Mixed states
     # (a few '.' lines among real IDs) must trigger rewrite, not skip.
     non_dot = df["snp_id"] != "."
     if non_dot.all() and len(df) > 0:

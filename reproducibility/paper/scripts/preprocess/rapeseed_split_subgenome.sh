@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # rapeseed_split_subgenome.sh
-# 两个 panel 共一个脚本:
-#   - Horvath2020 (CHROM = chrA01..chrA10 / chrC01..chrC09, *_random 默认丢弃)
+# One script for both panels:
+#   - Horvath2020 (CHROM = chrA01..chrA10 / chrC01..chrC09, *_random dropped by default)
 #   - Hu2022      (CHROM = NC_027757.2..NC_027775.2; NC_757..766 -> A, NC_767..775 -> C)
-# 输出:
+# Output:
 #   data/processed/rapeseed/horvath/{A,C}/all.{vcf.gz,pgen,pvar,psam}
 #   data/processed/rapeseed/hu2022/{A,C}/all.{vcf.gz,pgen,pvar,psam}
 #
-# 用法:
-#   bash scripts/preprocess/rapeseed_split_subgenome.sh                  # 两个 panel 都跑
-#   PANEL=horvath bash scripts/preprocess/rapeseed_split_subgenome.sh   # 只跑 Horvath2020
+# Usage:
+#   bash scripts/preprocess/rapeseed_split_subgenome.sh                  # run both panels
+#   PANEL=horvath bash scripts/preprocess/rapeseed_split_subgenome.sh   # only Horvath2020
 #   PANEL=hu2022  bash scripts/preprocess/rapeseed_split_subgenome.sh
-#   KEEP_RANDOM=1 PANEL=horvath ...                                      # 保留 *_random 作 unanchored
+#   KEEP_RANDOM=1 PANEL=horvath ...                                      # keep *_random as unanchored
 
 set -euo pipefail
 
@@ -36,7 +36,8 @@ split_one() {
   REGIONS=$(IFS=','; echo "$*")
 
   echo "[$(date)] ===== rapeseed $NAME / $SUB (KEEP_RANDOM=$KEEP_RANDOM) =====" | tee -a "$LOG/rapeseed.log"
-  # raw.vcf.gz 缓存 key 要包含 region 列表的 hash, 否则切换 KEEP_RANDOM 时会静默复用旧文件
+  # The raw.vcf.gz cache key must include a hash of the region list, otherwise toggling
+  # KEEP_RANDOM would silently reuse the old file
   local REGIONS_HASH
   REGIONS_HASH=$(echo -n "$REGIONS" | md5sum | cut -c1-8)
   local SUBSET="$DST/raw.${REGIONS_HASH}.vcf.gz"
@@ -46,7 +47,7 @@ split_one() {
     bcftools view --threads "$THREADS" -r "$REGIONS" -Oz -o "$SUBSET" "$IN_VCF"
     tabix -p vcf "$SUBSET"
   fi
-  # 更新 raw.vcf.gz 软链 -> 当前 region 集
+  # Update the raw.vcf.gz symlink -> current region set
   ln -sf "$(basename "$SUBSET")" "$SUBSET_LINK"
   ln -sf "$(basename "$SUBSET").tbi" "$SUBSET_LINK.tbi"
 
@@ -78,7 +79,7 @@ run_horvath() {
             chrA06_random chrA07_random chrA08_random chrA09_random chrA10_random chrAnn_random)
     C_CHR+=(chrC01_random chrC02_random chrC03_random chrC04_random chrC05_random \
             chrC06_random chrC07_random chrC08_random chrC09_random chrCnn_random)
-    # chrUnn_random 性质不明, 暂不归入任一亚基因组
+    # chrUnn_random is of unknown nature, not assigned to any subgenome for now
   fi
   split_one "$IN" horvath A "${A_CHR[@]}"
   split_one "$IN" horvath C "${C_CHR[@]}"
@@ -89,10 +90,10 @@ run_hu2022() {
   [ -f "$IN" ] || { echo "MISSING $IN" >&2; exit 1; }
   [ -f "$IN.tbi" ] || tabix -p vcf "$IN"
 
-  # A 亚基因组 (Bra_napus_v2.0 NCBI 命名): chrA01..A10
+  # A subgenome (Bra_napus_v2.0 NCBI naming): chrA01..A10
   local A_CHR=(NC_027757.2 NC_027758.2 NC_027759.2 NC_027760.2 NC_027761.2 \
                NC_027762.2 NC_027763.2 NC_027764.2 NC_027765.2 NC_027766.2)
-  # C 亚基因组: chrC01..C09
+  # C subgenome: chrC01..C09
   local C_CHR=(NC_027767.2 NC_027768.2 NC_027769.2 NC_027770.2 NC_027771.2 \
                NC_027772.2 NC_027773.2 NC_027774.2 NC_027775.2)
   split_one "$IN" hu2022 A "${A_CHR[@]}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wheat DEFENSE: WGS burden-cap sensitivity for the two curated-triad hits.
 
-The cap=150 SNP/gene de-dilution is one tunable. Codex: show the hits are not a single-
+The cap=150 SNP/gene de-dilution is one tunable. Show the hits are not a single-
 parameter accident AND that global calibration is not broken by the cap. Extract SNPs +
 GRM + whitening ONCE (all cap-independent); only the burden capping changes -> sweep
 cap in {50,150,300,100000(~uncapped)} and report, per cap: the chr1 B-D and chr5 A-D hit

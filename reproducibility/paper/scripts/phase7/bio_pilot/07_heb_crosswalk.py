@@ -29,7 +29,7 @@ HITS = {
 }
 QUERY_GENES = sorted({g for pair in HITS.values() for g in pair})
 
-# thresholds (Codex fix: same-species upland cotton, orthologs should be strong)
+# thresholds (same-species upland cotton, orthologs should be strong)
 EVALUE_MAX = 1e-20
 QCOV_MIN = 70.0
 SCOV_MIN = 70.0

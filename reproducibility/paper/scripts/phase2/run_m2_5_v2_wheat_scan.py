@@ -58,9 +58,7 @@ def _json_default(o):
     raise TypeError(f"not JSON serializable: {type(o)}")
 
 
-# =====================================================================
 # build: scan context (sample-join + pruned-GRM + REML)
-# =====================================================================
 
 def build_context(args, out_dir: Path) -> dict:
     """Build the fixed-V projection from the M2.4.5 pruned GRMs; save npz."""
@@ -128,9 +126,7 @@ def load_context(npz_path: Path) -> ScanContext:
     )
 
 
-# =====================================================================
 # worker: stream-scan assigned subgenomes on one GPU
-# =====================================================================
 
 def run_worker(args, out_dir: Path) -> dict:
     ctx = load_context(out_dir / "scan_context.npz")
@@ -161,9 +157,7 @@ def run_worker(args, out_dir: Path) -> dict:
     return prof
 
 
-# =====================================================================
 # postprocess: λ_GC / Manhattan / QQ / summary
-# =====================================================================
 
 def _scan_file_pass(tsv_gz: Path, thin: int = 50):
     """One streaming pass over a scan TSV.gz. Returns:
@@ -295,9 +289,7 @@ def postprocess(args, out_dir: Path) -> dict:
             "n_markers_total": int(overall.size)}
 
 
-# =====================================================================
 # orchestrate
-# =====================================================================
 
 def main():
     ap = argparse.ArgumentParser(description="M2.5-v2 wheat full per-SNP scan")
@@ -399,9 +391,9 @@ def main():
     print(f"\ntotal runtime {runtime:.0f}s  λ_GC={post['lambda_gc_all']:.4f}  "
           f"markers={post['n_markers_total']}")
     if all_passed:
-        print("✅ M2.5-v2 wheat full scan acceptance PASS")
+        print("M2.5-v2 wheat full scan acceptance PASS")
     else:
-        sys.exit("❌ M2.5-v2 acceptance FAIL")
+        sys.exit("M2.5-v2 acceptance FAIL")
 
 
 if __name__ == "__main__":

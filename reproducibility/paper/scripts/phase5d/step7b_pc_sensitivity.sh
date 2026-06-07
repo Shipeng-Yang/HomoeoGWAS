@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/phase5d/step7b_pc_sensitivity.sh
-# Codex review #2 Q1 NEXT_STEP — PC1-5 sensitivity for 3 traits.
+# PC1-5 sensitivity for 3 traits.
 # We don't yet have covariates support in cli.py / lmm.py, so we residualize
 # the trait by PC1-5 OLS first then re-run fit on the residualized phenotype.
 # This is equivalent to including PC1-5 as fixed effects in the LMM

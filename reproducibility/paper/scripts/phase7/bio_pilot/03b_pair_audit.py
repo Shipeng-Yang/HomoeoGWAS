@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Phase A Step 3: parse union .collinearity -> audit table -> 4 final pair sets
-(body/flank2kb × same_number/cross_number). Implements Codex's "within-block-best
+(body/flank2kb × same_number/cross_number). Implements the "within-block-best
 + reciprocal" filter with full audit columns.
 
 audit_table.tsv columns:
@@ -153,7 +153,7 @@ def main():
     # reciprocal_best across blocks: within_A_rank==1 AND within_D_rank==1
     for r in raw:
         r["reciprocal_best_flag"] = int(r["within_A_rank"] == 1 and r["within_D_rank"] == 1)
-        # final_1to1 := within-block-best AND reciprocal-best (Codex's recommendation)
+        # final_1to1 := within-block-best AND reciprocal-best
         r["final_1to1_flag"] = int(r["within_block_best_flag"] and r["reciprocal_best_flag"])
         # reason_dropped
         if r["final_1to1_flag"]:

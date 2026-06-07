@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex PASS_WITH_FIX recompute: emergence === heading_date (days_to_emerg bit-identical to
+"""Recompute: emergence === heading_date (days_to_emerg bit-identical to
 Hd_dto_days, verified max_abs_diff=0). The original pleiotropy PHENOLOGY cluster double-counted the
 SAME phenology phenotype (both emergence and heading_date). Fold them: PHENOLOGY keeps heading_date
 only; emergence dropped (it is the anchor and is the identical record). Recompute all clusters fresh

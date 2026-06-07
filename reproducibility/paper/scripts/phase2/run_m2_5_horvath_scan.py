@@ -291,10 +291,10 @@ def main():
     print(f"\nacceptance: {n_pass}/{len(acceptance)} checks passed  "
           f"(runtime {summary['runtime_sec']}s, backend={backend_used})")
     if all_passed:
-        print("✅ M2.5 Horvath per-SNP scan acceptance PASS")
+        print("M2.5 Horvath per-SNP scan acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.5 acceptance FAIL — {failed}")
+        print(f"M2.5 acceptance FAIL — {failed}")
         sys.exit(1)
 
 

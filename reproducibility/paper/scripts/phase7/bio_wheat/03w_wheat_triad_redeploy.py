@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Phase C wheat Step 3: re-deploy with CURATED 1:1:1 triads (HCTriads.csv,
-Ramirez-Gonzalez 2018) replacing the position-rank proxy triads. Fixes Codex's
+Ramirez-Gonzalez 2018) replacing the position-rank proxy triads. Fixes the
 top framing risk. Reuses 02w deploy/GLS/ACAT/perm machinery verbatim.
 
 ID mapping: HCTriads uses RefSeq v1.0 gene IDs (TraesCS7A01G243100); our wheat uses
@@ -128,7 +128,7 @@ def main():
                 note=("wheat AABBDD CURATED-triad redeploy (1A-1B-1D). Triads = Ramirez-Gonzalez "
                       "2018 HCTriads.csv 1:1:1 (v1.0 IDs mapped 01->02 to our v1.1), restricted to "
                       "chr1 and our >=3-SNP retained genes. REPLACES the position-rank proxy triads "
-                      "(Codex top framing risk). Same 3-pairwise + hexaploid-whitened GLS + triad "
+                      "(top framing risk). Same 3-pairwise + hexaploid-whitened GLS + triad "
                       "ACAT + B-perm as 02w. Single trait (emergence) = calibration check on real "
                       "homoeolog units."))
     fp = OUT / f"deploy_wheat_CURATED_{args.mode}.json"

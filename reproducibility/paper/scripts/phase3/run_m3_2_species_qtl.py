@@ -8,7 +8,7 @@ Wraps the wheat-only run_m3_2_wheat_qtl.py logic to accept ANY panel:
   - any subgenome list
   - any chrom-order convention
 
-For cotton (assembly mismatch flagged in dual-plan), gene_pos may not
+For cotton (assembly mismatch flagged earlier), gene_pos may not
 match the panel exactly; the script still reports closest-lead per QTL,
 but acceptance gates here only require the pipeline to complete; the
 biological hit interpretation needs assembly verification.
@@ -240,9 +240,9 @@ def main():
     print(f"acceptance: {n_pass}/{len(acceptance)} gates "
           f"(runtime {summary['runtime_sec']}s)")
     if all_passed:
-        print(f"✅ M3.2 {args.panel}/{args.trait} acceptance PASS")
+        print(f"M3.2 {args.panel}/{args.trait} acceptance PASS")
         return 0
-    print(f"❌ M3.2 {args.panel}/{args.trait} acceptance FAIL")
+    print(f"M3.2 {args.panel}/{args.trait} acceptance FAIL")
     return 1
 
 

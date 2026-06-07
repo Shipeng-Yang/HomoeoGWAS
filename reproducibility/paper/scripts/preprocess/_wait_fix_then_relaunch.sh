@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 等 bcftools 升级 + rapeseed reblock 完成, 然后重启 wheat / rapeseed split.
-# Cotton 已经在跑, 不动.
+# Wait for the bcftools upgrade + rapeseed reblock to finish, then restart wheat / rapeseed split.
+# Cotton is already running, leave it.
 set -uo pipefail
 
 ROOT="/mnt/7302share/fast_ysp/U7_GWAS"
@@ -17,7 +17,7 @@ echo "[$(date)] waiting for rapeseed reblock (PID=$RB_PID) ..."
 while kill -0 "$RB_PID" 2>/dev/null; do sleep 5; done
 echo "[$(date)] reblock done."
 
-# 验证
+# Verify
 BCFV=$("$ENV/bin/bcftools" --version | head -1 | awk '{print $2}')
 echo "[$(date)] bcftools version: $BCFV"
 RAPE_VCF="$ROOT/data/raw/rapeseed/Horvath2020_Zenodo4302088/imputed.vcf.gz"
@@ -28,13 +28,13 @@ fi
 "$ENV/bin/htsfile" "$RAPE_VCF" | grep -q BGZF || { echo "ERR: rapeseed not BGZF" >&2; exit 6; }
 echo "[$(date)] rapeseed imputed.vcf.gz is BGZF, .tbi exists. OK."
 
-# 重启 wheat
+# Restart wheat
 setsid bash -c "PATH=$ENV/bin:\$PATH; cd $ROOT; exec bash scripts/preprocess/wheat_split_subgenome.sh" \
   > logs/preprocess/wheat.run.log 2>&1 &
 echo $! > logs/preprocess/wheat.pid
 echo "[$(date)] wheat launched PID=$(cat logs/preprocess/wheat.pid)"
 
-# 重启 rapeseed
+# Restart rapeseed
 setsid bash -c "PATH=$ENV/bin:\$PATH; cd $ROOT; exec bash scripts/preprocess/rapeseed_split_subgenome.sh" \
   > logs/preprocess/rapeseed.run.log 2>&1 &
 echo $! > logs/preprocess/rapeseed.pid

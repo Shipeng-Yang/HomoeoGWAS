@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Cotton expand-pairing SECONDARY EXPLORATORY scan (pre-registered:
-reports/cotton_expand_pairing_prereg.md; dual-planned, Codex revised to pre-RBH BLAST-homolog pairs).
+reports/cotton_expand_pairing_prereg.md; uses pre-RBH BLAST-homolog pairs).
 
 Tests whether the strict 1:1 RBH restriction (372 curated pairs) missed homoeolog-pair signal, by
 relaxing the pairing to ALL A-D BLAST-homolog gene pairs (diamond union.blast, e<=1e-5, both callable

@@ -130,7 +130,7 @@ def enrich(score, snp_sum, len_sum, heb_pct, imbalanced, pct, rng, label):
         return dict(label=label, tier_pct=pct, tier_n=int(k), infeasible=True,
                     offending_strata=infeasible, obs_mean_heb=obs_heb, obs_frac_imbalanced=obs_imb,
                     note="some tier strata lack enough non-tier controls -> locked null infeasible")
-    # stratum diagnostics (Codex fix): rule out overmatching / degeneracy
+    # stratum diagnostics: rule out overmatching / degeneracy
     ratios = np.array([pools[s].size / need[s] for s in strata_ids])
     frac_sampled = float(k / sum(pools[s].size for s in strata_ids))
     diag = dict(n_occupied_strata=int(len(strata_ids)),

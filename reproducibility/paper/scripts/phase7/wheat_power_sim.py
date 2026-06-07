@@ -57,7 +57,7 @@ CAP = 150                  # wheat production burden cap (WGS de-dilution)
 MIN_SNP = 5
 PVE_GRID = [0.02, 0.05, 0.10, 0.20]   # sweep: PVE=0.20 ceiling-saturates at n=1051, lower PVE separates
 R_POWER = 150              # per PVE point
-R_NULL = 1000              # tighter empirical-threshold + type-I calibration (Codex: >=1000)
+R_NULL = 1000              # tighter empirical-threshold + type-I calibration (>=1000)
 R_MAIN = 120
 N_JOBS = 16
 
@@ -219,7 +219,7 @@ def main():
                  "NOT 'best epistasis method'."),
         runtime_sec=round(time.time() - t0, 1))
     OUT.write_text(json.dumps(out, indent=2, default=float))
-    print(f"✅ wrote {OUT}  (top-PVE advantage = {adv_top:.2f}x; detectable-PVE@80% "
+    print(f"wrote {OUT}  (top-PVE advantage = {adv_top:.2f}x; detectable-PVE@80% "
           f"ACAT={detectable['acat']['power80']} hom={detectable['lrt_hom']['power80']})  "
           f"({out['runtime_sec']}s)")
 

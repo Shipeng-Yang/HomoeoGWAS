@@ -230,7 +230,7 @@ def main():
         regularity = ("residual-boundary (Stram-Lee mixture approximate)"
                       if scen.metadata.get("residual_boundary") else "regular")
         if scen.metadata.get("residual_boundary"):
-            print(f"  ⚠ residual-boundary null: reduced fit σ²_e at bound, "
+            print(f"  residual-boundary null: reduced fit σ²_e at bound, "
                   f"boundary={scen.metadata.get('reduced_fit_boundary_components')} "
                   f"residual_pve={scen.metadata.get('reduced_fit_residual_pve'):.3g} "
                   "— empirical type-I valid, analytic mixture approximate")
@@ -361,10 +361,10 @@ def main():
     print("scientific finding (p_mixture @ α=0.05): " +
           "  ".join(f"{k}={v}" for k, v in summary["scientific_finding"].items()))
     if all_passed:
-        print("✅ M2.4.3 Horvath null-LRT calibration acceptance PASS")
+        print("M2.4.3 Horvath null-LRT calibration acceptance PASS")
     else:
         failed = [c["check"] for c in acceptance if not c["passed"]]
-        print(f"❌ M2.4.3 acceptance FAIL — {failed}")
+        print(f"M2.4.3 acceptance FAIL — {failed}")
         sys.exit(1)
 
 

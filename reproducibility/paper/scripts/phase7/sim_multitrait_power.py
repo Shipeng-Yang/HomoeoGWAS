@@ -2,7 +2,7 @@
 """Power/type-I simulation for multi-trait (pleiotropy) homoeolog-pair interaction testing —
 the "discover-more" evidence behind ``homoeogwas interact`` with a predeclared multi_trait set.
 
-Question (Codex #4): when a homoeolog pair's interaction effect is SHARED across a frozen set of
+Question: when a homoeolog pair's interaction effect is SHARED across a frozen set of
 correlated traits (each per-trait signal too weak to survive G*T single-trait Bonferroni), does
 combining the per-trait interaction p-values with ACAT into ONE per-pair pleiotropy p (corrected
 over G pairs only) detect MORE true pleiotropic pairs at a fixed FWER than the best-single-trait

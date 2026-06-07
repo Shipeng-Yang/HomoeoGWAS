@@ -7,7 +7,7 @@ FIREWALL (critical): the weight uses ONLY the zero-shot, sequence-based DL colum
 AgroNT ensemble). It MUST NOT use `fusion_score`, `z_gwas`, `p`, or `nlog10_p`, which fuse
 the GWAS phenotype and would make the prior y-dependent (double-dipping).
 
-Pipeline (Codex design): variant z_llr_abs -> gene score (max over the gene's DL SNPs) ->
+Pipeline: variant z_llr_abs -> gene score (max over the gene's DL SNPs) ->
 triad/pair weight (mean of available homoeolog gene scores) -> monotone weight
 exp(gamma * zscore), normalized to mean 1.
 

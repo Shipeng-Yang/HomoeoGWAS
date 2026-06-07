@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Build pheno_clean.tsv for cotton / rapeseed Horvath / wheat Watkins panels.
 
-输出:
-- data/processed/cotton/pheno_clean.tsv             宽表: sample + 13 trait × 2 年
-- data/processed/rapeseed/horvath/pheno_clean.tsv   宽表: sample + 11 pheno 列
-- data/processed/wheat/pheno_clean.tsv              宽表: sample + days_to_emerg_<env> × 4 + days_to_emerg (mean)
+Outputs:
+- data/processed/cotton/pheno_clean.tsv             wide: sample + 13 traits x 2 years
+- data/processed/rapeseed/horvath/pheno_clean.tsv   wide: sample + 11 pheno columns
+- data/processed/wheat/pheno_clean.tsv              wide: sample + days_to_emerg_<env> x 4 + days_to_emerg (mean)
 
-数据契约:
-- sample 列在每个 pheno_clean.tsv 中**保证唯一**;若上游有重复(如 Horvath ars403
-  在原始 xlsx 中有两行 site 测量),按 sample 取数值均值合并。
-- wheat join key 用 StoreCode (WATDE0xxx), 对齐 VCF sample id;
-  现代品种(无 StoreCode)不在 wheat pheno_clean.tsv 中.
+Data contract:
+- The sample column in each pheno_clean.tsv is guaranteed unique; if upstream has
+  duplicates (e.g. Horvath ars403 has two site measurements in the original xlsx),
+  collapse by taking the numeric mean per sample.
+- The wheat join key is StoreCode (WATDE0xxx), aligned to VCF sample id;
+  modern cultivars (no StoreCode) are not in wheat pheno_clean.tsv.
 """
 from __future__ import annotations
 
@@ -68,7 +69,6 @@ def _dedup_by_mean(df: pd.DataFrame, key: str) -> pd.DataFrame:
     return df.groupby(key, as_index=False)[num_cols].mean()
 
 
-# ---------------- cotton ----------------
 def build_cotton() -> None:
     pheno_xlsx = _extract_cotton_pheno()
     out_tsv = ROOT / "data/processed/cotton/pheno_clean.tsv"
@@ -103,7 +103,6 @@ def build_cotton() -> None:
     )
 
 
-# ---------------- rapeseed horvath ----------------
 def build_rapeseed_horvath() -> None:
     pheno_xlsx = ROOT / "data/raw/rapeseed/Horvath2020_Zenodo4302088/pheno_lines_phenotypes.xlsx"
     out_tsv = ROOT / "data/processed/rapeseed/horvath/pheno_clean.tsv"
@@ -146,7 +145,6 @@ def build_rapeseed_horvath() -> None:
     )
 
 
-# ---------------- wheat watkins ----------------
 WHEAT_SHEETS = [
     ("WGIN_Watkins_JIC_CFLN06", "CFLN06"),
     ("WISP_Watkins_JIC_CFLN10", "CFLN10"),
@@ -156,7 +154,7 @@ WHEAT_SHEETS = [
 
 
 def _wheat_extract_dto(df: pd.DataFrame, env_tag: str) -> pd.DataFrame:
-    """从一个 Watkins phenotype sheet 找 StoreCode + Hd_dto_day(s)-* 列."""
+    """Find the StoreCode + Hd_dto_day(s)-* columns in one Watkins phenotype sheet."""
     cols = list(df.columns)
     storecode_col = next((c for c in cols if str(c).strip().lower() == "storecode"), None)
     dto_col = next(
@@ -177,7 +175,7 @@ def build_wheat_watkins(sample_vcf: Path | None = None) -> None:
     out_tsv = ROOT / "data/processed/wheat/pheno_clean.tsv"
     out_tsv.parent.mkdir(parents=True, exist_ok=True)
 
-    # 取 VCF sample 列表(从 split 输出 或 fallback 到 raw chr1B)
+    # Get the VCF sample list (from the split output, or fall back to raw chr1B)
     vcf_for_ids = sample_vcf
     if vcf_for_ids is None:
         split_vcf = ROOT / "data/processed/wheat/A/all.vcf.gz"
@@ -185,7 +183,7 @@ def build_wheat_watkins(sample_vcf: Path | None = None) -> None:
     vcf_samples = load_vcf_samples(vcf_for_ids)
     print(f"wheat: using {vcf_for_ids} for sample list (n={len(vcf_samples)})")
 
-    # 用 StoreCode (WATDE0xxx) 作 join key
+    # Use StoreCode (WATDE0xxx) as the join key
     watde_in_vcf = {s for s in vcf_samples if re.match(r"^WATDE\d{4}$", s)}
     print(f"wheat: WATDE samples in VCF = {len(watde_in_vcf)}; non-WATDE = {len(vcf_samples)-len(watde_in_vcf)}")
 

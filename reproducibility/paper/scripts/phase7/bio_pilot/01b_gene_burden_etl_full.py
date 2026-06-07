@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Phase A Step 1 (rewrite): full 13-chrom-pair ETL + dual-mode (body-only and ±2kb).
 
-Codex Phase A key design: body and ±2kb SHARE one MCScanX synteny backbone (computed
+Phase A key design: body and ±2kb SHARE one MCScanX synteny backbone (computed
 on the UNION of body-retained and flank-retained PEP). This decouples "window changes
 SNP assignment" from "window changes which genes are syntenic" — without it, body vs
-±2kb differences confound ETL changes with biology (Codex TOP_RISK).
+±2kb differences confound ETL changes with biology (a key risk).
 
 Outputs (all global, mode columns embedded):
   genes.tsv             — 80k rows: gene_id, chrom, start, end, strand, sub,

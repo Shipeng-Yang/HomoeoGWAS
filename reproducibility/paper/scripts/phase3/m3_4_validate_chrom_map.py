@@ -112,7 +112,7 @@ def main():
     if errors:
         sys.exit(f"\nERR: {len(errors)} validation errors:\n  "
                  + "\n  ".join(errors))
-    print("✅ chrom_map validation PASS")
+    print("chrom_map validation PASS")
 
 
 if __name__ == "__main__":

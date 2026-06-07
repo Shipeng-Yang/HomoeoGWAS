@@ -9,7 +9,7 @@ Hadamard K_hom is not fit-for-purpose (the flat D1 profiles then reflect
 non-identifiability, not biological absence) — motivating a synteny-aware
 homoeolog-pair kernel (D2 arm-2).
 
-Design (Codex D2 dual-plan + arm-1 codex-check fixes):
+Design (D2 arm-1):
   - real trace-normalized K_A,(K_B,)K_D and K_hom (= Phase-5c tier2 kernels).
   - pre-sim geometry: decompose K_hom ≈ a·I + Σ b·K_add + residual; residual-
     norm fraction = the identifiable part.
@@ -22,7 +22,7 @@ Design (Codex D2 dual-plan + arm-1 codex-check fixes):
     2·(logL_full − logL_null) with σ²_h fixed at 0.
   - null (true PVE_hom=0) run with more reps -> stable empirical 5% LRT crit.
 
-Verdict @ true PVE_hom=0.20 (Codex thresholds):
+Verdict @ true PVE_hom=0.20 (thresholds):
   unrecoverable : median PVE_hat<0.03, boundary>70%, calibrated power<0.2
   weak          : median 0.05-0.12, power 0.2-0.5
   recoverable   : median 0.12-0.28, boundary<40%, power>0.6

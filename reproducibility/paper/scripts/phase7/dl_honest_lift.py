@@ -164,7 +164,7 @@ def analyse(panel, trait, cand_dir, known_qtl, rng):
                 historical_chosen_beta=chosen_beta,
                 # n_rec<6 -> every outer fold has <5 inner QTL -> the <5 lock ALWAYS fires, so the
                 # nested estimate evaluates the locked beta=0.25 fallback, NOT the historical
-                # grid-search selection rule (Codex caveat). Conservative but to be stated.
+                # grid-search selection rule. Conservative but to be stated.
                 small_n_locked_fallback=bool(n_rec < 6))
     if n_rec < 2:
         base.update(nested_loqo_lift=None, permutation_p=None,

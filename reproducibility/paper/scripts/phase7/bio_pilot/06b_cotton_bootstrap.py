@@ -7,7 +7,7 @@ WHOLE pipeline (REML refit + whitening + burden-product GLS). This asks: under t
 fitted {K_A,K_D} covariance (no pair-marker effect), how often does the interaction test
 reach the observed extremity?
 
-Two endpoints (Codex):
+Two endpoints:
   - pair-local: bootstrap the named hit pair's interaction p (mechanistic robustness).
   - genome-wide minP / ACAT over the SAME homoeolog-pair universe per replicate
     (post-selection calibration -> defeats the 'cherry-picked pair' circularity).

@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/phase5d/step6b_rename_chroms_and_rerun.sh
-# Codex review #1 NEXT_STEP — collapse segment-coded chroms (1A_0/1A_1) into
+# Collapse segment-coded chroms (1A_0/1A_1) into
 # 21 logical chroms (1A) so LOCO truly leaves out one whole chrom (BOLT-LOCO
 # semantics), not one of two segments. MVP via bcftools annotate --rename-chrs;
 # avoids touching framework code.

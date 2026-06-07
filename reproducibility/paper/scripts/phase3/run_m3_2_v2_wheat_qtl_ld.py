@@ -8,8 +8,8 @@ Builds on M3.2-v1 (`run_m3_2_wheat_qtl.py`):
        + per-env targeted regression (CFLN06/10/14/20)
        + candidate tiering into HIGH_CONF / SUPPLEMENTARY / QUARANTINED.
 
-Charter §3.3 v1.0 硬指标:
-  ≥1 independent novel locus passing 5e-8 + LD-fine-mapping + per-env consistency.
+Charter §3.3 v1.0 hard requirement:
+  >=1 independent novel locus passing 5e-8 + LD-fine-mapping + per-env consistency.
 
 Inputs:
   data/reference/wheat/known_qtl_wheat.tsv           (13 QTLs + trait_relevance)
@@ -41,7 +41,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Thresholds (Codex review reconciliation)
+# Thresholds
 P_GENOME_WIDE = 5.0e-8
 P_SUGGESTIVE = 5.0e-5
 R2_QUARANTINE = 0.20          # max r² to known sentinel above which we flag
@@ -82,11 +82,6 @@ def _which_plink2(arg_path: str | None) -> str:
     return p
 
 
-# =====================================================================
-# Inputs
-# =====================================================================
-
-
 def load_known_qtls(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path, sep="\t")
     needed = {"qtl_name", "qtl_family", "chrom", "start", "end", "qtl_pos",
@@ -112,11 +107,6 @@ def load_v1_outputs(v1_dir: Path) -> dict[str, pd.DataFrame]:
         "known_hits": pd.read_csv(v1_dir / "known_qtl_hits.tsv", sep="\t"),
         "all_leads": pd.read_csv(v1_dir / "all_significant_leads.tsv", sep="\t"),
     }
-
-
-# =====================================================================
-# Sentinel SNPs near known QTLs
-# =====================================================================
 
 
 def pick_known_sentinels(
@@ -154,11 +144,6 @@ def pick_known_sentinels(
             picks = window.iloc[::step].head(per_qtl)["snp_id"].astype(str).tolist()
             sentinels[q["qtl_name"]] = picks
     return sentinels
-
-
-# =====================================================================
-# Per-chrom plink2 LD (cached)
-# =====================================================================
 
 
 def run_ld_per_chrom(
@@ -235,11 +220,6 @@ def run_ld_per_chrom(
         "chrom": chrom,
     })
     return out
-
-
-# =====================================================================
-# Per-env regression
-# =====================================================================
 
 
 def load_lead_dosages(
@@ -363,11 +343,6 @@ def aggregate_per_env(per_env: pd.DataFrame, leads: pd.DataFrame
     return pd.DataFrame(out_rows)
 
 
-# =====================================================================
-# Tiering
-# =====================================================================
-
-
 def tier_candidates(
     novel: pd.DataFrame, ld_summary: pd.DataFrame, env_summary: pd.DataFrame,
     ld_pairs: pd.DataFrame | None = None,
@@ -376,7 +351,7 @@ def tier_candidates(
     seed-vs-seed clumping into ``independent_locus_id`` and a stricter
     ``strict_high_confidence`` subset.
 
-    Tier rules (Codex v2 review):
+    Tier rules:
       - QUARANTINED:   max_r2_to_known_sentinel >= R2_QUARANTINE
       - HIGH_CONFIDENCE: p<5e-8 AND r2_to_known<R2_QUARANTINE AND
           n_envs_nominal >= PER_ENV_MIN_AGREEING_ENVS AND
@@ -387,7 +362,7 @@ def tier_candidates(
     strict_high_confidence (paper-main subset):
         HIGH_CONFIDENCE AND n_envs_nominal >= 3 AND n_envs_same_direction >= 3
 
-    Seed-vs-seed clumping (Codex v2 review #3):
+    Seed-vs-seed clumping:
       - within HIGH_CONFIDENCE, greedy by p ascending
       - lead_of_locus = True for first SNP in each clump
       - independent_locus_id = "locus_<chrom>_<rank>" assigned to all clump members
@@ -409,7 +384,7 @@ def tier_candidates(
     out["n_envs_nominal"] = out["n_envs_nominal"].fillna(0).astype(int)
     out["n_envs_same_direction"] = out["n_envs_same_direction"].fillna(0).astype(int)
 
-    # Codex v2 review #6: name the column explicitly so it doesn't get
+    # name the column explicitly so it doesn't get
     # confused with the v1 known-recovery 5e-5 concordance.
     out["emmax_concordant_p1e5"] = out["emmax_p"].fillna(1.0) < EMMAX_NOVEL_P
 
@@ -432,7 +407,7 @@ def tier_candidates(
         & (out["n_envs_same_direction"] >= 3)
     )
 
-    # ------- seed-vs-seed clumping inside HIGH_CONFIDENCE per chrom ----
+    # seed-vs-seed clumping inside HIGH_CONFIDENCE per chrom
     out["independent_locus_id"] = ""
     out["lead_of_locus"] = False
     out["redundant_with"] = ""
@@ -478,11 +453,6 @@ def tier_candidates(
         ["tier", "p"], key=lambda s: s if s.name == "p"
         else s.map({"HIGH_CONFIDENCE": 0, "SUPPLEMENTARY": 1, "QUARANTINED": 2})
     ).reset_index(drop=True)
-
-
-# =====================================================================
-# Main
-# =====================================================================
 
 
 def main():
@@ -663,7 +633,7 @@ def main():
     check("per_env_validation_completed",
           len(per_env) > 0,
           f"{len(per_env)} per-(lead,env) regressions")
-    # chr5B-vs-Vrn-B1 LD assertion (Codex v3 fix #5): if chr5B has any v1
+    # chr5B-vs-Vrn-B1 LD assertion: if chr5B has any v1
     # novel candidates AND a Vrn-B1 sentinel exists in ld_pairs, the LD
     # filter MUST have quarantined ≥1 of them. Vacuously PASS if either
     # precondition is absent.
@@ -725,10 +695,10 @@ def main():
     print(f"acceptance: {sum(c['passed'] for c in acceptance)}/{len(acceptance)} "
           f"(runtime {runtime:.0f}s)")
     if all_passed:
-        print("✅ M3.2-v2 acceptance PASS")
+        print("M3.2-v2 acceptance PASS")
         return 0
     failed = [c['check'] for c in acceptance if not c['passed']]
-    print(f"❌ M3.2-v2 acceptance FAIL — {failed}")
+    print(f"M3.2-v2 acceptance FAIL — {failed}")
     return 1
 
 

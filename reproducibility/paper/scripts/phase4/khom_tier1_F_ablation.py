@@ -101,7 +101,7 @@ def main() -> int:
     )
     tab.insert(0, "trait", args.trait)
     tab.insert(0, "panel", args.panel)
-    # Codex Q5 polish: TSV metadata flags so a downstream pipeline cannot
+    # TSV metadata flags so a downstream pipeline cannot
     # silently consume the row as paper-grade or main-claim evidence.
     tab["tier"] = "Tier1_F_ablation"
     tab["paper_section"] = "Supplementary"

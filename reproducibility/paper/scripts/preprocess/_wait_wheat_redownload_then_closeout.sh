@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Phase 1 wheat closeout 自动化:
-#   1. 等当前 aria2 重下完成 (PID 在 logs/download/wheat_redl2.pid)
-#   2. 校验 5 个之前损坏的 wheat VCF (chr1A/2A/4B/5A/5D) 都通过 bgzip -t
-#   3. 跑 wheat_split_subgenome.sh (A/B/D)
-#   4. 跑 _build_pheno_clean.py --panel wheat
-#   5. 写 results/phase1/wheat_watkins/closeout/qc_summary.tsv
-#   6. 显式记录 1035 (manifest) vs 1051 (实测 VCF) 的 16-sample delta
+# Phase 1 wheat closeout automation:
+#   1. Wait for the current aria2 re-download to finish (PID in logs/download/wheat_redl2.pid)
+#   2. Check that the 5 previously corrupt wheat VCFs (chr1A/2A/4B/5A/5D) all pass bgzip -t
+#   3. Run wheat_split_subgenome.sh (A/B/D)
+#   4. Run _build_pheno_clean.py --panel wheat
+#   5. Write results/phase1/wheat_watkins/closeout/qc_summary.tsv
+#   6. Explicitly record the 16-sample delta between 1035 (manifest) and 1051 (observed VCF)
 set -uo pipefail
 
 ROOT=/mnt/7302share/fast_ysp/U7_GWAS
@@ -20,14 +20,14 @@ mkdir -p "$QC_DIR" "$ROOT/logs/preprocess"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 echo "[$(ts)] wheat closeout wrapper starting"
 
-# ---- 1) 等当前 aria2 进程退出 ----
+# ---- 1) Wait for the current aria2 process to exit ----
 echo "[$(ts)] waiting for aria2c (data/raw/wheat/vcf) to finish ..."
 while pgrep -af 'aria2c.*data/raw/wheat/vcf' > /dev/null 2>&1; do
   sleep 60
 done
 echo "[$(ts)] aria2c gone, proceeding."
 
-# ---- 2) 校验所有 *.bad 的修复 sibling: 数据驱动 + 第一个错就退 ----
+# ---- 2) Validate the repaired sibling of every *.bad: data-driven + exit on first error ----
 RAW_VCF="$ROOT/data/raw/wheat/vcf"
 shopt -s nullglob
 BAD_FILES=("$RAW_VCF"/*.bad)
@@ -60,9 +60,9 @@ for bad in "${BAD_FILES[@]}"; do
 done
 echo "[$(ts)] all ${#BAD_FILES[@]} repaired wheat VCF(s) pass validation" | tee -a "$LOG"
 
-# ---- 3) 跑 wheat split (A/B/D) ----
+# ---- 3) Run wheat split (A/B/D) ----
 echo "[$(ts)] starting wheat_split_subgenome.sh (THREADS=16) ..." | tee -a "$LOG"
-# HWE 留空 (inbred Watkins landrace panel, HWE 测试会 reject ~95% SNP)
+# Leave HWE empty (inbred Watkins landrace panel; the HWE test would reject ~95% of SNPs)
 THREADS=16 MAF=0.01 GENO=0.1 HWE="" \
   bash "$ROOT/scripts/preprocess/wheat_split_subgenome.sh" >> "$LOG" 2>&1
 SPLIT_RC=$?
@@ -74,7 +74,7 @@ if [ $SPLIT_RC -ne 0 ]; then
 fi
 echo "[$(ts)] split done." | tee -a "$LOG"
 
-# ---- 4) 跑 wheat pheno join ----
+# ---- 4) Run wheat pheno join ----
 echo "[$(ts)] building wheat pheno_clean.tsv ..." | tee -a "$LOG"
 "$ENV/bin/python" "$ROOT/scripts/preprocess/_build_pheno_clean.py" --panel wheat >> "$LOG" 2>&1
 PHENO_RC=$?
@@ -83,7 +83,7 @@ if [ $PHENO_RC -ne 0 ]; then
   exit 7
 fi
 
-# ---- 5) 写 qc_summary.tsv ----
+# ---- 5) Write qc_summary.tsv ----
 echo "[$(ts)] writing qc_summary.tsv ..." | tee -a "$LOG"
 
 count_samples_vcf() { bcftools view -h "$1" 2>/dev/null | tail -1 | awk '{print NF-9}'; }

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """OAT Step 4: homoeolog-PAIR interaction deploy across 3 subgenome-pairs (A-C/A-D/C-D),
 whitened by the full hexaploid null LMM {K_A,K_C,K_D}. Sparse-GBS pivot from strict
-triads to pairwise units (Codex-validated). Cotton AADD burden-product GLS applied to
+triads to pairwise units. Cotton AADD burden-product GLS applied to
 each of the 3 subgenome-pairs of the hexaploid.
 
-Multiplicity (Codex predeclared):
+Multiplicity (predeclared):
   PRIMARY = INT transform + flank mode. Discovery threshold = 0.05/(G_total * n_traits)
   on the ANALYTIC per-pair interaction p (perm B too coarse for genome-wide tail; perm
   used for lambda/calibration only). raw transform + body mode = SENSITIVITY only.

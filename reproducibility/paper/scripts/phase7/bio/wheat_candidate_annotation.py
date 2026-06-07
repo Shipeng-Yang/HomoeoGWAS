@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P1 deliverable: functional annotation of the wheat candidate homoeolog genes (chr1 B-D interaction
-+ its A copy; chr5 A-D second positive + its B copy). Dual-planned (Codex PLAN_READY). Annotation
-strategy (Codex fixes): protein domains (Pfam/InterPro) from Ensembl Plants as the wheat-native
++ its A copy; chr5 A-D second positive + its B copy). Annotation
+strategy: protein domains (Pfam/InterPro) from Ensembl Plants as the wheat-native
 annotation; BLASTp -> local Arabidopsis TAIR10 proteome for comparative orthology (the same pipeline
 used for the cotton dossier, for cross-species symmetry). ALL six copies are annotated (interacting
 pair + third homoeolog), chr5 (the expression-balanced contrast) included to avoid selective

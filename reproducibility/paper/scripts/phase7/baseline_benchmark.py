@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P2 baseline benchmark: homoeolog-pair burden-product interaction vs comparable methods.
 
-Estimand-framing (Codex): we compare against directly comparable STATISTICAL TESTS on the SAME
+Estimand-framing: we compare against directly comparable STATISTICAL TESTS on the SAME
 genotypes, SAME phenotype simulations, SAME null covariance/whitener, with empirical calibration.
 Where no software implements the relevant estimand we use transparent in-house implementations;
 heavy external tools (networkGWAS/NodeGWAS/regenie/SAIGE/STAAR/deeprvat) are marginal-GWAS or

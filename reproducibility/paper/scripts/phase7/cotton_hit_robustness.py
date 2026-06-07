@@ -212,7 +212,7 @@ def harden(hit, D, samples, pheno, g2s):
     )
     caveats = {}
     # influence caveat = one accession MEANINGFULLY shifts beta (>=25%) OR weakens the worst LOO
-    # fold toward null (p>0.01, Codex). Losing strict alpha/G in a rare fold while still p<<0.01 is
+    # fold toward null (p>0.01). Losing strict alpha/G in a rare fold while still p<<0.01 is
     # expected jitter, not influence sensitivity, so it does NOT trigger the caveat.
     if dfbeta_frac >= 0.25 or primary["p_max"] > 0.01:
         caveats["influence_sensitive"] = (

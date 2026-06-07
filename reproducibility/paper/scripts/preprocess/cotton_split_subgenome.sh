@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # cotton_split_subgenome.sh
-# hebau panel 原始数据是 CSV (一染色体一文件, A01..A13, D01..D13)。
-# 流程: unzip -> CSV->VCF (per chr) -> bcftools concat (A/D) -> plink2 QC -> 输出 pgen + 过滤后 vcf。
-# 输出: data/processed/cotton/{A,D}/all.{vcf.gz,pgen,pvar,psam}
+# The hebau panel raw data is CSV (one file per chromosome, A01..A13, D01..D13).
+# Flow: unzip -> CSV->VCF (per chr) -> bcftools concat (A/D) -> plink2 QC -> output pgen + filtered vcf.
+# Output: data/processed/cotton/{A,D}/all.{vcf.gz,pgen,pvar,psam}
 #
-# 用法:
+# Usage:
 #   bash scripts/preprocess/cotton_split_subgenome.sh
-# 可选 env: THREADS=8 MAF=0.01 GENO=0.1 HWE=1e-6 ROOT=...
+# Optional env: THREADS=8 MAF=0.01 GENO=0.1 HWE=1e-6 ROOT=...
 
 set -euo pipefail
 
@@ -24,7 +24,7 @@ mkdir -p "$OUT" "$LOG"
 STAGE="$OUT/stage"
 mkdir -p "$STAGE"
 
-# 1) 解压 CSV (~280MB zip -> ~3GB csv)
+# 1) unzip CSV (~280MB zip -> ~3GB csv)
 if [ ! -f "$STAGE/genotype-data/chr_A01.csv.gz" ]; then
   echo "[$(date)] unzip $SRC_ZIP" | tee -a "$LOG/cotton.log"
   unzip -o "$SRC_ZIP" -d "$STAGE" 2>&1 | tail -5 | tee -a "$LOG/cotton.log"

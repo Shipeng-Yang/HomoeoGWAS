@@ -5,7 +5,7 @@ The killer comparison: on the SAME real cotton trait + SAME candidate gene pair,
 and show that the homoeolog-pair burden-product test detects the hit while the comparable baselines
 do not (single-gene burden + marginal GWAS = null -> pair-only; SNP x SNP = no marker-pair surviving
 its own within-pair multiplicity; main-effect burden = no additive explanation; global VC = no
-localizable/ detectable homoeolog-epistasis variance). Framed narrowly (Codex): NOT "all baselines
+localizable/ detectable homoeolog-epistasis variance). Framed narrowly: NOT "all baselines
 fail", but "the hit is conditionally non-marginal, not explained by single-gene burdens, not
 recovered by SNP-level interaction after its own correction, and not captured by global VC; the
 gene-pair burden-product test detects it." Pairs with the simulation (baseline_benchmark.py) that

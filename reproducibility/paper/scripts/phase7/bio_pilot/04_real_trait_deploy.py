@@ -2,14 +2,14 @@
 """Phase 7 bio-pilot Step 4: REAL phenotype deployment of per-pair GLS+ACAT on
 fiber_length_BLUE over the A01-D01 18-pair bio pilot.
 
-Two endpoints (Codex-merged plan):
+Two endpoints:
   primary  : omnibus analytic ACAT p_acat (single test, NO G correction)
   secondary: per-pair p_g — empirical minP threshold from B=2000 y-shuffle nulls
              + Bonferroni 0.05/G as transparent backup; BH-FDR exploratory only.
 Empirical perm p: p_emp = (1 + #{p^perm <= p^obs}) / (B+1) (avoids zero).
 Pheno: primary = raw BLUE (env-regressed); secondary = INT (rank-normal) sensitivity.
 NOTE: simple y-shuffle breaks kinship-phenotype coupling — adequate for pilot, paper
-main result would need LMM parametric bootstrap. Codex TOP_RISK: G=18 pilot null
+main result would need LMM parametric bootstrap. KEY RISK: G=18 pilot null
 does NOT distinguish "no biology" from "search space too small".
 """
 from __future__ import annotations
@@ -220,7 +220,7 @@ def main():
               "panel is SNP-array, body-only covers ~8.5% A01+D01 genes — body-only "
               "selection bias likely. (4) any candidate pair from Bonferroni hit "
               "requires LOO / MAF strata / annotation / replication before causal "
-              "claim. Codex TOP_RISK: do NOT over-interpret G=18 pilot as genome-wide "
+              "claim. Do NOT over-interpret G=18 pilot as genome-wide "
               "biological conclusion."))
     out_path = bio / "d3_real_trait_deploy.json"
     out_path.write_text(json.dumps(full, indent=2, default=float))

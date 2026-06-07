@@ -139,7 +139,7 @@ def main():
 
     out["runtime_sec"] = round(time.time() - t0, 1)
     OUT.write_text(json.dumps(out, indent=2, default=float))
-    print(f"✅ wrote {OUT} ({out['runtime_sec']}s)")
+    print(f"wrote {OUT} ({out['runtime_sec']}s)")
 
 
 if __name__ == "__main__":

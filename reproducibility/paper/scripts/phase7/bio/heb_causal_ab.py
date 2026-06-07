@@ -151,7 +151,7 @@ def main():
         print(f"    {study}: {df.shape[0]} genes x {df.shape[1]} window samples")
     studies = list(study_tpm.keys())
 
-    # ---- per-study, SAMPLE-ALIGNED triad stats with MIN_SAMP enforcement (dual-eval fixes #1,#2) ----
+    # ---- per-study, SAMPLE-ALIGNED triad stats with MIN_SAMP enforcement ----
     def triad_study_stats(a, b, d, study):
         """Per-study triad means over EXPRESSED, sample-ALIGNED window samples (all three copies
         finite AND A+B+D >= EXPR_MIN in that sample). Returns (mA, mB, mD, n_expressed, totals) or
@@ -174,7 +174,7 @@ def main():
         """Concatenated per-sample total TPM (A+B+D) across studies over samples where all three
         copies are FINITE (sample-aligned; NO expression threshold, so the missingness covariate =
         fraction with total < EXPR_MIN is meaningful). One total per sample => no per-gene
-        misalignment (dual-eval fix #2)."""
+        misalignment."""
         out = []
         for study in studies:
             df = study_tpm[study]
@@ -241,7 +241,7 @@ def main():
         # conservative empirical upper-tail p (ties via >=)
         emp_p_dist = float((1 + int((bg["dist_center"] >= chr1_bal["dist_center"]).sum())) / (len(bg) + 1))
         nB = sum(1 for cat in chr1_bal["per_study_cat"] if cat == "B.dominant")
-        # strict consistency: studies with >=3 expressed window samples (Codex fix #4)
+        # strict consistency: studies with >=3 expressed window samples
         strict = [(nm, cat, n) for nm, cat, n in zip(chr1_bal["per_study_name"],
                   chr1_bal["per_study_cat"], chr1_bal["per_study_n"], strict=True) if n >= MIN_SAMP]
         nB_strict = sum(1 for _, cat, _ in strict if cat == "B.dominant")
@@ -360,7 +360,7 @@ def main():
                                 covariate_balance_smd=smd)
             print(f"      rank-dist K={K}: matched_pct={m_pct:.4f} emp_p={ep:.3g}")
 
-        # covariate-set sensitivity (Codex fix #2): drop CV (may partly track dominance), redo K-NN
+        # covariate-set sensitivity: drop CV (may partly track dominance), redo K-NN
         keepc = [0, 2, 3, 4]                              # logTPM, missingness, gene_len, n_snp
         Zb = (Xcov[:, keepc] - Xcov[:, keepc].mean(0)) / np.where(Xcov[:, keepc].std(0) > 1e-12,
                                                                   Xcov[:, keepc].std(0), 1.0)

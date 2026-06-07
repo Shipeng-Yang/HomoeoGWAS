@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 等 polygwas-cpu env 装完, 然后启动三个 split 脚本到背景, wrapper 即退出.
+# Wait for the polygwas-cpu env to finish installing, then launch the three split scripts in the background; the wrapper then exits.
 set -uo pipefail
 
 ROOT="/mnt/7302share/fast_ysp/U7_GWAS"
@@ -11,13 +11,13 @@ if [ -z "$CPU_PID" ]; then
 fi
 
 echo "[$(date)] waiting for conda env create (PID=$CPU_PID) ..."
-# 轮询 PID 是否还活
+# Poll whether the PID is still alive
 while kill -0 "$CPU_PID" 2>/dev/null; do
   sleep 30
 done
 echo "[$(date)] env install process exited."
 
-# 验证 polygwas-cpu 真的装出来了
+# Verify polygwas-cpu was actually created
 if ! conda env list | awk '{print $1}' | grep -qx polygwas-cpu; then
   echo "ERR: polygwas-cpu env NOT created. last 50 lines of log:" >&2
   tail -50 logs/envs/cpu.log >&2
@@ -27,7 +27,7 @@ fi
 source /home/yys05/miniconda3/etc/profile.d/conda.sh
 conda activate polygwas-cpu
 
-# sanity: 主要工具就位
+# sanity: required tools present
 for t in bcftools tabix plink2 python; do
   if ! command -v $t >/dev/null; then echo "ERR: $t missing in env" >&2; exit 4; fi
 done

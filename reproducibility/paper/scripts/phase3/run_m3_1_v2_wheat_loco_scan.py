@@ -73,10 +73,7 @@ def _json_default(o):
     raise TypeError(f"not JSON serializable: {type(o)}")
 
 
-# =====================================================================
 # build: LOCOContext (per-chrom V/P) saved to npz
-# =====================================================================
-
 def build_context(args, out_dir: Path) -> dict:
     """Build per-chrom LOCO contexts from M2.4.5 pruned GRMs; save npz."""
     wheat_dir = ROOT / "data/processed/wheat"
@@ -242,10 +239,7 @@ def load_loco_context(npz_path: Path) -> LOCOContext:
     )
 
 
-# =====================================================================
 # worker: stream LOCO scan over assigned subgenomes on one GPU
-# =====================================================================
-
 def run_worker(args, out_dir: Path) -> dict:
     loco_ctx = load_loco_context(out_dir / "loco_context.npz")
     subg = [s.strip() for s in args.subgenomes.split(",") if s.strip()]
@@ -276,10 +270,7 @@ def run_worker(args, out_dir: Path) -> dict:
     return prof
 
 
-# =====================================================================
 # postprocess: λ_GC / Manhattan / QQ / summary
-# =====================================================================
-
 def _scan_file_pass(tsv_gz: Path, thin: int = 50):
     chi2_parts: list[np.ndarray] = []
     chrom_chi2: dict[str, list[np.ndarray]] = {}
@@ -404,10 +395,7 @@ def postprocess(args, out_dir: Path) -> dict:
             "n_markers_total": int(overall.size)}
 
 
-# =====================================================================
 # orchestrate
-# =====================================================================
-
 def main():
     ap = argparse.ArgumentParser(description="M3.1-v2 wheat LOCO full per-SNP scan")
     ap.add_argument("--mode", default="run",
@@ -443,7 +431,7 @@ def main():
         print(json.dumps(res, indent=2, default=_json_default))
         return
 
-    # ---- run: build -> 2-GPU workers -> postprocess ------------------
+    # run: build -> 2-GPU workers -> postprocess
     print("=== M3.1-v2 wheat LOCO full scan — orchestrate ===")
     print("\n[build] LOCO contexts (21 chrom × A/B/D)")
     build_meta = build_context(args, out_dir)
@@ -515,9 +503,9 @@ def main():
     print(f"\ntotal runtime {runtime:.0f}s  λ_GC={post['lambda_gc_all']:.4f}  "
           f"markers={post['n_markers_total']}")
     if all_passed:
-        print("✅ M3.1-v2 wheat LOCO full scan acceptance PASS")
+        print("M3.1-v2 wheat LOCO full scan acceptance PASS")
     else:
-        sys.exit("❌ M3.1-v2 acceptance FAIL")
+        sys.exit("M3.1-v2 acceptance FAIL")
 
 
 if __name__ == "__main__":

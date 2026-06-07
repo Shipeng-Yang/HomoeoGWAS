@@ -181,7 +181,7 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
     """Add ref_fasta, alt_fasta, ref_match_status using pysam.
     chrom_map: panel_chrom -> fasta_chrom (e.g. chrA01 -> NC_027757.2).
 
-    Codex review bug fix: FASTA fetch uses BIM-derived (chrom,pos), but the
+    FASTA fetch uses BIM-derived (chrom,pos), but the
     cand DataFrame's chrom/pos comes from sumstats/leads/sentinels — if they
     disagree (plink2 normalisation, VCF re-encode, etc.) we'd silently score
     the wrong locus. We assert agreement here so the failure is loud.
@@ -243,7 +243,7 @@ def harmonize_with_fasta(cand: pd.DataFrame, fasta_path: Path,
         # FASTA. ref stays = fasta_base (+ strand, so seq[center]==ref holds);
         # the + strand alt is the complement of the OTHER VCF allele. beta/se/p
         # are untouched — this is allele-frame harmonisation, not an effect flip.
-        # NOTE (Codex review Q1): beta stays tied to the ORIGINAL GWAS effect
+        # NOTE: beta stays tied to the ORIGINAL GWAS effect
         # allele. This is safe because the only downstream consumer (the DL-prior
         # fusion m3_3_fuse_and_evaluate.py) ranks by |z(-log10 p)| + beta_w*z(|LLR|),
         # which is sign-agnostic in the GWAS term and uses |LLR| — neither

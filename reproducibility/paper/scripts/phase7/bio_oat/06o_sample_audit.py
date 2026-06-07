@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OAT QC: defend against silent sample/order misalignment (Codex TOP_RISK for the
+"""OAT QC: defend against silent sample/order misalignment (top risk for the
 unattended run). Re-derives the sample alignment across every layer and asserts they are
 identical, hashing each so any drift is caught: merged.fam order, per-subgenome npz sample
 order (A/C/D x body/flank), phenotype rows, per-trait nonmissing masks, and the
