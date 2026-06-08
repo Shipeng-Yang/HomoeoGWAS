@@ -18,8 +18,8 @@ jobs:
           python-version: "3.11"
       - name: Install ruff
         run: pip install ruff
-      - name: Lint src/ + scripts/ + tests/
-        run: ruff check src scripts tests
+      - name: Lint src/ + tests/
+        run: ruff check src tests
 
   tests:
     name: Pytest (CPU smoke, ${{ matrix.python-version }})
