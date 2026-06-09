@@ -45,8 +45,19 @@ proteins for the DIAMOND path.
 |---|---|---|---|
 | allotetraploid AADD / AACC | 2 | `pairwise` | cotton, rapeseed |
 | allohexaploid AABBDD / AABBCC | 3 | `triad` | wheat, Jerusalem artichoke |
-| allo-octoploid AABBCCDD | 4 | not yet (engine does 2 or 3) | strawberry — use 3-of-4 subsets for now |
+| allo-octoploid AABBCCDD | 4 | `pairwise`/`triad` over subsets | strawberry — run over 2-/3-subgenome subsets (see below) |
 | **diploid** | 1 | — homoeolog test N/A | rice, etc. |
+
+**Octoploid and beyond (≥4 subgenomes).** `prep-snps` and `prep-homoeologs
+--from-table` are fully N-subgenome — list all four in `--subgenomes` and you
+get four NPZs and a `gene_A,gene_B,gene_C,gene_D` table. The interaction *test*
+is run as `pairwise` over the C(4,2)=6 subgenome pairs or `triad` over the
+C(4,3)=4 triples (each `interact` run names the 2–3 subgenomes in its config;
+extra `gene_<S>` columns in the table are ignored). This is deliberate, not a
+gap: a single 4-way burden product is far too sparse/low-power at realistic
+sample sizes — the same reason the variance-component side falls back to a
+pairwise-mean homoeolog kernel at 4 subgenomes. So decompose into 2-/3-way
+tests and aggregate (e.g. ACAT) across them.
 
 **Diploids** have no homoeologs, so the cross-subgenome interaction test does not
 apply directly. Two things still work for a diploid:
