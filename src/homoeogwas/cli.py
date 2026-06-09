@@ -678,69 +678,6 @@ def scan_summary(scan_out: dict, subg: list[str], *,
     return lam_df, plot_df, qc
 
 
-def make_plots(df: pd.DataFrame, subg: list[str], out_dir: Path, prefix: str,
-               trait: str, lambda_gc_value: float) -> list[str]:
-    """Manhattan + QQ from a (possibly thinned) plot frame. ``lambda_gc_value``
-    is the genome-wide λ_GC computed from the *full* χ² in scan_summary."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    if len(df) == 0:
-        return []
-    p = np.clip(df["p"].to_numpy(dtype=np.float64), 1e-300, 1.0)
-    logp = -np.log10(p)
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-    cmap = {sg: colors[i % len(colors)] for i, sg in enumerate(subg)}
-    paths = []
-
-    # Manhattan
-    chrom = df["chrom"].astype(str).to_numpy()
-    sub = df["subgenome"].astype(str).to_numpy()
-    order = np.lexsort((df["pos"].to_numpy(), chrom))
-    chrom_o, logp_o, sub_o = chrom[order], logp[order], sub[order]
-    fig, ax = plt.subplots(figsize=(11, 4))
-    offset, ticks, labels = 0.0, [], []
-    for ci in list(dict.fromkeys(chrom_o)):
-        msk = chrom_o == ci
-        k = int(msk.sum())
-        x = offset + np.arange(k)
-        c = [cmap.get(s, "#777777") for s in sub_o[msk]]
-        ax.scatter(x, logp_o[msk], s=3, c=c)
-        ticks.append(offset + k / 2)
-        labels.append(ci)
-        offset += k + max(1, k // 50)
-    ax.axhline(-np.log10(5e-8), ls="--", lw=0.8, color="red")
-    ax.set_xticks(ticks)
-    ax.set_xticklabels(labels, rotation=90, fontsize=6)
-    ax.set_ylabel("-log10(p)")
-    ax.set_title(f"HomoeoGWAS Manhattan — {trait}")
-    fig.tight_layout()
-    mp = out_dir / f"manhattan_{prefix}.png"
-    fig.savefig(mp, dpi=130, bbox_inches="tight")
-    plt.close(fig)
-    paths.append(str(mp))
-
-    # QQ
-    obs = np.sort(logp)[::-1]
-    exp = -np.log10((np.arange(1, len(obs) + 1) - 0.5) / len(obs))
-    fig, ax = plt.subplots(figsize=(4.6, 4.5))
-    lim = max(float(obs.max()), float(exp.max())) * 1.05 if len(obs) else 1.0
-    ax.plot([0, lim], [0, lim], ls="--", color="k", lw=1)
-    ax.scatter(exp, obs, s=5, color="#1f77b4")
-    ax.set_xlim(0, lim)
-    ax.set_ylim(0, lim)
-    ax.set_xlabel("expected -log10(p)")
-    ax.set_ylabel("observed -log10(p)")
-    ax.set_title(f"HomoeoGWAS QQ — {trait}  λ_GC={lambda_gc_value:.3f}")
-    fig.tight_layout()
-    qp = out_dir / f"qq_{prefix}.png"
-    fig.savefig(qp, dpi=130, bbox_inches="tight")
-    plt.close(fig)
-    paths.append(str(qp))
-    return paths
-
-
 # fit command
 
 
@@ -884,7 +821,15 @@ def cmd_fit(args) -> int:
 
     plot_paths = []
     if _get(cfg, "plots.enabled", True):
-        plot_paths = make_plots(plot_df, subg, out_dir, prefix, trait, lam_all)
+        from .plots import DEFAULT_FORMATS, make_all_plots
+        fmts = _get(cfg, "plots.formats", list(DEFAULT_FORMATS))
+        plot_paths = make_all_plots(
+            plot_df, subg,
+            sigma2=reml.sigma2, pve=reml.pve,
+            boundary_components=reml.boundary_components,
+            lambda_df=lam_df, trait=trait, out_dir=out_dir, prefix=prefix,
+            formats=fmts, dpi=int(_get(cfg, "plots.dpi", 300)),
+            top_n=int(_get(cfg, "plots.top_n", 5)))
         for pth in plot_paths:
             print(f"  wrote {pth}")
 
@@ -997,7 +942,44 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output directory for the demo dataset + fit (default: demo_run)")
     dem.add_argument("--keep", action="store_true",
                      help="keep the generated demo dataset after the fit")
+
+    plt = sub.add_parser("plot", help="regenerate publication figures from a "
+                                      "finished run directory (no model refit)")
+    plt.add_argument("results_dir", help="a finished homoeogwas fit output dir")
+    plt.add_argument("--prefix", default=None,
+                     help="select summary_<prefix>.json (needed if several)")
+    plt.add_argument("--formats", default="png,pdf,svg",
+                     help="comma list of output formats (default png,pdf,svg)")
+    plt.add_argument("--dpi", type=int, default=300, help="PNG raster dpi")
+    plt.add_argument("--top-n", type=int, default=5,
+                     help="Manhattan hits to label per subgenome (0 disables)")
+    plt.add_argument("--max-points", type=int, default=300_000,
+                     help="thin background markers to ~this many for plotting")
+    plt.add_argument("--figures", default="all",
+                     help="comma subset of pve,manhattan,qq,lambda (or all)")
+    plt.add_argument("--no-update-summary", action="store_true",
+                     help="do not rewrite summary.json outputs.plots")
     return ap
+
+
+def cmd_plot(args) -> int:
+    """Regenerate figures from a finished run directory without refitting."""
+    from .plots import ALL_FIGURES, plot_from_results
+    formats = [f.strip() for f in args.formats.split(",") if f.strip()]
+    figures = (ALL_FIGURES if args.figures.strip() == "all"
+               else tuple(f.strip() for f in args.figures.split(",")
+                          if f.strip()))
+    paths = plot_from_results(
+        Path(args.results_dir), prefix=args.prefix, formats=formats,
+        dpi=args.dpi, top_n=args.top_n, max_points=args.max_points,
+        figures=figures, update_summary=not args.no_update_summary)
+    if not paths:
+        print(f"[plot] no figures written from {args.results_dir}")
+        return 1
+    for p in paths:
+        print(f"  wrote {p}")
+    print(f"[plot] {len(paths)} files written")
+    return 0
 
 
 def cmd_validate(args) -> int:
@@ -1054,6 +1036,8 @@ def main(argv=None) -> int:
         return cmd_validate(args)
     if args.subcommand == "demo":
         return cmd_demo(args)
+    if args.subcommand == "plot":
+        return cmd_plot(args)
     return 1
 
 
