@@ -932,6 +932,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .interact import add_interact_subparser
     add_interact_subparser(sub)
 
+    # build the inputs that `interact` consumes (snp_to_gene NPZ + triad TSV)
+    from .prep import add_prep_subparsers
+    add_prep_subparsers(sub)
+
     val = sub.add_parser("validate", help="load + validate a run config and "
                                           "check input paths, without running")
     val.add_argument("-c", "--config", required=True, help="YAML run-config path")
@@ -1038,6 +1042,12 @@ def main(argv=None) -> int:
         return cmd_demo(args)
     if args.subcommand == "plot":
         return cmd_plot(args)
+    if args.subcommand == "prep-snps":
+        from .prep import cmd_prep_snps
+        return cmd_prep_snps(args)
+    if args.subcommand == "prep-homoeologs":
+        from .prep import cmd_prep_homoeologs
+        return cmd_prep_homoeologs(args)
     return 1
 
 
