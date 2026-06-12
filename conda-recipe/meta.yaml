@@ -1,0 +1,71 @@
+{% set name = "homoeogwas" %}
+{% set version = "1.0.0" %}
+
+# Bioconda recipe for HomoeoGWAS.
+# To publish:  upload the v1.0.0 sdist to PyPI, then submit this file as
+# recipes/homoeogwas/meta.yaml in a PR to https://github.com/bioconda/bioconda-recipes
+# (their CI builds it and `conda install -c bioconda homoeogwas` becomes available).
+# The sha256 below is for the locally built sdist; it must match the PyPI sdist.
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  sha256: 8b0cff02ad3faa727b083ff28f0c647921c2492e42e2a39ea18b5a0bceb1d87e
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - homoeogwas = homoeogwas.cli:main
+    - homoeogwas-mcp = homoeogwas.mcp_server:main
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=64
+  run:
+    - python >=3.10
+    - numpy >=1.24
+    - scipy >=1.10
+    - pandas >=2.0
+    - scikit-learn >=1.3
+    - matplotlib-base >=3.7
+    - bed-reader >=1.0
+    - pyyaml >=6.0
+    - pydantic >=2.5
+    - joblib >=1.3
+    - pysam >=0.22
+    # external tools used by `homoeogwas split` (optional at runtime):
+    - plink2
+    - bcftools
+
+test:
+  imports:
+    - homoeogwas
+  commands:
+    - homoeogwas --version
+    - homoeogwas --help
+    - homoeogwas demo --help
+
+about:
+  home: https://github.com/Shipeng-Yang/HomoeoGWAS
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+  summary: Subgenome-stratified LMM GWAS for allopolyploids
+  description: |
+    HomoeoGWAS runs subgenome-stratified linear-mixed-model GWAS in
+    allopolyploids — per-subgenome variance components, a homoeolog Hadamard
+    kernel, a gene-resolution homoeolog-pair interaction test, publication-grade
+    figures, and an agent/MCP interface. Validated across ploidies 2n-8n.
+  dev_url: https://github.com/Shipeng-Yang/HomoeoGWAS
+  doc_url: https://shipeng-yang.github.io/HomoeoGWAS
+
+extra:
+  recipe-maintainers:
+    - Shipeng-Yang
