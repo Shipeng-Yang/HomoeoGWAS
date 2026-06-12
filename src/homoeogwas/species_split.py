@@ -2,7 +2,7 @@
 
 Drives ``bcftools`` (chrom subset + concat) and ``plink2`` (BED/pgen import +
 QC) from a ``configs/species/<species>.yaml``. Adding a new species (e.g.
-strawberry 8n, peanut 4n, Jerusalem artichoke 6n) should require writing a
+strawberry 8n, peanut 4n, oat 6n) should require writing a
 YAML, not editing this module.
 
 Pipeline per subgenome (j ∈ {A, B, D, …}):

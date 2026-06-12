@@ -44,7 +44,7 @@ proteins for the DIAMOND path.
 | ploidy / genome | subgenomes | `interact --mode` | example |
 |---|---|---|---|
 | allotetraploid AADD / AACC | 2 | `pairwise` | cotton, rapeseed |
-| allohexaploid AABBDD / AABBCC | 3 | `triad` | wheat, Jerusalem artichoke |
+| allohexaploid AABBDD | 3 | `triad` | wheat |
 | allo-octoploid AABBCCDD | 4 | `pairwise`/`triad` over subsets | strawberry — run over 2-/3-subgenome subsets (see below) |
 | **diploid** | 1 | — homoeolog test N/A | rice, etc. |
 
@@ -86,15 +86,15 @@ chromosome in your reference.
 | `subgenome` | yes | subgenome label (e.g. `A`, `B`, `C`) |
 | `base_group` | optional | the ancestral/base chromosome a homoeolog set descends from (e.g. `Chr1`); enables `--restrict-base-group` |
 
-Example (allohexaploid AABBCC, NCBI-style chrom names):
+Example (allohexaploid AABBDD, one row per chromosome):
 
 ```
-chrom        subgenome    base_group
-CM060351.1   A            Chr1
-CM060352.1   A            Chr1
-CM060353.1   C            Chr1
-CM060355.1   B            Chr1
-CM060357.1   A            Chr2
+chrom   subgenome    base_group
+chr1A   A            1
+chr1B   B            1
+chr1D   D            1
+chr2A   A            2
+chr2B   B            2
 ...
 ```
 
@@ -241,9 +241,9 @@ outputs: {out_dir: results_interact/my_trait}
 homoeogwas interact -c interact.yaml --n-jobs 16
 ```
 
-A complete worked example on an allohexaploid (Jerusalem artichoke, AABBCC,
-2n=6x=102) is in
-[`examples/jerusalem_artichoke_hexaploid.md`](examples/jerusalem_artichoke_hexaploid.md).
+A complete worked example on an allo-octoploid (strawberry, AABBCCDD,
+2n=8x=56) — including the 2-/3-subgenome-subset pattern for 4 subgenomes — is in
+[`examples/strawberry_octoploid.md`](examples/strawberry_octoploid.md).
 
 ---
 

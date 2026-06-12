@@ -134,7 +134,8 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
    int). Coerce ids to strings on both sides (e.g. prefix them) before running,
    or stop and tell the user.
 2. **GFF and `.bim` chromosome names must match exactly** (for `prep-snps`). If
-   they differ (e.g. `CM060351.1` vs `1A`), rename one side first; stop and say so.
+   they differ (e.g. an NCBI accession in the GFF vs `1A` in the `.bim`), rename
+   one side first; stop and say so.
 3. **subgenome map** columns are `chrom, subgenome[, base_group]`.
 4. **DIAMOND 2.2.0 deadlocks** on `makedb`; use a 2.1.x binary via `--diamond`.
    Protein FASTAs must have `.`/`*` stop/gap characters stripped.

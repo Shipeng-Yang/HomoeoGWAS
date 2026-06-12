@@ -3,7 +3,7 @@
 Replaces the v1 hardcoded per-species paths (wheat/cotton/rapeseed) with
 ``configs/species/<species>.yaml`` configs that the framework reads to
 plug-in any allopolyploid species — including user-supplied ones (e.g.
-sweetpotato 6n, oat 6n, peanut 4n, strawberry 8n, Jerusalem artichoke 6n).
+sweetpotato 6n, oat 6n, peanut 4n, strawberry 8n).
 
 The schema is intentionally minimal: 10 required fields cover the
 inputs that the LMM / DL-prior pipelines actually consume, and
