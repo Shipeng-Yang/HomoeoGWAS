@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.1 — first PyPI / conda release
+
+First release published to PyPI (and submitted to bioconda) — `pip install
+homoeogwas`. Same features as v1.0.0; version bumped for distribution.
+
 ## v1.0.0 — first public release
 
 Subgenome-stratified linear-mixed-model GWAS for allopolyploids (and diploids),

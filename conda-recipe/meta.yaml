@@ -1,8 +1,8 @@
 {% set name = "homoeogwas" %}
-{% set version = "1.0.0" %}
+{% set version = "1.0.1" %}
 
 # Bioconda recipe for HomoeoGWAS.
-# To publish:  upload the v1.0.0 sdist to PyPI, then submit this file as
+# To publish:  upload the v1.0.1 sdist to PyPI, then submit this file as
 # recipes/homoeogwas/meta.yaml in a PR to https://github.com/bioconda/bioconda-recipes
 # (their CI builds it and `conda install -c bioconda homoeogwas` becomes available).
 # The sha256 below is for the locally built sdist; it must match the PyPI sdist.
@@ -13,7 +13,7 @@ package:
 
 source:
   url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 8b0cff02ad3faa727b083ff28f0c647921c2492e42e2a39ea18b5a0bceb1d87e
+  sha256: e216e5e3b251ac49e4465bab0f686888826e001c3f4f3189dcaa301e53bcf43b
 
 build:
   noarch: python
