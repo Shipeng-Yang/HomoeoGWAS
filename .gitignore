@@ -40,7 +40,10 @@ tables/
 # ---------------------------------------------------------------------------
 .codex_state/
 .codex_logs/
-.claude/
+# ignore local Claude settings/state, but ship the agent skill
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

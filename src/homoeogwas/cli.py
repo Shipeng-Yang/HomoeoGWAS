@@ -936,6 +936,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .prep import add_prep_subparsers
     add_prep_subparsers(sub)
 
+    # agent-facing MCP server (optional 'mcp' dependency)
+    sub.add_parser("mcp", help="run the MCP server so any agent/LLM client can "
+                               "drive HomoeoGWAS (needs: pip install homoeogwas[mcp])")
+
     val = sub.add_parser("validate", help="load + validate a run config and "
                                           "check input paths, without running")
     val.add_argument("-c", "--config", required=True, help="YAML run-config path")
@@ -1048,6 +1052,9 @@ def main(argv=None) -> int:
     if args.subcommand == "prep-homoeologs":
         from .prep import cmd_prep_homoeologs
         return cmd_prep_homoeologs(args)
+    if args.subcommand == "mcp":
+        from .mcp_server import main as mcp_main
+        return mcp_main()
     return 1
 
 
