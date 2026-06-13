@@ -222,28 +222,37 @@ if (length(dist_kinds) > 0) {
     written <<- c(written, f)
   }
 
-  if ("variance" %in% dist_kinds) {
-    v <- read_tsv(args[["variance"]])           # component, pve, sigma2, kind, is_boundary
+  if ("variance" %in% dist_kinds && requireNamespace("treemapify", quietly = TRUE)) {
+    v <- read_tsv(args[["variance"]])    # component, pve, sigma2, kind, is_boundary
+    v <- v[is.finite(v$sigma2) & v$sigma2 > 0, ]   # drop boundary (sigma2->0)
+    if (nrow(v) == 0) {
+      message("variance: all components at the boundary (sigma2->0); nothing ",
+              "to draw — skipping")
+    } else {
     v$component <- factor(v$component, levels = v$component)
-    cols <- ifelse(v$kind == "residual", SUBCOL[["residual"]],
-            ifelse(v$kind == "homoeolog", SUBCOL[["homoeolog"]],
-            ifelse(as.character(v$component) %in% names(SUBCOL),
-                   SUBCOL[as.character(v$component)], "#1F577B")))
-    lab <- sprintf("%.0f%%", 100 * v$pve)
-    lab[v$is_boundary == 1] <- paste0(lab[v$is_boundary == 1], "*")
-    sub <- if (any(v$is_boundary == 1))
-      "* = variance driven to the boundary (REML σ²→0)" else NULL
-    p <- ggplot(v, aes(component, pve, fill = component)) +
-      geom_col(width = 0.7, colour = "white", alpha = 0.92) +
-      geom_text(aes(label = lab), vjust = -0.3, size = 3) +
-      scale_fill_manual(values = stats::setNames(cols, v$component),
-                        guide = "none") +
-      scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
-      labs(title = paste0("Subgenome variance decomposition — ", trait),
-           subtitle = sub, x = NULL,
-           y = "proportion of variance explained") +
-      theme_omic()
-    ggw(p, "variance_fingerprint", w = 5.5, h = 4.2)
+    # earth palette: subgenomes warm earth tones, homoeolog kernel taupe-brown,
+    # residual recessive greige
+    EARTH <- c(A = "#8C6D31", B = "#C44E52", C = "#55A868", D = "#CCB974",
+               homoeolog = "#937860", residual = "#C7C0B8")
+    cols <- setNames(ifelse(as.character(v$component) %in% names(EARTH),
+                            EARTH[as.character(v$component)], "#8C6D31"),
+                     as.character(v$component))
+    v$tlab <- sprintf("%s\n%.0f%%\nσ²=%.1f", v$component, 100 * v$pve, v$sigma2)
+    p <- ggplot(v, aes(area = sigma2, fill = component, label = tlab)) +
+      treemapify::geom_treemap(colour = "white", size = 4, start = "topleft") +
+      treemapify::geom_treemap_text(colour = "white", place = "centre",
+                                    grow = FALSE, reflow = TRUE, size = 16,
+                                    fontface = "bold", start = "topleft") +
+      scale_fill_manual(values = cols, name = "Variance\ncomponent",
+                        guide = guide_legend(reverse = TRUE)) +
+      theme_minimal(base_size = 14) +
+      theme(legend.title = element_text(face = "bold", size = 12),
+            legend.text = element_text(size = 12),
+            legend.key.size = grid::unit(1.2, "lines"),
+            axis.text = element_blank(), axis.title = element_blank(),
+            panel.grid = element_blank(), plot.margin = margin(10, 10, 10, 10))
+    ggw(p, "variance", w = 7.6, h = 5.0)
+    }
   }
 
   if (any(c("interaction", "marginal", "network") %in% dist_kinds)) {
