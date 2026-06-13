@@ -162,3 +162,103 @@ def test_plot_from_results_ambiguous_prefix(tmp_path):
     (tmp_path / "summary_b.json").write_text("{}")
     with pytest.raises(ValueError):
         plots.plot_from_results(tmp_path)
+
+
+# ----------------------------------------------------------------------
+# locus (LocusZoom-style) plots
+# ----------------------------------------------------------------------
+
+def _toy_locus(n=400, chrom="A05", center=10_500_000, seed=3):
+    rng = np.random.default_rng(seed)
+    pos = np.sort(rng.integers(center - 400_000, center + 400_000, n))
+    df = pd.DataFrame({
+        "snp_id": [f"A:{p}" for p in pos], "subgenome": "A",
+        "chrom": chrom, "pos": pos, "p": rng.uniform(1e-2, 1, n)})
+    j = int(np.argmin(np.abs(pos - center)))
+    df.loc[j, "p"] = 1e-12          # a clear lead at the centre
+    return df, df.loc[j, "snp_id"]
+
+
+def test_ld_bin_color_bins():
+    assert plots._ld_bin_color(0.95) == plots._LD_COLORS[-1]   # 0.8-1.0
+    assert plots._ld_bin_color(0.1) == plots._LD_COLORS[0]     # 0.0-0.2
+    assert plots._ld_bin_color(float("nan")) == plots._LD_NA_COLOR
+
+
+def test_plot_locus_no_ld_no_genes(tmp_path):
+    df, lead = _toy_locus()
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="t",
+                             window_kb=300, formats=("png",))
+    assert paths and all(p.endswith(".png") for p in paths)
+    assert any("locus_t_A05_" in p for p in paths)
+
+
+def test_plot_locus_auto_picks_top_hit(tmp_path):
+    df, lead = _toy_locus(center=10_500_000)
+    # no lead/chrom/pos given -> centre on the min-p marker
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="auto",
+                             window_kb=300, formats=("png",))
+    lead_pos = int(df.loc[df["snp_id"] == lead, "pos"].iloc[0])
+    assert any(f"_{lead_pos}." in p for p in paths)
+
+
+def test_plot_locus_with_ld_mapping(tmp_path):
+    df, lead = _toy_locus()
+    ld = {s: float(v) for s, v in zip(
+        df["snp_id"], np.linspace(0, 1, len(df)), strict=False)}
+    ld[lead] = 1.0
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="ld", ld=ld,
+                             lead_snp=lead, window_kb=300, formats=("png",))
+    assert paths
+
+
+def test_plot_locus_with_gene_table(tmp_path):
+    df, lead = _toy_locus()
+    genes = pd.DataFrame({
+        "gene": ["G1", "G2"], "chrom": ["A05", "A05"],
+        "start": [10_440_000, 10_560_000], "end": [10_480_000, 10_620_000],
+        "strand": ["+", "-"]})
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="g", genes=genes,
+                             window_kb=300, formats=("png",))
+    assert paths
+
+
+def test_plot_locus_empty_window_raises(tmp_path):
+    df, _ = _toy_locus()
+    with pytest.raises(ValueError):
+        plots.plot_locus(df, out_dir=tmp_path, prefix="e",
+                         chrom="A05", pos=99_000_000, window_kb=1)
+
+
+def test_plot_locus_missing_lead_raises(tmp_path):
+    df, _ = _toy_locus()
+    with pytest.raises(ValueError):
+        plots.plot_locus(df, out_dir=tmp_path, prefix="m",
+                         lead_snp="not_a_snp")
+
+
+def test_parse_genes_gff(tmp_path):
+    gff = tmp_path / "g.gff3"
+    gff.write_text(
+        "##gff-version 3\n"
+        "A05\tsrc\tgene\t100\t500\t.\t+\t.\tID=geneX;Name=FOO\n"
+        "A05\tsrc\tmRNA\t100\t500\t.\t+\t.\tID=mrnaX\n"
+        "A05\tsrc\tgene\t800\t900\t.\t-\t.\tgene_id=BAR\n")
+    g = plots._parse_genes(str(gff))
+    assert list(g.columns) == ["gene", "chrom", "start", "end", "strand"]
+    assert set(g["gene"]) == {"FOO", "BAR"}       # only gene features, named
+    assert (g["chrom"] == "A05").all()
+
+
+def test_plot_loci_from_results(tmp_path):
+    df, lead = _toy_locus()
+    df.assign(beta=0.1, se=0.1, chi2=1.0, n_obs=100, maf=0.3,
+              call_rate=0.99).to_csv(tmp_path / "sumstats_x.tsv", sep="\t",
+                                     index=False)
+    summary = {"trait": "x", "subgenomes": ["A"],
+               "outputs": {"sumstats": [str(tmp_path / "sumstats_x.tsv")]}}
+    (tmp_path / "summary_x.json").write_text(json.dumps(summary))
+    out = tmp_path / "loci"
+    paths = plots.plot_loci_from_results(tmp_path, top_n=1, window_kb=300,
+                                         formats=("png",), out_dir=out)
+    assert paths and any(p.endswith(".png") for p in paths)

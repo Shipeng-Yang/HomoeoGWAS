@@ -967,6 +967,34 @@ def build_parser() -> argparse.ArgumentParser:
                      help="comma subset of pve,manhattan,qq,lambda (or all)")
     plt.add_argument("--no-update-summary", action="store_true",
                      help="do not rewrite summary.json outputs.plots")
+
+    loc = sub.add_parser("locus", help="draw LocusZoom-style regional plots "
+                                       "(per-hit zoom) from a finished run")
+    loc.add_argument("results_dir", help="a finished homoeogwas fit output dir")
+    loc.add_argument("--prefix", default=None,
+                     help="select summary_<prefix>.json (needed if several)")
+    loc.add_argument("--lead-snp", default=None,
+                     help="centre on this SNP id (else --chrom/--pos or top hit)")
+    loc.add_argument("--chrom", default=None, help="centre chromosome")
+    loc.add_argument("--pos", type=int, default=None, help="centre bp position")
+    loc.add_argument("--subgenome", default=None,
+                     help="restrict to this subgenome")
+    loc.add_argument("--window-kb", type=int, default=500,
+                     help="half-window in kb around the centre (default 500)")
+    loc.add_argument("--top-n", type=int, default=3,
+                     help="number of top independent hits to plot (default 3)")
+    loc.add_argument("--genotype", default=None,
+                     help="PLINK bed prefix for r^2-to-lead colouring "
+                          "(else auto-resolved from the run config; else "
+                          "flat colour)")
+    loc.add_argument("--genes", default=None,
+                     help="gene table (.tsv/.csv) or .gff/.gff3/.gtf for a "
+                          "gene-model track")
+    loc.add_argument("--formats", default="png,pdf,svg",
+                     help="comma list of output formats (default png,pdf,svg)")
+    loc.add_argument("--dpi", type=int, default=300, help="PNG raster dpi")
+    loc.add_argument("--out-dir", default=None,
+                     help="output dir (default: the results dir)")
     return ap
 
 
@@ -987,6 +1015,59 @@ def cmd_plot(args) -> int:
     for p in paths:
         print(f"  wrote {p}")
     print(f"[plot] {len(paths)} files written")
+    return 0
+
+
+def _resolve_genotype_template(results_dir: Path, prefix: str | None) -> str | None:
+    """Read a finished run's config to get its scan_bed_prefix_template.
+
+    Returns the ``{subgenome}`` template (e.g. ``data/processed/cotton/{subgenome}/all``)
+    so locus plots can find the per-subgenome bed for r^2 colouring, or ``None``
+    if the config or key is unavailable (locus plots then fall back to flat).
+    """
+    import json
+    results_dir = Path(results_dir)
+    try:
+        from .plots import _discover_summary
+        sp = _discover_summary(results_dir, prefix)
+        summary = json.loads(sp.read_text())
+        cfg_path = summary.get("config")
+        if not cfg_path:
+            return None
+        name = Path(cfg_path).name
+        cands = [Path(cfg_path), results_dir / cfg_path, results_dir / name,
+                 results_dir / "configs" / name]
+        # best-effort: the config tree may have moved since the run
+        for root in (Path("configs"), Path("reproducibility")):
+            if root.is_dir():
+                cands.extend(sorted(root.rglob(name))[:1])
+        p = next((c for c in cands if c.exists()), None)
+        if p is None:
+            return None
+        cfg = load_config(p)
+        return cfg.get("genotype", {}).get("scan_bed_prefix_template")
+    except Exception:
+        return None
+
+
+def cmd_locus(args) -> int:
+    """Draw LocusZoom-style regional plots from a finished run directory."""
+    from .plots import plot_loci_from_results
+    formats = [f.strip() for f in args.formats.split(",") if f.strip()]
+    gtmpl = (None if args.genotype
+             else _resolve_genotype_template(Path(args.results_dir), args.prefix))
+    paths = plot_loci_from_results(
+        Path(args.results_dir), prefix=args.prefix, top_n=args.top_n,
+        window_kb=args.window_kb, lead_snp=args.lead_snp, chrom=args.chrom,
+        pos=args.pos, subgenome=args.subgenome, genotype_template=gtmpl,
+        genotype=args.genotype, genes=args.genes, formats=formats,
+        dpi=args.dpi, out_dir=args.out_dir)
+    if not paths:
+        print(f"[locus] no locus figures written from {args.results_dir}")
+        return 1
+    for p in paths:
+        print(f"  wrote {p}")
+    print(f"[locus] {len(paths)} files written")
     return 0
 
 
@@ -1046,6 +1127,8 @@ def main(argv=None) -> int:
         return cmd_demo(args)
     if args.subcommand == "plot":
         return cmd_plot(args)
+    if args.subcommand == "locus":
+        return cmd_locus(args)
     if args.subcommand == "prep-snps":
         from .prep import cmd_prep_snps
         return cmd_prep_snps(args)
