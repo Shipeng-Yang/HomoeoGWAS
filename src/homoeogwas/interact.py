@@ -198,6 +198,58 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
     return pv
 
 
+def marginal_pvals(Wh: np.ndarray, y: np.ndarray, B: np.ndarray,
+                   C: np.ndarray = None) -> np.ndarray:
+    """Per-gene SINGLE-burden marginal p (whitened GLS t-test on b alone).
+
+    Same whitener/covariates as :func:`pairwise_pvals`, but the design is
+    ``[C, b]`` (no product term), so the test asks whether a single homoeolog
+    burden associates on its own. Comparing this against the pair interaction p
+    is the "signal invisible to single-locus tests" contrast.
+    """
+    n, G = B.shape
+    yw = Wh @ y
+    Bw = Wh @ B
+    if C is None:
+        Cw = (Wh @ np.ones(n)).reshape(-1, 1)
+    else:
+        Cw = Wh @ np.asarray(C, float).reshape(n, -1)
+    p_c = Cw.shape[1]
+    j = p_c                                   # index of the burden coef in [C, b]
+    p_full = p_c + 1
+    pv = np.empty(G)
+    for g in range(G):
+        Xw = np.column_stack([Cw, Bw[:, g]])
+        beta, _res, rank, _sv = np.linalg.lstsq(Xw, yw, rcond=None)
+        df = yw.shape[0] - rank          # effective n (robust to a rectangular Wh)
+        if rank < p_full or df < 1:
+            pv[g] = 1.0
+            continue
+        resid = yw - Xw @ beta
+        s2 = float(resid @ resid) / df
+        se = np.sqrt(max(s2 * np.linalg.pinv(Xw.T @ Xw)[j, j], 1e-30))
+        pv[g] = 2.0 * stats.t.sf(abs(beta[j] / se), df)
+    return pv
+
+
+def _gene_coord(sub, snp_idx) -> tuple:
+    """(chrom, pos) for a gene = first SNP's chrom + median SNP bp (NA/-1 if none)."""
+    idx = np.asarray(snp_idx, int)
+    chunk = getattr(sub, "chunk", None)
+    pos = getattr(chunk, "pos", None)
+    chrom = getattr(chunk, "chrom", None)
+    if pos is None or chrom is None or idx.size == 0:
+        return "NA", -1
+    pos, chrom = np.asarray(pos), np.asarray(chrom)
+    idx = idx[(idx >= 0) & (idx < pos.size)]          # drop sentinels / OOB
+    if idx.size == 0:
+        return "NA", -1
+    c = chrom[idx]
+    # the dominant chromosome (genes should be on one; guards mixed mappings)
+    vals, counts = np.unique(c.astype(str), return_counts=True)
+    return str(vals[int(counts.argmax())]), int(np.median(pos[idx]))
+
+
 def _neglog10(p: np.ndarray) -> np.ndarray:
     """-log10(p) with p floored at 1e-300 (consistent finite cap; never +inf)."""
     return -np.log10(np.clip(np.asarray(p, float), 1e-300, 1.0))
@@ -406,6 +458,8 @@ def run_pair_scan(
     pair_weights: dict = None,          # {(gx,gy): w}  y-INDEPENDENT prior (DL/HEB), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q) array} fixed effects; None=legacy
     full_dump_path: str = None,         # if set, write FULL per-pair ranking TSV (else top-N only)
+    burden_dump_path: str = None,       # if set, write per-sample burdens for the top-K pairs
+    top_k_burden: int = 5,              # number of top pairs to export burdens for
 ) -> InteractResult:
     """Whitened per-pair burden-product interaction scan with ACAT + permutation calibration.
 
@@ -463,23 +517,60 @@ def run_pair_scan(
     sig = [dict(pair=kept_pairs[int(i)], p=float(pv[i])) for i in order if pv[i] < bonf]
     top = [dict(pair=kept_pairs[int(i)], p=float(pv[i])) for i in order[:5]]
 
+    # per-gene single-burden marginal p (the "invisible to single-locus" contrast) and gene
+    # coordinates are computed once here when any dump is requested (reuse Wh/C from above).
+    if full_dump_path or burden_dump_path:
+        pmx = marginal_pvals(Wh, y, BX, C=C)
+        pmy = marginal_pvals(Wh, y, BY, C=C)
+        coords = [(_gene_coord(subdata[sx], subdata[sx].gene_snp[gx]),
+                   _gene_coord(subdata[sy], subdata[sy].gene_snp[gy]))
+                  for gx, gy in kept_pairs]
+
     if full_dump_path:
-        # Full genome-wide ranking (descriptive). gene_len is emitted as NA (the engine has no
-        # coordinates) and joined downstream from the annotation.
+        # Full genome-wide ranking (descriptive). Now also carries each gene's coordinates and
+        # single-burden marginal p so downstream viz can build the interaction Manhattan and the
+        # interaction-vs-marginal contrast without recomputation. gene_len stays NA (joined
+        # downstream from annotation).
         nx, ny = np.asarray(nsnp_x), np.asarray(nsnp_y)
         _, rank_of, tie_of = _rank_with_ties(pv, kept_pairs)
         nl = _neglog10(pv)
+        nlmx, nlmy = _neglog10(pmx), _neglog10(pmy)
         cbin = _decile_bin(nx + ny)
         rows = [[int(rank_of[i]), kept_pairs[i][0], kept_pairs[i][1], sx, sy,
                  repr(float(pv[i])), repr(float(nl[i])), int(nx[i]), int(ny[i]), int(nx[i] + ny[i]),
                  int(cbin[i]), int(tie_of[i]), int(pv[i] >= 1.0),
-                 int(pv[i] < bonf), "NA", "NA", "NA"]
+                 int(pv[i] < bonf), "NA", "NA", "NA",
+                 coords[i][0][0], coords[i][0][1], coords[i][1][0], coords[i][1][1],
+                 repr(float(pmx[i])), repr(float(pmy[i])),
+                 repr(float(nlmx[i])), repr(float(nlmy[i]))]
                 for i in np.argsort(pv, kind="stable")]
         _write_ranking_tsv(full_dump_path,
                            ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y", "p_interaction",
                             "neglog10p", f"n_snp_{sx}", f"n_snp_{sy}", "n_snp_pair",
                             "callable_snp_decile", "tie_group", "p_is_one", "bonferroni_sig",
-                            f"gene_len_{sx}", f"gene_len_{sy}", "gene_len_pair_sum"], rows)
+                            f"gene_len_{sx}", f"gene_len_{sy}", "gene_len_pair_sum",
+                            "chrom_x", "pos_x", "chrom_y", "pos_y",
+                            "p_marginal_x", "p_marginal_y",
+                            "neglog10p_marginal_x", "neglog10p_marginal_y"], rows)
+
+    if burden_dump_path:
+        # per-sample burdens + phenotype for the top-K pairs -> A×D interaction-surface plot.
+        # resid removes the covariate fit (== y - mean when intercept-only).
+        if C is None:
+            resid_y = y - float(np.mean(y))
+        else:
+            b_c, *_ = np.linalg.lstsq(C, y, rcond=None)
+            resid_y = y - C @ b_c
+        brows = []
+        for kr, i in enumerate(order[:max(int(top_k_burden), 1)]):
+            gx, gy = kept_pairs[int(i)]
+            for s in range(n_t):
+                brows.append([kr, gx, gy, sx, sy, int(s),
+                              repr(float(BX[s, i])), repr(float(BY[s, i])),
+                              repr(float(y[s])), repr(float(resid_y[s]))])
+        _write_ranking_tsv(burden_dump_path,
+                           ["pair_rank", "gene_x", "gene_y", "sub_x", "sub_y", "sample_row",
+                            "burden_x", "burden_y", "phenotype", "resid"], brows)
 
     weighted = None
     if w is not None:
@@ -1139,6 +1230,10 @@ def cmd_interact(args) -> int:
     def _dump_path(transform):
         return str(out_dir / f"interact_{trait}_ranking_{mode}_{transform}.tsv") if dump_on else None
 
+    def _burden_path(transform):
+        return (str(out_dir / f"interact_{trait}_topburdens_{transform}.tsv")
+                if dump_on else None)
+
     if mode == "triad":
         triads = _load_pairs(ic["triads"], subs)            # gene_<S> columns -> (g0, g1, g2)
         triad_weights = _load_pair_weights(ic.get("weights"), subs) if ic.get("weights") else None
@@ -1176,7 +1271,8 @@ def cmd_interact(args) -> int:
                               perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
                               pair_weights=pair_weights, covariates=cov_arg,
-                              full_dump_path=_dump_path(transform))
+                              full_dump_path=_dump_path(transform),
+                              burden_dump_path=_burden_path(transform))
             r.trait = trait
             results[transform] = r.__dict__
             print(f"  [{transform}] G={r.G} pair_ACAT={r.pair_acat:.3g} emp={r.pair_acat_emp} "

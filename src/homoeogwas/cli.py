@@ -1005,7 +1005,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--prefix", default=None,
                     help="select summary_<prefix>.json (needed if several)")
     rp.add_argument("--kind", default="manhattan,qq",
-                    help="comma subset of manhattan,circular,qq,density,locus")
+                    help="comma subset of genome-wide (manhattan,circular,qq,"
+                         "density), locus, and distinctive HomoeoGWAS figures "
+                         "(variance,interaction,marginal,burden,triad,network);"
+                         " groups: 'genomewide','distinctive','all'")
     rp.add_argument("--format", default="pdf", help="pdf or png (default pdf)")
     rp.add_argument("--dpi", type=int, default=300, help="raster dpi")
     rp.add_argument("--out-dir", default=None,
@@ -1136,6 +1139,120 @@ def _r_script_asset() -> str:
     return str(Path(__file__).parent / "r" / "gwas_plots.R")
 
 
+_HOM_ALIASES = {"hom", "khom", "k_hom", "homoeolog", "hadamard"}
+
+
+def _write_variance_tsv(summary: dict, path: Path) -> bool:
+    """Extract per-component PVE/sigma2 from a fit summary into a tidy TSV.
+
+    Returns False if the summary has no REML variance components.
+    """
+    import csv
+    reml = summary.get("reml", {})
+    pve, sig = reml.get("pve", {}), reml.get("sigma2", {})
+    if not pve:
+        return False
+    boundary = set(reml.get("boundary_components", []) or [])
+    subg = summary.get("subgenomes", [])
+    order = ([k for k in subg if k in pve]
+             + [k for k in pve if k not in subg and k != "e"]
+             + (["e"] if "e" in pve else []))
+    rows = []
+    for c in order:
+        if c == "e":
+            comp, kind = "residual", "residual"
+        elif str(c).lower() in _HOM_ALIASES:
+            comp, kind = "homoeolog", "homoeolog"
+        else:
+            comp, kind = c, "subgenome"
+        rows.append([comp, float(pve.get(c, 0.0)), float(sig.get(c, 0.0)),
+                     kind, int(str(c) in {str(x) for x in boundary})])
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["component", "pve", "sigma2", "kind", "is_boundary"])
+        w.writerows(rows)
+    return True
+
+
+def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
+                       dist: list, summary: dict | None) -> int:
+    """Render distinctive HomoeoGWAS figures from interact / fit artifacts.
+
+    Detects the per-pair ranking TSV, top-K burdens TSV and triad ranking TSV
+    in the run dir, and the fit summary's REML components, then dispatches each
+    requested figure to the R script; missing inputs skip with a message.
+    """
+    import subprocess
+    rdir = Path(rdir)
+    rc = 0
+
+    def _first(*pats):
+        for pat in pats:
+            hits = sorted(rdir.glob(pat))
+            if hits:
+                return str(hits[0])
+        return None
+
+    ranking = _first("interact_*_ranking_pairwise_INT.tsv",
+                     "interact_*_ranking_pairwise_*.tsv")
+    burdens = _first("interact_*_topburdens_INT.tsv",
+                     "interact_*_topburdens_*.tsv")
+    triad = _first("interact_*_ranking_triad_INT.tsv",
+                   "interact_*_ranking_triad_*.tsv")
+
+    def _trait_from(path, marker):
+        # interact_<trait>_<marker>... -> <trait>; ties the label to THIS file
+        # so mixing runs in one dir cannot mispair labels.
+        if not path:
+            return None
+        stem = Path(path).name
+        if stem.startswith("interact_") and marker in stem:
+            return stem[len("interact_"):stem.index(marker)].rstrip("_")
+        return None
+
+    itrait = (_trait_from(ranking, "_ranking_pairwise")
+              or _trait_from(burdens, "_topburdens")
+              or _trait_from(triad, "_ranking_triad") or prefix)
+
+    if "variance" in dist:
+        vtsv = out_dir / f"_variance_{prefix}.tsv"
+        if summary and _write_variance_tsv(summary, vtsv):
+            rc |= subprocess.run(
+                base + ["--kind", "variance", "--variance", str(vtsv),
+                        "--prefix", prefix,
+                        "--trait", summary.get("trait", prefix)]).returncode
+        else:
+            print("[rplot] variance: no fit summary with REML components here "
+                  "— skipping (point rplot at a `fit` output dir)")
+
+    rk = [k for k in dist if k in ("interaction", "marginal", "network")]
+    if rk:
+        if ranking:
+            rc |= subprocess.run(
+                base + ["--kind", ",".join(rk), "--ranking", ranking,
+                        "--prefix", itrait, "--trait", itrait]).returncode
+        else:
+            print("[rplot] interaction/marginal/network: no ranking TSV — run "
+                  "`interact` with outputs.full_ranking: true; skipping")
+    if "burden" in dist:
+        if burdens:
+            rc |= subprocess.run(
+                base + ["--kind", "burden", "--burdens", burdens,
+                        "--prefix", itrait, "--trait", itrait]).returncode
+        else:
+            print("[rplot] burden: no top-K burdens TSV (needs full_ranking "
+                  "interact run) — skipping")
+    if "triad" in dist:
+        if triad:
+            rc |= subprocess.run(
+                base + ["--kind", "triad", "--triad", triad,
+                        "--prefix", itrait, "--trait", itrait]).returncode
+        else:
+            print("[rplot] triad: no triad ranking TSV (triad-mode interact) "
+                  "— skipping")
+    return rc
+
+
 def cmd_rplot(args) -> int:
     """Publication-grade R figures via CMplot (genome-wide) + locuszoomr (locus).
 
@@ -1155,6 +1272,8 @@ def cmd_rplot(args) -> int:
     if getattr(args, "check_deps", False):
         return subprocess.run([rscript, script, "--check-deps"]).returncode
 
+    import json
+
     from .plots import (
         _compute_ld_to_lead,
         _discover_summary,
@@ -1163,40 +1282,62 @@ def cmd_rplot(args) -> int:
         _stream_pick_leads,
         _stream_window,
     )
+    GENOMEWIDE = ["manhattan", "circular", "qq", "density"]
+    DISTINCT = ["variance", "interaction", "marginal", "burden", "triad",
+                "network"]
+    kinds: list[str] = []
+    for k in (x.strip() for x in args.kind.split(",") if x.strip()):
+        if k == "all":
+            kinds += GENOMEWIDE + DISTINCT
+        elif k == "distinctive":
+            kinds += ["variance", "interaction", "marginal", "burden", "triad"]
+        elif k == "genomewide":
+            kinds += GENOMEWIDE
+        else:
+            kinds.append(k)
+    kinds = list(dict.fromkeys(kinds))            # dedupe, keep order
 
-    kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
     rdir = Path(args.results_dir)
     out_dir = Path(args.out_dir) if args.out_dir else rdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # resolve sumstats + prefix/trait (from a run dir or an explicit --sumstats)
-    prefix, sumstats = "homoeogwas", []
+    # best-effort run metadata (not fatal: interact dirs have no fit summary)
+    prefix, summary, sumstats = "homoeogwas", None, []
     if args.sumstats:
         sumstats = [args.sumstats]
         prefix = Path(args.sumstats).stem
     else:
-        summary_path = _discover_summary(rdir, args.prefix)
-        import json
-        summary = json.loads(summary_path.read_text())
-        prefix = summary_path.stem[len("summary_"):]
-        sumstats = _resolve_sumstats(
-            rdir, summary.get("outputs", {}).get("sumstats", []))
-    if not sumstats:
-        print(f"[rplot] no sumstats found under {rdir}")
-        return 1
+        try:
+            summary_path = _discover_summary(rdir, args.prefix)
+            summary = json.loads(summary_path.read_text())
+            prefix = summary_path.stem[len("summary_"):]
+            sumstats = _resolve_sumstats(
+                rdir, summary.get("outputs", {}).get("sumstats", []))
+        except Exception:
+            pass
 
     rc = 0
-    gw = [k for k in kinds if k in ("manhattan", "circular", "qq", "density")]
+    base = [rscript, script, "--out-dir", str(out_dir), "--format", args.format,
+            "--dpi", str(args.dpi)]
+
+    gw = [k for k in kinds if k in GENOMEWIDE]
     if gw:
-        ss0 = sumstats[0]
-        if len(sumstats) > 1:        # CMplot wants one table: concat subgenomes
-            ss0 = str(out_dir / f"_rplot_sumstats_{prefix}.tsv")
-            pd.concat([pd.read_csv(s, sep="\t") for s in sumstats],
-                      ignore_index=True).to_csv(ss0, sep="\t", index=False)
-        cmd = [rscript, script, "--sumstats", ss0, "--kind", ",".join(gw),
-               "--out-dir", str(out_dir), "--prefix", prefix,
-               "--format", args.format, "--dpi", str(args.dpi)]
-        rc |= subprocess.run(cmd).returncode
+        if not sumstats:
+            print(f"[rplot] genome-wide plots need sumstats; none found in "
+                  f"{rdir} — skipping {','.join(gw)}")
+        else:
+            ss0 = sumstats[0]
+            if len(sumstats) > 1:    # CMplot wants one table: concat subgenomes
+                ss0 = str(out_dir / f"_rplot_sumstats_{prefix}.tsv")
+                pd.concat([pd.read_csv(s, sep="\t") for s in sumstats],
+                          ignore_index=True).to_csv(ss0, sep="\t", index=False)
+            rc |= subprocess.run(base + ["--sumstats", ss0, "--kind",
+                                         ",".join(gw), "--prefix", prefix]
+                                 ).returncode
+
+    dist = [k for k in kinds if k in DISTINCT]
+    if dist:
+        rc |= _rplot_distinctive(base, rdir, out_dir, prefix, dist, summary)
 
     if "locus" in kinds:
         half = int(args.window_kb) * 1000

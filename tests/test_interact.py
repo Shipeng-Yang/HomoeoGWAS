@@ -421,6 +421,51 @@ def test_pair_full_dump_complete_ordered_and_genelen_na(tmp_path):
     assert int(body[0][nx]) == int(body[0][ny]) == SPG and int(body[0][ns]) == 2 * SPG
 
 
+def test_pair_dump_has_marginal_and_burden_exports(tmp_path):
+    # the enriched dump carries single-gene marginal p (for the "invisible to
+    # single-locus" contrast) + coords, and the top-K burden export is written.
+    rng = np.random.default_rng(11)
+    subdata = {"A": _make_sub(rng), "D": _make_sub(rng)}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    hit = 12
+    bA = block_burden_capped(subdata["A"].X, subdata["A"].gene_snp[f"g{hit}"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng)
+    y = rng.standard_normal(N) + 1.8 * (_std(bA) * _std(bD))
+    dp = tmp_path / "rank.tsv"
+    bp = tmp_path / "burden.tsv"
+    run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT",
+                  perm_B=0, pair_subs=("A", "D"), grm_method="grm_from_X",
+                  full_dump_path=str(dp), burden_dump_path=str(bp), top_k_burden=2)
+    head, body = _read_tsv(dp)
+    for c in ("chrom_x", "pos_x", "chrom_y", "pos_y", "p_marginal_x",
+              "p_marginal_y", "neglog10p_marginal_x", "neglog10p_marginal_y"):
+        assert c in head
+    # marginal p of each gene alone is a valid probability
+    pmx = head.index("p_marginal_x")
+    vals = [float(r[pmx]) for r in body]
+    assert all(0.0 <= v <= 1.0 for v in vals)
+    # burden export: top_k_burden pairs x N samples, with the expected columns
+    bhead, bbody = _read_tsv(bp)
+    assert bhead[:6] == ["pair_rank", "gene_x", "gene_y", "sub_x", "sub_y",
+                         "sample_row"]
+    assert {"burden_x", "burden_y", "phenotype", "resid"} <= set(bhead)
+    assert len(bbody) == 2 * N
+    assert {int(r[0]) for r in bbody} == {0, 1}
+
+
+def test_marginal_pvals_basic():
+    from homoeogwas.interact import marginal_pvals
+    rng = np.random.default_rng(3)
+    n = 200
+    Wh = np.eye(n)                         # identity whitener -> plain OLS t-test
+    B = rng.standard_normal((n, 2))
+    y = 0.8 * B[:, 0] + rng.standard_normal(n)   # col0 strongly associated
+    pv = marginal_pvals(Wh, y, B)
+    assert pv.shape == (2,)
+    assert np.all((pv >= 0) & (pv <= 1))
+    assert pv[0] < pv[1]                   # the associated gene has the smaller p
+
+
 def test_triad_full_dump_acat_ordered_and_pairwise_columns(tmp_path):
     # the FULL triad dump is ascending-ACAT ordered with all 3 pairwise p columns + NA gene_len.
     rng = np.random.default_rng(0)

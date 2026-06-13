@@ -194,5 +194,203 @@ if ("locus" %in% kind) {
   }
 }
 
+# ---- distinctive HomoeoGWAS figures (ggplot2) ------------------------------
+# These show what generic GWAS plots cannot: subgenome variance partition and
+# the homoeolog-pair interaction estimand (invisible to single-locus tests).
+dist_kinds <- intersect(kind, c("variance", "interaction", "marginal",
+                                "burden", "triad", "network"))
+if (length(dist_kinds) > 0) {
+  if (!have("ggplot2")) stop("ggplot2 not installed: install.packages('ggplot2')")
+  suppressWarnings(suppressMessages(library(ggplot2)))
+  `%||%` <- function(a, b) if (is.null(a)) b else a
+  trait <- args[["trait"]] %||% prefix
+  topn <- as.integer(args[["top-n"]] %||% "6")
+  SUBCOL <- c(A = "#1F577B", B = "#E07370", C = "#368650", D = "#FCBC10",
+              homoeolog = "#A56BA7", residual = "#B8B8B8")
+  theme_omic <- function() {
+    theme_classic(base_size = 11) +
+      theme(axis.line = element_line(linewidth = 0.4, colour = "#222222"),
+            axis.ticks = element_line(linewidth = 0.4, colour = "#222222"),
+            plot.title = element_text(face = "bold", size = 12),
+            plot.subtitle = element_text(size = 9, colour = "#555555"),
+            legend.key.size = grid::unit(0.8, "lines"))
+  }
+  ggw <- function(p, nm, w = 7, h = 5) {
+    f <- file.path(out_dir, paste0(nm, "_", prefix, ".", fmt))
+    suppressWarnings(suppressMessages(
+      ggsave(f, p, width = w, height = h, dpi = dpi)))
+    written <<- c(written, f)
+  }
+
+  if ("variance" %in% dist_kinds) {
+    v <- read_tsv(args[["variance"]])           # component, pve, sigma2, kind, is_boundary
+    v$component <- factor(v$component, levels = v$component)
+    cols <- ifelse(v$kind == "residual", SUBCOL[["residual"]],
+            ifelse(v$kind == "homoeolog", SUBCOL[["homoeolog"]],
+            ifelse(as.character(v$component) %in% names(SUBCOL),
+                   SUBCOL[as.character(v$component)], "#1F577B")))
+    lab <- sprintf("%.0f%%", 100 * v$pve)
+    lab[v$is_boundary == 1] <- paste0(lab[v$is_boundary == 1], "*")
+    sub <- if (any(v$is_boundary == 1))
+      "* = variance driven to the boundary (REML σ²→0)" else NULL
+    p <- ggplot(v, aes(component, pve, fill = component)) +
+      geom_col(width = 0.7, colour = "white", alpha = 0.92) +
+      geom_text(aes(label = lab), vjust = -0.3, size = 3) +
+      scale_fill_manual(values = stats::setNames(cols, v$component),
+                        guide = "none") +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+      labs(title = paste0("Subgenome variance decomposition — ", trait),
+           subtitle = sub, x = NULL,
+           y = "proportion of variance explained") +
+      theme_omic()
+    ggw(p, "variance_fingerprint", w = 5.5, h = 4.2)
+  }
+
+  if (any(c("interaction", "marginal", "network") %in% dist_kinds)) {
+    r <- read_tsv(args[["ranking"]])
+    names(r)[2:3] <- c("gene_x", "gene_y")
+    r$p_interaction <- as.numeric(r$p_interaction)
+    r$neglog10p <- as.numeric(r$neglog10p)
+    bonf <- 0.05 / nrow(r)
+  }
+
+  if ("interaction" %in% dist_kinds) {
+    has_pos <- "pos_x" %in% names(r) &&
+      all(is.finite(suppressWarnings(as.numeric(r$pos_x))))
+    if (has_pos) {
+      r$pos_x <- as.numeric(r$pos_x)
+      r <- r[order(as.character(r$chrom_x), r$pos_x), ]
+      xlab <- "homoeolog pair (genomic order)"
+    } else {
+      r <- r[order(r$neglog10p, decreasing = FALSE), ]
+      xlab <- "homoeolog pair (rank)"
+    }
+    r$x <- seq_len(nrow(r))
+    r$sig <- r$p_interaction < bonf
+    lab <- utils::head(r[order(r$p_interaction), ], topn)
+    lab <- lab[lab$p_interaction < 0.05, ]
+    p <- ggplot(r, aes(x, neglog10p)) +
+      geom_point(aes(colour = sig), size = 1.5, alpha = 0.8) +
+      geom_hline(yintercept = -log10(bonf), colour = "#CB3E35",
+                 linewidth = 0.5) +
+      scale_colour_manual(values = c(`FALSE` = "#9DB4C0", `TRUE` = "#CB3E35"),
+                          guide = "none") +
+      labs(title = paste0("Homoeolog-pair interaction scan — ", trait),
+           subtitle = paste0("each point = one homoeolog pair; red line = ",
+                             "Bonferroni (0.05/", nrow(r), ")"),
+           x = xlab, y = expression(-log[10](p[interaction]))) +
+      theme_omic()
+    if (nrow(lab) > 0) {
+      p <- p + geom_text(data = lab,
+                         aes(label = paste0(gene_x, "×", gene_y)),
+                         size = 2.5, vjust = -0.6, hjust = 0.5,
+                         colour = "#333333")
+    }
+    ggw(p, "interaction_manhattan", w = 9, h = 4.5)
+  }
+
+  if ("marginal" %in% dist_kinds) {
+    m <- utils::head(r[order(r$p_interaction), ], topn)
+    pn <- paste0(m$gene_x, "×", m$gene_y)
+    long <- data.frame(
+      pair = factor(rep(pn, 3), levels = rev(pn)),
+      test = rep(c("A-copy marginal", "D-copy marginal", "A×D interaction"),
+                 each = nrow(m)),
+      nlp = c(as.numeric(m$neglog10p_marginal_x),
+              as.numeric(m$neglog10p_marginal_y), m$neglog10p))
+    p <- ggplot(long, aes(nlp, pair, colour = test)) +
+      geom_line(aes(group = pair), colour = "#cccccc", linewidth = 0.6) +
+      geom_point(size = 3) +
+      geom_vline(xintercept = -log10(bonf), colour = "#CB3E35",
+                 linetype = 2, linewidth = 0.4) +
+      scale_colour_manual(values = c("A-copy marginal" = "#1F577B",
+                                     "D-copy marginal" = "#FCBC10",
+                                     "A×D interaction" = "#CB3E35")) +
+      labs(title = paste0("Interaction vs single-gene marginal — ", trait),
+           subtitle = "signal lives in the A×D product, not in either copy alone",
+           x = expression(-log[10](p)), y = NULL, colour = NULL) +
+      theme_omic()
+    ggw(p, "interaction_vs_marginal", w = 7.5, h = 0.45 * nrow(m) + 1.8)
+  }
+
+  if ("burden" %in% dist_kinds) {
+    b <- read_tsv(args[["burdens"]])
+    b <- b[b$pair_rank == 0, ]
+    b$burden_x <- as.numeric(b$burden_x)
+    b$burden_y <- as.numeric(b$burden_y)
+    b$phenotype <- as.numeric(b$phenotype)
+    qx <- stats::quantile(b$burden_x, probs = seq(0, 1, 0.25), na.rm = TRUE)
+    qy <- stats::quantile(b$burden_y, probs = seq(0, 1, 0.25), na.rm = TRUE)
+    b$bx <- cut(b$burden_x, unique(qx), include.lowest = TRUE)
+    b$by <- cut(b$burden_y, unique(qy), include.lowest = TRUE)
+    agg <- stats::aggregate(phenotype ~ bx + by, data = b, FUN = mean)
+    gx <- b$gene_x[1]; gy <- b$gene_y[1]
+    p <- ggplot(agg, aes(bx, by, fill = phenotype)) +
+      geom_tile(colour = "white") +
+      scale_fill_viridis_c() +
+      labs(title = paste0("A×D burden interaction surface — ", trait),
+           subtitle = paste0("top pair ", gx, " × ", gy,
+                             "; phenotype rises only when both burdens combine"),
+           x = paste0(gx, " burden (A-copy, quartile)"),
+           y = paste0(gy, " burden (D-copy, quartile)"),
+           fill = "mean\nphenotype") +
+      theme_omic() +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1))
+    ggw(p, "burden_surface", w = 6.5, h = 5)
+  }
+
+  if ("triad" %in% dist_kinds && !is.null(args[["triad"]])) {
+    t <- read_tsv(args[["triad"]])
+    pcols <- grep("^p_[A-Za-z0-9]{2}$", names(t), value = TRUE)
+    pcols <- setdiff(pcols, "p_acat")
+    if (length(pcols) >= 2) {
+      gcols <- names(t)[2:4]
+      t$p_acat <- as.numeric(t$p_acat)
+      tt <- utils::head(t[order(t$p_acat), ], topn)
+      tt$triad <- apply(tt[, gcols], 1, paste, collapse = "/")
+      long <- do.call(rbind, lapply(pcols, function(pc) data.frame(
+        triad = tt$triad, pair = sub("^p_", "", pc),
+        nlp = -log10(pmax(as.numeric(tt[[pc]]), 1e-300)))))
+      long$triad <- factor(long$triad, levels = rev(tt$triad))
+      p <- ggplot(long, aes(nlp, triad, fill = pair)) +
+        geom_col(position = position_dodge(width = 0.7), width = 0.65,
+                 alpha = 0.92) +
+        scale_fill_manual(values = c(AB = "#1F577B", AD = "#FCBC10",
+                                     BD = "#E07370", AC = "#368650",
+                                     CD = "#A56BA7")) +
+        labs(title = paste0("Triad pairwise interaction breakdown — ", trait),
+             subtitle = "which homoeolog pair within each triad carries the signal",
+             x = expression(-log[10](p)), y = NULL, fill = "pair") +
+        theme_omic()
+      ggw(p, "triad_breakdown", w = 7.5, h = 0.5 * nrow(tt) + 1.8)
+    }
+  }
+
+  if ("network" %in% dist_kinds) {
+    if (!have("ggraph") || !have("igraph")) {
+      message("network: ggraph/igraph not installed; skipping (the other ",
+              "distinctive figures were produced)")
+    } else {
+      suppressWarnings(suppressMessages({library(ggraph); library(igraph)}))
+      sg <- r[r$p_interaction < 0.05, ]
+      if (nrow(sg) >= 1) {
+        ed <- data.frame(from = paste0(sg$gene_x, "(", sg$sub_x, ")"),
+                         to = paste0(sg$gene_y, "(", sg$sub_y, ")"),
+                         w = sg$neglog10p)
+        g <- igraph::graph_from_data_frame(ed, directed = FALSE)
+        p <- ggraph(g, layout = "fr") +
+          geom_edge_link(aes(width = w), colour = "#CB3E35", alpha = 0.6) +
+          geom_node_point(size = 3, colour = "#1F577B") +
+          geom_node_text(aes(label = name), size = 2.4, repel = TRUE) +
+          scale_edge_width(range = c(0.3, 2), name = "-log10 p") +
+          labs(title = paste0("Significant homoeolog-interaction network — ",
+                              trait)) +
+          theme_void()
+        ggw(p, "interaction_network", w = 7, h = 6)
+      }
+    }
+  }
+}
+
 for (w in written) cat("WROTE\t", w, "\n", sep = "")
 quit(status = status_code)
