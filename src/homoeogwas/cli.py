@@ -995,6 +995,42 @@ def build_parser() -> argparse.ArgumentParser:
     loc.add_argument("--dpi", type=int, default=300, help="PNG raster dpi")
     loc.add_argument("--out-dir", default=None,
                      help="output dir (default: the results dir)")
+
+    rp = sub.add_parser("rplot", help="publication-grade R figures via CMplot "
+                                      "(genome-wide) + locuszoomr (locus)")
+    rp.add_argument("results_dir", nargs="?", default=".",
+                    help="a finished homoeogwas fit output dir")
+    rp.add_argument("--sumstats", default=None,
+                    help="explicit sumstats TSV (overrides results_dir lookup)")
+    rp.add_argument("--prefix", default=None,
+                    help="select summary_<prefix>.json (needed if several)")
+    rp.add_argument("--kind", default="manhattan,qq",
+                    help="comma subset of manhattan,circular,qq,density,locus")
+    rp.add_argument("--format", default="pdf", help="pdf or png (default pdf)")
+    rp.add_argument("--dpi", type=int, default=300, help="raster dpi")
+    rp.add_argument("--out-dir", default=None,
+                    help="output dir (default: the results dir)")
+    rp.add_argument("--lead-snp", default=None, help="locus: centre SNP id")
+    rp.add_argument("--chrom", default=None, help="locus: centre chromosome")
+    rp.add_argument("--pos", type=int, default=None, help="locus: centre bp")
+    rp.add_argument("--subgenome", default=None, help="locus: restrict subgenome")
+    rp.add_argument("--window-kb", type=int, default=500,
+                    help="locus: half-window in kb (default 500)")
+    rp.add_argument("--top-n", type=int, default=1,
+                    help="locus: number of top hits to plot (default 1)")
+    rp.add_argument("--genotype", default=None,
+                    help="locus: PLINK bed prefix for r^2 (else auto-resolved)")
+    rp.add_argument("--gff", default=None,
+                    help="locus: gene annotation for locuszoomr gene track "
+                         "(Ensembl-conformant; for crop GFFs prefer "
+                         "`homoeogwas locus`)")
+    rp.add_argument("--organism", default="species",
+                    help="locus: organism name for the built EnsDb")
+    rp.add_argument("--genome-version", default="v1",
+                    help="locus: genome version for the built EnsDb")
+    rp.add_argument("--rscript", default=None, help="path to Rscript")
+    rp.add_argument("--check-deps", action="store_true",
+                    help="report R package availability and exit")
     return ap
 
 
@@ -1071,6 +1107,153 @@ def cmd_locus(args) -> int:
     return 0
 
 
+def _find_rscript(explicit: str | None = None) -> str | None:
+    """Locate an Rscript binary (explicit > $R_SCRIPT > PATH > common paths)."""
+    import os
+    import shutil
+    for c in (explicit, os.environ.get("R_SCRIPT"), "Rscript",
+              "/usr/local/bin/Rscript", "/usr/bin/Rscript"):
+        if not c:
+            continue
+        found = shutil.which(c)          # resolves bare names + executable paths
+        if found:
+            return found
+        p = Path(c)                      # explicit path that which() didn't take
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def _r_script_asset() -> str:
+    """Path to the shipped R plotting script (works installed or in-tree)."""
+    try:
+        from importlib import resources
+        p = resources.files("homoeogwas").joinpath("r/gwas_plots.R")
+        if Path(str(p)).exists():
+            return str(p)
+    except Exception:
+        pass
+    return str(Path(__file__).parent / "r" / "gwas_plots.R")
+
+
+def cmd_rplot(args) -> int:
+    """Publication-grade R figures via CMplot (genome-wide) + locuszoomr (locus).
+
+    CMplot genome-wide plots are robust on any sumstats. The locuszoomr locus
+    path needs an Ensembl-conformant gene annotation for its gene track; for
+    non-Ensembl crop GFFs prefer the native ``homoeogwas locus`` (which draws a
+    gene track from any GFF). R / CMplot / locuszoomr are optional.
+    """
+    import subprocess
+
+    rscript = _find_rscript(getattr(args, "rscript", None))
+    if rscript is None:
+        print("[rplot] Rscript not found — install R or pass --rscript "
+              "/path/to/Rscript")
+        return 1
+    script = _r_script_asset()
+    if getattr(args, "check_deps", False):
+        return subprocess.run([rscript, script, "--check-deps"]).returncode
+
+    from .plots import (
+        _compute_ld_to_lead,
+        _discover_summary,
+        _resolve_sumstats,
+        _stream_find_snp,
+        _stream_pick_leads,
+        _stream_window,
+    )
+
+    kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
+    rdir = Path(args.results_dir)
+    out_dir = Path(args.out_dir) if args.out_dir else rdir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # resolve sumstats + prefix/trait (from a run dir or an explicit --sumstats)
+    prefix, sumstats = "homoeogwas", []
+    if args.sumstats:
+        sumstats = [args.sumstats]
+        prefix = Path(args.sumstats).stem
+    else:
+        summary_path = _discover_summary(rdir, args.prefix)
+        import json
+        summary = json.loads(summary_path.read_text())
+        prefix = summary_path.stem[len("summary_"):]
+        sumstats = _resolve_sumstats(
+            rdir, summary.get("outputs", {}).get("sumstats", []))
+    if not sumstats:
+        print(f"[rplot] no sumstats found under {rdir}")
+        return 1
+
+    rc = 0
+    gw = [k for k in kinds if k in ("manhattan", "circular", "qq", "density")]
+    if gw:
+        ss0 = sumstats[0]
+        if len(sumstats) > 1:        # CMplot wants one table: concat subgenomes
+            ss0 = str(out_dir / f"_rplot_sumstats_{prefix}.tsv")
+            pd.concat([pd.read_csv(s, sep="\t") for s in sumstats],
+                      ignore_index=True).to_csv(ss0, sep="\t", index=False)
+        cmd = [rscript, script, "--sumstats", ss0, "--kind", ",".join(gw),
+               "--out-dir", str(out_dir), "--prefix", prefix,
+               "--format", args.format, "--dpi", str(args.dpi)]
+        rc |= subprocess.run(cmd).returncode
+
+    if "locus" in kinds:
+        half = int(args.window_kb) * 1000
+        if args.lead_snp and (args.chrom is None or args.pos is None):
+            lead = _stream_find_snp(sumstats, args.lead_snp)
+            if lead is None:
+                print(f"[rplot] lead_snp {args.lead_snp!r} not in sumstats")
+                return 1
+            leads = [lead]
+        elif args.chrom is not None and args.pos is not None:
+            leads = [{"lead_snp": args.lead_snp, "chrom": str(args.chrom),
+                      "pos": int(args.pos), "subgenome": args.subgenome}]
+        else:
+            leads = _stream_pick_leads(sumstats, args.top_n,
+                                       subgenome=args.subgenome)
+        gtmpl = (None if args.genotype
+                 else _resolve_genotype_template(rdir, args.prefix))
+        for lead in leads:
+            c, p_ = str(lead["chrom"]), int(lead["pos"])
+            sg = lead.get("subgenome", args.subgenome)
+            win = _stream_window(sumstats, c, p_, half, subgenome=sg)
+            if len(win) == 0:
+                continue
+            lead_snp = lead.get("lead_snp") or str(
+                win.loc[win["p"].astype(float).idxmin(), "snp_id"])
+            gp = args.genotype
+            if gp is None and gtmpl and sg:
+                cand = gtmpl.format(subgenome=sg)
+                if Path(cand).with_suffix(".bed").exists():
+                    gp = cand
+            r2 = {}
+            if gp:
+                try:
+                    r2 = _compute_ld_to_lead(gp, win["snp_id"].tolist(),
+                                             lead_snp)
+                except Exception as exc:
+                    print(f"[rplot] LD skipped ({exc})")
+            win = win.assign(r2_to_lead=[r2.get(str(s), float("nan"))
+                                         for s in win["snp_id"]])
+            ltsv = out_dir / f"_locus_{prefix}_{c}_{p_}.tsv"
+            win[["snp_id", "chrom", "pos", "p", "r2_to_lead"]].to_csv(
+                ltsv, sep="\t", index=False)
+            cmd = [rscript, script, "--kind", "locus", "--locus-tsv",
+                   str(ltsv), "--lead-chrom", c, "--lead-pos", str(p_),
+                   "--window-kb", str(args.window_kb), "--out-dir",
+                   str(out_dir), "--prefix", prefix, "--format", args.format,
+                   "--dpi", str(args.dpi)]
+            if args.gff:
+                cmd += ["--gff", args.gff, "--organism", args.organism,
+                        "--genome-version", args.genome_version,
+                        "--ensdb-cache", str(out_dir / "_ensdb_cache")]
+            rc |= subprocess.run(cmd).returncode
+
+    print(f"[rplot] done (exit {rc}); figures in {out_dir}")
+    return rc
+
+
 def cmd_validate(args) -> int:
     """Load + validate a config and run path preflight; report, don't compute."""
     cfg = load_config(args.config)
@@ -1129,6 +1312,8 @@ def main(argv=None) -> int:
         return cmd_plot(args)
     if args.subcommand == "locus":
         return cmd_locus(args)
+    if args.subcommand == "rplot":
+        return cmd_rplot(args)
     if args.subcommand == "prep-snps":
         from .prep import cmd_prep_snps
         return cmd_prep_snps(args)

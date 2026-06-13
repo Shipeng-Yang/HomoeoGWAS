@@ -90,6 +90,9 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["homoeogwas*"]
 
+[tool.setuptools.package-data]
+homoeogwas = ["r/*.R"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
