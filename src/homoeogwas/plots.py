@@ -691,16 +691,61 @@ def _parse_genes(genes) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
-def _draw_gene_track(ax, genes_df: pd.DataFrame, x0_mb: float,
-                     x1_mb: float) -> None:
-    """Draw genes as packed strand-aware boxes (x in Mb) on ``ax``."""
+def _draw_gene_track(ax, genes_df: pd.DataFrame, x0_mb: float, x1_mb: float,
+                     *, lead_mb: float | None = None,
+                     max_labels: int = 10) -> None:
+    """Draw genes as packed strand-aware boxes (x in Mb) on ``ax``.
+
+    Every gene in the window gets a box (with a minimum visible width); to keep
+    the track readable in gene-dense regions only the ``max_labels`` genes
+    nearest the lead get a name label, and labels are spaced out greedily so
+    they do not collide into an unreadable wall of text.
+    """
     from matplotlib.patches import Rectangle
 
+    span = max(x1_mb - x0_mb, 1e-9)
+    min_w = span * 0.004
+    pad = span * 0.02 + 1e-9
+    center = lead_mb if lead_mb is not None else (x0_mb + x1_mb) / 2.0
+
+    # sanitise: finite coords, start<=end, fresh 0..n-1 index (so the label
+    # set cannot over-count on duplicate input indices)
+    g = genes_df.copy().reset_index(drop=True)
+    g["start"] = pd.to_numeric(g["start"], errors="coerce")
+    g["end"] = pd.to_numeric(g["end"], errors="coerce")
+    g = g[np.isfinite(g["start"]) & np.isfinite(g["end"])].copy()
+    if len(g) == 0:
+        ax.set_yticks([])
+        ax.set_ylabel("genes")
+        ax.set_xlim(x0_mb, x1_mb)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        return
+    lo = np.minimum(g["start"], g["end"])
+    hi = np.maximum(g["start"], g["end"])
+    g["start"], g["end"] = lo, hi
+    g = g.reset_index(drop=True)
+    g["_mid"] = (g["start"] + g["end"]) / 2e6
+
+    # choose labels: nearest the lead first, spaced >= 7% of the window apart
+    to_label: set = set()
+    placed: list[float] = []
+    min_gap = span * 0.07
+    for idx, gr in g.assign(_d=(g["_mid"] - center).abs()) \
+            .sort_values("_d").iterrows():
+        if len(to_label) >= max_labels:
+            break
+        mid = float(gr["_mid"])
+        if any(abs(mid - lx) < min_gap for lx in placed):
+            continue
+        placed.append(mid)
+        to_label.add(idx)
+
     rows_end: list[float] = []          # right edge (Mb) of last gene per row
-    for _, gr in genes_df.sort_values("start").iterrows():
+    for idx, gr in g.sort_values("start").iterrows():
         s = float(gr["start"]) / 1e6
-        e = float(gr["end"]) / 1e6
-        pad = (x1_mb - x0_mb) * 0.02 + 1e-9
+        w = max(float(gr["end"]) / 1e6 - s, min_w)
+        e = s + w
         row = next((r for r, re_ in enumerate(rows_end) if s > re_ + pad),
                    len(rows_end))
         if row == len(rows_end):
@@ -708,16 +753,18 @@ def _draw_gene_track(ax, genes_df: pd.DataFrame, x0_mb: float,
         else:
             rows_end[row] = e
         y = -row
-        ax.add_patch(Rectangle((s, y - 0.18), max(e - s, 1e-6), 0.36,
-                               facecolor=_GENE_FILL, edgecolor=_GENE_EDGE,
-                               linewidth=0.5, zorder=3))
+        ax.add_patch(Rectangle((s, y - 0.18), w, 0.36, facecolor=_GENE_FILL,
+                               edgecolor=_GENE_EDGE, linewidth=0.5, zorder=3))
         strand = str(gr["strand"])
         amark = ">" if strand == "+" else "<"
         ax.plot([e if strand == "+" else s], [y], marker=amark, ms=4,
                 color=_GENE_EDGE, zorder=4)
-        ax.text((s + e) / 2.0, y + 0.30, str(gr["gene"]), ha="center",
-                va="bottom", fontsize=6.0, style="italic")
-    ax.set_ylim(-(max(len(rows_end), 1)) + 0.4, 0.6)
+        if idx in to_label:
+            ax.text((s + e) / 2.0, y + 0.28, str(gr["gene"]), ha="center",
+                    va="bottom", fontsize=5.5, style="italic")
+    nrows = max(len(rows_end), 1)
+    ax.set_ylim(-nrows + 0.4, 0.75)
+    ax.set_xlim(x0_mb, x1_mb)
     ax.set_yticks([])
     ax.set_ylabel("genes")
     for side in ("top", "right", "left"):
@@ -815,11 +862,15 @@ def plot_locus(df: pd.DataFrame,
 
     genes_df = _parse_genes(genes)
     if len(genes_df):
-        genes_df = genes_df[(genes_df["chrom"].astype(str) == c_chrom)
-                            & (genes_df["end"].astype(np.int64)
-                               >= c_pos - half)
-                            & (genes_df["start"].astype(np.int64)
-                               <= c_pos + half)]
+        def _norm(c: object) -> str:
+            return str(c).strip().casefold().removeprefix("chr")
+        # coerce coords (NaN-safe: bad rows compare False and drop out here;
+        # _draw_gene_track sanitises again and swaps any start>end)
+        gstart = pd.to_numeric(genes_df["start"], errors="coerce")
+        gend = pd.to_numeric(genes_df["end"], errors="coerce")
+        genes_df = genes_df[(genes_df["chrom"].map(_norm) == _norm(c_chrom))
+                            & (gend >= c_pos - half)
+                            & (gstart <= c_pos + half)]
     draw_genes = len(genes_df) > 0
 
     x = win["pos"].to_numpy(dtype=np.float64) / 1e6
@@ -836,8 +887,8 @@ def plot_locus(df: pd.DataFrame,
     with plt.rc_context(_PUB_RC):
         if draw_genes:
             fig, (ax, axg) = plt.subplots(
-                2, 1, figsize=(9.0, 6.2), sharex=True,
-                gridspec_kw={"height_ratios": [3.2, 1.0], "hspace": 0.12})
+                2, 1, figsize=(9.0, 6.4), sharex=True,
+                gridspec_kw={"height_ratios": [3.0, 1.3], "hspace": 0.12})
         else:
             fig, ax = plt.subplots(figsize=(9.0, 4.4))
             axg = None
@@ -878,7 +929,10 @@ def plot_locus(df: pd.DataFrame,
         _offset_spines(ax)
 
         if draw_genes:
-            _draw_gene_track(axg, genes_df, float(x.min()), float(x.max()))
+            lead_mb = (float(x[lead_mask][0]) if lead_mask.any()
+                       else c_pos / 1e6)
+            _draw_gene_track(axg, genes_df, (c_pos - half) / 1e6,
+                             (c_pos + half) / 1e6, lead_mb=lead_mb)
             axg.set_xlabel(f"{c_chrom} position (Mb)")
             axg.xaxis.set_major_formatter(
                 mpl.ticker.FuncFormatter(lambda v, _: f"{v:.2f}"))

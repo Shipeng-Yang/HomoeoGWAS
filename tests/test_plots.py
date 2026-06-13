@@ -223,6 +223,31 @@ def test_plot_locus_with_gene_table(tmp_path):
     assert paths
 
 
+def test_plot_locus_genes_sanitized(tmp_path):
+    # NaN / inverted / duplicate-index gene rows must not crash the track
+    df, lead = _toy_locus()
+    genes = pd.DataFrame({
+        "gene": ["ok", "nan_row", "inverted"],
+        "chrom": ["A05", "A05", "A05"],
+        "start": [10_450_000, np.nan, 10_620_000],   # NaN + start>end
+        "end": [10_480_000, 10_500_000, 10_560_000],
+        "strand": ["+", "+", "-"]}, index=[0, 0, 1])    # duplicate index
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="san", genes=genes,
+                             window_kb=300, formats=("png",))
+    assert paths
+
+
+def test_plot_locus_gene_chrom_normalised(tmp_path):
+    # gene chrom "chrA05" must match sumstats chrom "A05" (and vice versa)
+    df, lead = _toy_locus()
+    genes = pd.DataFrame({"gene": ["G"], "chrom": ["chrA05"],
+                          "start": [10_450_000], "end": [10_480_000],
+                          "strand": ["+"]})
+    paths = plots.plot_locus(df, out_dir=tmp_path, prefix="norm", genes=genes,
+                             window_kb=300, formats=("png",))
+    assert paths
+
+
 def test_plot_locus_empty_window_raises(tmp_path):
     df, _ = _toy_locus()
     with pytest.raises(ValueError):
