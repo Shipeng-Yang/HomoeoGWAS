@@ -1225,15 +1225,23 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
             print("[rplot] variance: no fit summary with REML components here "
                   "— skipping (point rplot at a `fit` output dir)")
 
-    rk = [k for k in dist if k in ("interaction", "marginal", "network")]
+    rk = [k for k in dist if k in ("interaction", "marginal")]
     if rk:
         if ranking:
             rc |= subprocess.run(
                 base + ["--kind", ",".join(rk), "--ranking", ranking,
                         "--prefix", itrait, "--trait", itrait]).returncode
         else:
-            print("[rplot] interaction/marginal/network: no ranking TSV — run "
+            print("[rplot] interaction/marginal: no ranking TSV — run "
                   "`interact` with outputs.full_ranking: true; skipping")
+    if "network" in dist:                     # triad-triangle network = triad data only
+        if triad:
+            rc |= subprocess.run(
+                base + ["--kind", "network", "--triad", triad,
+                        "--prefix", itrait, "--trait", itrait]).returncode
+        else:
+            print("[rplot] network: triad-triangle network needs a triad ranking "
+                  "(hexaploid run with outputs.full_ranking: true); skipping")
     if "burden" in dist:
         if burdens:
             burden_cmd = base + ["--kind", "burden", "--burdens", burdens,

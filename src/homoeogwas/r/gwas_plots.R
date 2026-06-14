@@ -264,7 +264,7 @@ if (length(dist_kinds) > 0) {
     }
   }
 
-  if (any(c("interaction", "marginal", "network") %in% dist_kinds)) {
+  if (any(c("interaction", "marginal") %in% dist_kinds)) {
     r <- read_tsv(args[["ranking"]])
     names(r)[2:3] <- c("gene_x", "gene_y")
     r$p_interaction <- as.numeric(r$p_interaction)
@@ -492,26 +492,54 @@ if (length(dist_kinds) > 0) {
   }
 
   if ("network" %in% dist_kinds) {
-    if (!have("ggraph") || !have("igraph")) {
-      message("network: ggraph/igraph not installed; skipping (the other ",
-              "distinctive figures were produced)")
+    # Homoeolog interactions are pairwise/triad-local, so a "network" only forms
+    # for 3-subgenome triads: each triad is a TRIANGLE of its three homoeologs
+    # with edges weighted by the pairwise interaction -log10 p (the signal-carrying
+    # pair shows as a thick red edge). Pairwise (tetraploid) runs give isolated
+    # dyads — no network — so this figure is produced only for triad runs.
+    if (is.null(args[["triad"]])) {
+      message("network: triad-triangle network needs a triad ranking (hexaploid ",
+              "3-subgenome run); skipping")
     } else {
-      suppressWarnings(suppressMessages({library(ggraph); library(igraph)}))
-      sg <- r[r$p_interaction < 0.05, ]
-      if (nrow(sg) >= 1) {
-        ed <- data.frame(from = paste0(sg$gene_x, "(", sg$sub_x, ")"),
-                         to = paste0(sg$gene_y, "(", sg$sub_y, ")"),
-                         w = sg$neglog10p)
-        g <- igraph::graph_from_data_frame(ed, directed = FALSE)
-        p <- ggraph(g, layout = "fr") +
-          geom_edge_link(aes(width = w), colour = "#CB3E35", alpha = 0.6) +
-          geom_node_point(size = 3, colour = "#1F577B") +
-          geom_node_text(aes(label = name), size = 2.4, repel = TRUE) +
-          scale_edge_width(range = c(0.3, 2), name = "-log10 p") +
-          labs(title = paste0("Significant homoeolog-interaction network — ",
-                              trait)) +
-          theme_void()
-        ggw(p, "interaction_network", w = 7, h = 6)
+      fmt_e <- function(x) formatC(as.numeric(x), format = "e", digits = 1)
+      tn <- read_tsv(args[["triad"]])
+      pcols <- setdiff(grep("^p_[A-Za-z0-9]{2}$", names(tn), value = TRUE), "p_acat")
+      gcols <- names(tn)[2:4]
+      subs <- sub("^gene_", "", gcols)
+      if (length(pcols) >= 2 && length(subs) == 3) {
+        tn$p_acat <- as.numeric(tn$p_acat)
+        tt <- utils::head(tn[order(tn$p_acat), ], min(topn, nrow(tn)))
+        tt$facet <- factor(seq_len(nrow(tt)),
+          labels = paste0("triad ", seq_len(nrow(tt)), " · p=", fmt_e(tt$p_acat)))
+        vx <- c(0.5, 0.04, 0.96); vy <- c(0.92, 0.08, 0.08)   # A top, B bl, D br
+        names(vx) <- subs; names(vy) <- subs
+        nodes <- do.call(rbind, lapply(seq_len(nrow(tt)), function(i)
+          data.frame(facet = tt$facet[i], sub = subs, x = vx[subs], y = vy[subs])))
+        edges <- do.call(rbind, lapply(seq_len(nrow(tt)), function(i)
+          do.call(rbind, lapply(pcols, function(pc) {
+            tg <- sub("^p_", "", pc); s1 <- substr(tg, 1, 1); s2 <- substr(tg, 2, 2)
+            data.frame(facet = tt$facet[i], tag = tg,
+                       x = vx[s1], y = vy[s1], xend = vx[s2], yend = vy[s2],
+                       nlp = -log10(pmax(as.numeric(tt[[pc]][i]), 1e-300)))
+          }))))
+        p <- ggplot() +
+          geom_segment(data = edges, aes(x, y, xend = xend, yend = yend,
+                       linewidth = nlp, colour = nlp)) +
+          geom_point(data = nodes, aes(x, y), size = 7, colour = "#3A3A3A") +
+          geom_text(data = nodes, aes(x, y, label = sub), colour = "white",
+                    size = 3.2, fontface = "bold") +
+          scale_colour_gradient(low = "#C7C0B8", high = "#CB3E35",
+                                name = expression(-log[10](p))) +
+          scale_linewidth(range = c(0.4, 3.2), guide = "none") +
+          facet_wrap(~facet, ncol = 3) +
+          coord_fixed(xlim = c(-0.05, 1.05), ylim = c(-0.02, 1.0), clip = "off") +
+          labs(caption = paste0("each triangle = one homoeolog triad; edge = ",
+               "pairwise interaction (thick red = signal-carrying pair)")) +
+          theme_void() +
+          theme(strip.text = element_text(size = 8, face = "bold"),
+                legend.position = "right",
+                plot.caption = element_text(colour = "#555555", size = 9))
+        ggw(p, "interaction_network", w = 8, h = 0.8 + 2.4 * ceiling(nrow(tt) / 3))
       }
     }
   }
