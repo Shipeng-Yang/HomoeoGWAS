@@ -237,7 +237,16 @@ if (length(dist_kinds) > 0) {
     cols <- setNames(ifelse(as.character(v$component) %in% names(EARTH),
                             EARTH[as.character(v$component)], "#8C6D31"),
                      as.character(v$component))
-    v$tlab <- sprintf("%s\n%.0f%%\nσ²=%.1f", v$component, 100 * v$pve, v$sigma2)
+    # σ² label: keep 1 decimal for values >= 1 (e.g. 279.9), but for small-scale
+    # traits (e.g. seed length, σ²~0.005) show 2 significant figures so the label
+    # never collapses to a misleading "0.0".
+    fmt_sigma2 <- function(x) vapply(x, function(v) {
+      if (!is.finite(v)) return("NA")
+      if (abs(v) >= 1 || v == 0) return(sprintf("%.1f", v))
+      d <- 1L - as.integer(floor(log10(abs(v))))   # 2 significant figures
+      formatC(v, format = "f", digits = d)
+    }, character(1))
+    v$tlab <- sprintf("%s\n%.0f%%\nσ²=%s", v$component, 100 * v$pve, fmt_sigma2(v$sigma2))
     p <- ggplot(v, aes(area = sigma2, fill = component, label = tlab)) +
       treemapify::geom_treemap(colour = "white", size = 4, start = "topleft") +
       treemapify::geom_treemap_text(colour = "white", place = "centre",
