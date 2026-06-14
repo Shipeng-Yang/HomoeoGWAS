@@ -270,50 +270,106 @@ if (length(dist_kinds) > 0) {
     r$p_interaction <- as.numeric(r$p_interaction)
     r$neglog10p <- as.numeric(r$neglog10p)
     bonf <- 0.05 / nrow(r)
+    # subgenome-pair label derived from the data (A×D cotton, A×B peanut, …)
+    sx <- as.character(stats::na.omit(r$sub_x)[1])
+    sy <- as.character(stats::na.omit(r$sub_y)[1])
+    pair_lab <- paste0(sx, "×", sy)
+    fmt_p <- function(x) formatC(as.numeric(x), format = "e", digits = 1)
   }
 
   if ("interaction" %in% dist_kinds) {
-    has_pos <- "pos_x" %in% names(r) &&
+    has_pos <- "pos_x" %in% names(r) && "chrom_x" %in% names(r) &&
+      !any(is.na(r$chrom_x) | trimws(as.character(r$chrom_x)) == "") &&
       all(is.finite(suppressWarnings(as.numeric(r$pos_x))))
     if (has_pos) {
       r$pos_x <- as.numeric(r$pos_x)
-      r <- r[order(as.character(r$chrom_x), r$pos_x), ]
-      xlab <- "homoeolog pair (genomic order)"
+      # natural-sort anchor chromosomes: split subgenome prefix + number so
+      # peanut "10" sorts after "2" (not after "1"), and cotton keeps A.. then D..
+      chr_chr <- as.character(r$chrom_x)
+      chr_num <- suppressWarnings(as.numeric(gsub("[^0-9]", "", chr_chr)))
+      chr_pre <- gsub("[0-9]", "", chr_chr)
+      ord_lvls <- unique(chr_chr[order(chr_pre, chr_num, chr_chr)])
+      r$chrom_f <- factor(chr_chr, levels = ord_lvls)
+      r <- r[order(r$chrom_f, r$pos_x), ]
+      # cumulative genomic position with per-chromosome offset
+      chr_max <- tapply(r$pos_x, r$chrom_f, max)
+      chr_max[is.na(chr_max)] <- 0
+      offset <- c(0, utils::head(cumsum(as.numeric(chr_max)), -1))
+      names(offset) <- levels(r$chrom_f)
+      r$x <- r$pos_x + offset[as.character(r$chrom_f)]
+      ticks <- tapply(r$x, r$chrom_f, function(z) (min(z) + max(z)) / 2)
+      tick_df <- data.frame(pos = as.numeric(ticks), lab = names(ticks))
+      tick_df <- tick_df[is.finite(tick_df$pos), ]
+      shade_idx <- as.integer(r$chrom_f) %% 2L     # alternating chromosome shade
+      xlab <- paste0("genomic position (", sx, " subgenome anchor)")
+      use_chrom_axis <- TRUE
     } else {
       r <- r[order(r$neglog10p, decreasing = FALSE), ]
-      xlab <- "homoeolog pair (rank)"
+      r$x <- seq_len(nrow(r))
+      shade_idx <- rep(0L, nrow(r))
+      tick_df <- NULL; use_chrom_axis <- FALSE
+      xlab <- paste0(pair_lab, " homoeolog pair (rank)")
     }
-    r$x <- seq_len(nrow(r))
-    r$sig <- r$p_interaction < bonf
-    lab <- utils::head(r[order(r$p_interaction), ], topn)
-    lab <- lab[lab$p_interaction < 0.05, ]
+    # significance: prefer the engine's bonferroni_sig flag, else recompute
+    if ("bonferroni_sig" %in% names(r)) {
+      # robust to numeric ("1"/"0") and logical ("TRUE"/"T"/"YES") spellings
+      bs <- toupper(trimws(as.character(r$bonferroni_sig)))
+      r$sig <- bs %in% c("1", "TRUE", "T", "YES")
+    } else {
+      r$sig <- r$p_interaction < bonf
+    }
+    # colour: alternating chromosome shade for non-sig, red highlight for sig
+    r$col <- ifelse(r$sig, "sig", ifelse(shade_idx == 0L, "shadeA", "shadeB"))
+    pal <- c(shadeA = "#9DB4C0", shadeB = "#5E7A8A", sig = "#CB3E35")
+    # labels: sig pairs (cap topn); if none significant, label the single best
+    # pair WITH its p so an honest-null plot still shows "best was p=…"
+    sig_rows <- r[r$sig, , drop = FALSE]
+    lab <- if (nrow(sig_rows) > 0) {
+      utils::head(sig_rows[order(sig_rows$p_interaction), ], topn)
+    } else {
+      utils::head(r[order(r$p_interaction), ], 1)
+    }
+    lab$txt <- paste0(lab$gene_x, "×", lab$gene_y, "  p=", fmt_p(lab$p_interaction))
     p <- ggplot(r, aes(x, neglog10p)) +
-      geom_point(aes(colour = sig), size = 1.5, alpha = 0.8) +
+      geom_point(aes(colour = col), size = 1.6, alpha = 0.85) +
       geom_hline(yintercept = -log10(bonf), colour = "#CB3E35",
-                 linewidth = 0.5) +
-      scale_colour_manual(values = c(`FALSE` = "#9DB4C0", `TRUE` = "#CB3E35"),
-                          guide = "none") +
-      labs(title = paste0("Homoeolog-pair interaction scan — ", trait),
-           subtitle = paste0("each point = one homoeolog pair; red line = ",
-                             "Bonferroni (0.05/", nrow(r), ")"),
-           x = xlab, y = expression(-log[10](p[interaction]))) +
+                 linetype = 2, linewidth = 0.5) +
+      scale_colour_manual(values = pal, guide = "none") +
+      labs(x = xlab, y = expression(-log[10](p[interaction])),
+           caption = paste0(pair_lab, " interaction scan · Bonferroni p=", fmt_p(bonf))) +
       theme_omic()
+    if (use_chrom_axis && nrow(tick_df) > 0) {
+      p <- p + scale_x_continuous(breaks = tick_df$pos, labels = tick_df$lab,
+                                  expand = ggplot2::expansion(mult = 0.02))
+      if (nrow(tick_df) > 12)
+        p <- p + theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 7))
+    }
     if (nrow(lab) > 0) {
-      p <- p + geom_text(data = lab,
-                         aes(label = paste0(gene_x, "×", gene_y)),
-                         size = 2.5, vjust = -0.6, hjust = 0.5,
-                         colour = "#333333")
+      if (requireNamespace("ggrepel", quietly = TRUE)) {
+        p <- p + ggrepel::geom_text_repel(data = lab, aes(label = txt),
+                   size = 2.6, colour = "#333333", min.segment.length = 0,
+                   box.padding = 0.5, seed = 2026, max.overlaps = Inf)
+      } else {
+        p <- p + geom_text(data = lab, aes(label = txt), size = 2.6,
+                   vjust = -0.7, colour = "#333333", check_overlap = TRUE)
+      }
     }
     ggw(p, "interaction_manhattan", w = 9, h = 4.5)
   }
 
   if ("marginal" %in% dist_kinds) {
     m <- utils::head(r[order(r$p_interaction), ], topn)
+    # subgenome labels are derived from the data (sub_x/sub_y) so the legend reads
+    # "A×D" for cotton, "A×B" for peanut, etc. — never hard-coded.
+    sx <- as.character(m$sub_x[1]); sy <- as.character(m$sub_y[1])
+    lab_a <- paste0(sx, "-copy marginal")
+    lab_d <- paste0(sy, "-copy marginal")
+    lab_i <- paste0(sx, "×", sy, " interaction")
     pn <- paste0(m$gene_x, "×", m$gene_y)
     long <- data.frame(
       pair = factor(rep(pn, 3), levels = rev(pn)),
-      test = rep(c("A-copy marginal", "D-copy marginal", "A×D interaction"),
-                 each = nrow(m)),
+      test = factor(rep(c(lab_a, lab_d, lab_i), each = nrow(m)),
+                    levels = c(lab_a, lab_d, lab_i)),
       nlp = c(as.numeric(m$neglog10p_marginal_x),
               as.numeric(m$neglog10p_marginal_y), m$neglog10p))
     p <- ggplot(long, aes(nlp, pair, colour = test)) +
@@ -321,40 +377,46 @@ if (length(dist_kinds) > 0) {
       geom_point(size = 3) +
       geom_vline(xintercept = -log10(bonf), colour = "#CB3E35",
                  linetype = 2, linewidth = 0.4) +
-      scale_colour_manual(values = c("A-copy marginal" = "#1F577B",
-                                     "D-copy marginal" = "#FCBC10",
-                                     "A×D interaction" = "#CB3E35")) +
-      labs(title = paste0("Interaction vs single-gene marginal — ", trait),
-           subtitle = "signal lives in the A×D product, not in either copy alone",
-           x = expression(-log[10](p)), y = NULL, colour = NULL) +
+      scale_colour_manual(values = setNames(c("#1F577B", "#FCBC10", "#CB3E35"),
+                                            c(lab_a, lab_d, lab_i))) +
+      labs(x = expression(-log[10](p)), y = NULL, colour = NULL) +
       theme_omic()
     ggw(p, "interaction_vs_marginal", w = 7.5, h = 0.45 * nrow(m) + 1.8)
   }
 
   if ("burden" %in% dist_kinds) {
-    b <- read_tsv(args[["burdens"]])
-    b <- b[b$pair_rank == 0, ]
-    b$burden_x <- as.numeric(b$burden_x)
-    b$burden_y <- as.numeric(b$burden_y)
-    b$phenotype <- as.numeric(b$phenotype)
-    qx <- stats::quantile(b$burden_x, probs = seq(0, 1, 0.25), na.rm = TRUE)
-    qy <- stats::quantile(b$burden_y, probs = seq(0, 1, 0.25), na.rm = TRUE)
-    b$bx <- cut(b$burden_x, unique(qx), include.lowest = TRUE)
-    b$by <- cut(b$burden_y, unique(qy), include.lowest = TRUE)
-    agg <- stats::aggregate(phenotype ~ bx + by, data = b, FUN = mean)
-    gx <- b$gene_x[1]; gy <- b$gene_y[1]
-    p <- ggplot(agg, aes(bx, by, fill = phenotype)) +
-      geom_tile(colour = "white") +
-      scale_fill_viridis_c() +
-      labs(title = paste0("A×D burden interaction surface — ", trait),
-           subtitle = paste0("top pair ", gx, " × ", gy,
-                             "; phenotype rises only when both burdens combine"),
-           x = paste0(gx, " burden (A-copy, quartile)"),
-           y = paste0(gy, " burden (D-copy, quartile)"),
-           fill = "mean\nphenotype") +
-      theme_omic() +
-      theme(axis.text.x = element_text(angle = 30, hjust = 1))
-    ggw(p, "burden_surface", w = 6.5, h = 5)
+    if (!requireNamespace("grafify", quietly = TRUE)) {
+      message("burden: grafify not installed — skipping burden_violin/burden_bar ",
+              "(install.packages('grafify'))")
+    } else {
+      b <- read_tsv(args[["burdens"]])
+      b <- b[b$pair_rank == 0, ]                 # top pair only
+      b$bxv <- as.numeric(b$burden_x)
+      b$byv <- as.numeric(b$burden_y)
+      b$phenotype <- as.numeric(b$phenotype)
+      b <- b[is.finite(b$bxv) & is.finite(b$byv) & is.finite(b$phenotype), ]
+      sx <- as.character(b$sub_x[1]); sy <- as.character(b$sub_y[1])
+      # median-split each homoeolog copy's burden into low / high carrier groups.
+      # The subgenome id lives in the factor LEVELS (so the columns stay grpA/grpD
+      # and grafify's tidy-eval column args work for any species: A/B, A/D, …).
+      b$grpA <- factor(ifelse(b$bxv > stats::median(b$bxv),
+                              paste0(sx, " high"), paste0(sx, " low")),
+                       levels = c(paste0(sx, " low"), paste0(sx, " high")))
+      b$grpD <- factor(ifelse(b$byv > stats::median(b$byv),
+                              paste0(sy, " high"), paste0(sy, " low")),
+                       levels = c(paste0(sy, " low"), paste0(sy, " high")))
+      flab <- paste0(sy, "-copy burden")
+      # B — two-factor violin + box + all sample points (grafify house style)
+      pv <- grafify::plot_4d_scatterviolin(data = b, xcol = grpA, ycol = phenotype,
+                                           boxes = grpD, s_alpha = 0.5) +
+        ggplot2::labs(x = NULL, y = "phenotype", fill = flab)
+      ggw(pv, "burden_violin", w = 6.5, h = 5)
+      # C — two-factor mean +/- SEM bar with all sample points (grafify)
+      pb <- grafify::plot_4d_scatterbar(data = b, xcol = grpA, ycol = phenotype,
+                                        bars = grpD, ErrorType = "SEM", s_alpha = 0.4) +
+        ggplot2::labs(x = NULL, y = "mean phenotype", fill = flab)
+      ggw(pb, "burden_bar", w = 6.5, h = 5)
+    }
   }
 
   if ("triad" %in% dist_kinds && !is.null(args[["triad"]])) {
