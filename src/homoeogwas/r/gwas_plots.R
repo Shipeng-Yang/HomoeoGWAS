@@ -385,20 +385,68 @@ if (length(dist_kinds) > 0) {
   }
 
   if ("burden" %in% dist_kinds) {
+    b <- read_tsv(args[["burdens"]])
+    b <- b[b$pair_rank == 0, ]                   # top pair only
+    b$bxv <- as.numeric(b$burden_x)
+    b$byv <- as.numeric(b$burden_y)
+    b$phenotype <- as.numeric(b$phenotype)
+    b <- b[is.finite(b$bxv) & is.finite(b$byv) & is.finite(b$phenotype), ]
+    sx <- as.character(b$sub_x[1]); sy <- as.character(b$sub_y[1])
+    gx <- as.character(b$gene_x[1]); gy <- as.character(b$gene_y[1])
+
+    # --- PRIMARY: fitted A×D interaction lines (ggplot2 only; always rendered) ---
+    # The effect-based view: predicted phenotype vs the sx-copy burden at low/high
+    # sy-copy burden. Diverging lines = interaction; small-PVE signals that vanish
+    # in raw-group plots still show here. p is the OFFICIAL engine value matched
+    # from the ranking TSV (falls back to the lm interaction term if absent).
+    fmt_e <- function(x) formatC(as.numeric(x), format = "e", digits = 1)
+    pint <- NA_real_
+    if (!is.null(args[["ranking"]])) {
+      rr <- tryCatch(read_tsv(args[["ranking"]]), error = function(e) NULL)
+      if (!is.null(rr) && ncol(rr) >= 3) {
+        names(rr)[2:3] <- c("gene_x", "gene_y")
+        hit <- rr[as.character(rr$gene_x) == gx & as.character(rr$gene_y) == gy, ]
+        if (nrow(hit) > 0) pint <- suppressWarnings(as.numeric(hit$p_interaction[1]))
+      }
+    }
+    mfit <- stats::lm(phenotype ~ bxv * byv, data = b)
+    if (!is.finite(pint)) {
+      cf <- stats::coef(summary(mfit))
+      if ("bxv:byv" %in% rownames(cf)) pint <- cf["bxv:byv", 4]
+    }
+    axseq <- seq(stats::quantile(b$bxv, .02), stats::quantile(b$bxv, .98), length = 100)
+    lev <- stats::quantile(b$byv, c(.10, .90))
+    nm  <- c(paste0(sy, " low"), paste0(sy, " high"))
+    pf <- do.call(rbind, lapply(1:2, function(i) {
+      nd <- data.frame(bxv = axseq, byv = as.numeric(lev[i]))
+      pr <- stats::predict(mfit, nd, se.fit = TRUE)
+      data.frame(bxv = axseq, grp = nm[i], fit = pr$fit,
+                 lo = pr$fit - 1.96 * pr$se.fit, hi = pr$fit + 1.96 * pr$se.fit)
+    }))
+    pf$grp <- factor(pf$grp, levels = nm)
+    fcols <- stats::setNames(c("#2C7FB8", "#C44E52"), nm)
+    ann <- if (is.finite(pint)) {
+      paste0(sx, "×", sy, " homoeolog interaction   p = ", fmt_e(pint))
+    } else paste0(sx, "×", sy, " homoeolog interaction")
+    pfit <- ggplot(pf, aes(bxv, fit, colour = grp, fill = grp)) +
+      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.16, colour = NA) +
+      geom_line(linewidth = 1.4) +
+      scale_colour_manual(values = fcols, name = paste0(sy, "-copy burden")) +
+      scale_fill_manual(values = fcols, name = paste0(sy, "-copy burden")) +
+      annotate("text", x = min(axseq), y = Inf, hjust = 0, vjust = 1.8,
+               size = 4.4, fontface = "bold", label = ann) +
+      labs(x = paste0(sx, "-copy burden  (", gx, ")"),
+           y = "predicted phenotype (95% CI)") +
+      theme_omic()
+    ggw(pfit, "burden_interaction", w = 7, h = 5)
+
+    # --- SUPPLEMENTARY: raw-data group views (grafify) ---
     if (!requireNamespace("grafify", quietly = TRUE)) {
       message("burden: grafify not installed — skipping burden_violin/burden_bar ",
               "(install.packages('grafify'))")
     } else {
-      b <- read_tsv(args[["burdens"]])
-      b <- b[b$pair_rank == 0, ]                 # top pair only
-      b$bxv <- as.numeric(b$burden_x)
-      b$byv <- as.numeric(b$burden_y)
-      b$phenotype <- as.numeric(b$phenotype)
-      b <- b[is.finite(b$bxv) & is.finite(b$byv) & is.finite(b$phenotype), ]
-      sx <- as.character(b$sub_x[1]); sy <- as.character(b$sub_y[1])
-      # median-split each homoeolog copy's burden into low / high carrier groups.
-      # The subgenome id lives in the factor LEVELS (so the columns stay grpA/grpD
-      # and grafify's tidy-eval column args work for any species: A/B, A/D, …).
+      # median-split each copy's burden into low/high; the subgenome id lives in
+      # the factor LEVELS so grafify's tidy-eval column args stay species-agnostic.
       b$grpA <- factor(ifelse(b$bxv > stats::median(b$bxv),
                               paste0(sx, " high"), paste0(sx, " low")),
                        levels = c(paste0(sx, " low"), paste0(sx, " high")))
@@ -406,12 +454,10 @@ if (length(dist_kinds) > 0) {
                               paste0(sy, " high"), paste0(sy, " low")),
                        levels = c(paste0(sy, " low"), paste0(sy, " high")))
       flab <- paste0(sy, "-copy burden")
-      # B — two-factor violin + box + all sample points (grafify house style)
       pv <- grafify::plot_4d_scatterviolin(data = b, xcol = grpA, ycol = phenotype,
                                            boxes = grpD, s_alpha = 0.5) +
         ggplot2::labs(x = NULL, y = "phenotype", fill = flab)
       ggw(pv, "burden_violin", w = 6.5, h = 5)
-      # C — two-factor mean +/- SEM bar with all sample points (grafify)
       pb <- grafify::plot_4d_scatterbar(data = b, xcol = grpA, ycol = phenotype,
                                         bars = grpD, ErrorType = "SEM", s_alpha = 0.4) +
         ggplot2::labs(x = NULL, y = "mean phenotype", fill = flab)
@@ -438,9 +484,8 @@ if (length(dist_kinds) > 0) {
         scale_fill_manual(values = c(AB = "#1F577B", AD = "#FCBC10",
                                      BD = "#E07370", AC = "#368650",
                                      CD = "#A56BA7")) +
-        labs(title = paste0("Triad pairwise interaction breakdown — ", trait),
-             subtitle = "which homoeolog pair within each triad carries the signal",
-             x = expression(-log[10](p)), y = NULL, fill = "pair") +
+        labs(x = expression(-log[10](p)), y = NULL, fill = "homoeolog pair",
+             caption = "pairwise interaction within each triad (ACAT-ranked); longest bar = signal-carrying pair") +
         theme_omic()
       ggw(p, "triad_breakdown", w = 7.5, h = 0.5 * nrow(tt) + 1.8)
     }

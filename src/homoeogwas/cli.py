@@ -1236,9 +1236,11 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
                   "`interact` with outputs.full_ranking: true; skipping")
     if "burden" in dist:
         if burdens:
-            rc |= subprocess.run(
-                base + ["--kind", "burden", "--burdens", burdens,
-                        "--prefix", itrait, "--trait", itrait]).returncode
+            burden_cmd = base + ["--kind", "burden", "--burdens", burdens,
+                                 "--prefix", itrait, "--trait", itrait]
+            if ranking:                       # lets the fitted-lines figure label
+                burden_cmd += ["--ranking", ranking]   # the official interaction p
+            rc |= subprocess.run(burden_cmd).returncode
         else:
             print("[rplot] burden: no top-K burdens TSV (needs full_ranking "
                   "interact run) — skipping")
