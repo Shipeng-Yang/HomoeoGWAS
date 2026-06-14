@@ -1,0 +1,60 @@
+# HomoeoGWAS species config — Arachis hypogaea (cultivated peanut, AABB tetraploid)
+#
+# Panel: 269-accession pangenome resequencing panel (Lu et al. 2025 Nat Genet,
+#   s41588-025-02170-w). Public SNP VCF + per-accession phenotypes (100-seed
+#   weight, seed length, pod-coat) — the rare peanut panel where genotype AND
+#   phenotype are both openly downloadable.
+#   - Genotype: PeanutPan AABB_merge.snp.MM05MAF005.vcf.gz (MAF>=0.05 pre-filtered)
+#       https://cgm.sjtu.edu.cn/PeanutPan/data/SNP/AABB_merge.snp.MM05MAF005.vcf.gz
+#   - Phenotype: Springer Supplementary Table 1 (41588_2025_2170_MOESM3_ESM.xlsx)
+#   - Reference: NDH108 (near-T2T). VCF CHROM = Chr01..Chr20.
+#       Chr01-Chr10 = A subgenome (donor A. duranensis)
+#       Chr11-Chr20 = B subgenome (donor A. ipaensis)
+#   - 230 AABB tetraploid accessions carry phenotype; AA/BB/wild diploids excluded.
+
+id: arachis_hypogaea
+latin: Arachis hypogaea
+common_name: Cultivated peanut (tetraploid AABB)
+genome_type: allopolyploid
+ploidy: 4
+
+subgenomes:
+  - id: A
+    copy: 1
+    donor: Arachis duranensis (A-genome donor)
+    chroms: [Chr01, Chr02, Chr03, Chr04, Chr05, Chr06, Chr07, Chr08, Chr09, Chr10]
+  - id: B
+    copy: 1
+    donor: Arachis ipaensis (B-genome donor)
+    chroms: [Chr11, Chr12, Chr13, Chr14, Chr15, Chr16, Chr17, Chr18, Chr19, Chr20]
+
+fasta: data/reference/peanut/NDH108.fa            # placeholder; only needed for interact prep (fetch later)
+gff: data/reference/peanut/NDH108.gff3.gz          # placeholder; only needed for interact prep (fetch later)
+chrom_map: data/reference/peanut/chrom_map_peanut.tsv  # identity map (VCF CHROM already Chr01..Chr20)
+
+geno:
+  vcf: data/raw/peanut/genotype/AABB_merge.snp.MM05MAF005.vcf.gz
+  layout: single
+
+pheno: data/processed/peanut/pheno_269.tsv
+sample_map: ~
+
+dosage_model: diploidized
+loco_unit: chrom
+
+qc:
+  maf_min: 0.05
+  hwe_min_p: ~
+  missingness_max: 0.1
+
+known_qtl_tsv: ~
+homoeolog_map: ~
+
+provenance:
+  panel_name: PeanutPan_269
+  panel_source: https://cgm.sjtu.edu.cn/PeanutPan/data/SNP/AABB_merge.snp.MM05MAF005.vcf.gz
+  panel_n_sample: 269
+  panel_n_sample_aabb_phenotyped: 230
+  reference_assembly: NDH108 near-T2T (Lu et al. 2025 Nat Genet)
+  reference_paper: Lu et al. 2025 Nature Genetics s41588-025-02170-w
+  phenotype_source: Springer Supp Table 1 (41588_2025_2170_MOESM3_ESM.xlsx)

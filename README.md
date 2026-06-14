@@ -11,7 +11,7 @@
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
-strawberry, …) by modelling each subgenome explicitly. A new species is added
+peanut, strawberry, …) by modelling each subgenome explicitly. A new species is added
 through a single YAML config — no framework code changes. The only requirement
 is that the subgenomes are distinguishable (a homoeologous chromosome naming or a
 `chrom_map`); the optional deep-learning prior additionally needs a reference
@@ -100,7 +100,7 @@ homoeolog kernel `K_hom` is not meaningful for them.
 
 ## Tested species
 
-The framework has been run end-to-end on five crops spanning ploidy 2n–8n through
+The framework has been run end-to-end on six crops spanning ploidy 2n–8n through
 the same code path; this list is illustrative, not a limit on supported species.
 
 | Species | Subgenomes | Reference assembly |
@@ -108,6 +108,7 @@ the same code path; this list is illustrative, not a limit on supported species.
 | Wheat (*Triticum aestivum*)     | AABBDD (6n) | IWGSC RefSeq v1.0 |
 | Cotton (*Gossypium hirsutum*)   | AADD (4n)   | HBAU NDM8 |
 | Rapeseed (*Brassica napus*)     | AACC (4n)   | Darmor v4.1 |
+| Peanut (*Arachis hypogaea*)     | AABB (4n)   | NDH108 (PeanutPan) |
 | Oat (*Avena sativa*)            | AACCDD (6n) | OT3098 v2 |
 | Strawberry (*Fragaria × ananassa*) | octoploid (4 subgenomes) | NIHHS Seolhyang |
 

@@ -1,0 +1,23 @@
+# interact_peanut_hundred_seed_weight.yaml
+# Peanut (Arachis hypogaea AABB) gene-resolution homoeolog A/B interaction scan.
+# 379 callable A<->B homoeolog pairs (diamond-RBH, base-group-restricted).
+# Trait: 100-seed weight. Panel: PeanutPan 269 (230 AABB phenotyped).
+interact:
+  mode: pairwise
+  subgenomes: [A, B]
+  genotype:
+    A: data/processed/arachis_hypogaea/A/all
+    B: data/processed/arachis_hypogaea/B/all
+  snp_to_gene:
+    A: data/processed/peanut/interact/snp_to_gene_A.npz
+    B: data/processed/peanut/interact/snp_to_gene_B.npz
+  pairs: data/processed/peanut/interact/pairs_AB.tsv
+  phenotype: data/processed/peanut/pheno_269.tsv
+  sample_col: sample
+  trait: hundred_seed_weight
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/peanut/interact_hundred_seed_weight
+  full_ranking: true
