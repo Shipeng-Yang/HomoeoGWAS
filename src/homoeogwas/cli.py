@@ -1263,6 +1263,32 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
     return rc
 
 
+def _autoplot_interact_figures(out_dir) -> None:
+    """Best-effort: emit the distinctive interaction figures into an ``interact``
+    run dir so the key plots appear automatically (mirroring ``fit``). R and the
+    grafify/ggrepel/treemapify packages are optional — if R is missing the stats
+    run is unaffected and a hint to run ``homoeogwas rplot <dir>`` is printed.
+    Uses single-format PNG (the R channel renders one format per call)."""
+    out_dir = Path(out_dir)
+    has_rank = (any(out_dir.glob("interact_*_ranking_pairwise_*.tsv"))
+                or any(out_dir.glob("interact_*_ranking_triad_*.tsv")))
+    if not has_rank:
+        print("[interact] figures: no ranking dump (set outputs.full_ranking: "
+              "true) — skipping; the data was written")
+        return
+    rscript = _find_rscript(None)
+    if rscript is None:
+        print(f"[interact] figures: Rscript not found — run `homoeogwas rplot "
+              f"{out_dir}` after installing R")
+        return
+    base = [rscript, _r_script_asset(), "--out-dir", str(out_dir),
+            "--format", "png", "--dpi", "300"]
+    dist = ["interaction", "marginal", "burden", "triad", "network"]
+    _rplot_distinctive(base, out_dir, out_dir, "homoeogwas", dist, None)
+    print(f"[interact] figures written to {out_dir} "
+          "(run `homoeogwas rplot <dir> --format pdf` for vector output)")
+
+
 def cmd_rplot(args) -> int:
     """Publication-grade R figures via CMplot (genome-wide) + locuszoomr (locus).
 

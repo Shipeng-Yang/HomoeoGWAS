@@ -1319,6 +1319,15 @@ def cmd_interact(args) -> int:
     fp = out_dir / f"interact_{trait}.json"
     fp.write_text(json.dumps(payload, indent=2, default=float))
     print(f"homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")
+    # best-effort: auto-generate the distinctive interaction figures into the run
+    # dir (like `fit`). R is optional and this never fails the stats run; opt out
+    # with outputs.plots: false.
+    if cfg.get("outputs", {}).get("plots", True):
+        try:
+            from .cli import _autoplot_interact_figures
+            _autoplot_interact_figures(out_dir)
+        except Exception as exc:
+            print(f"[interact] figure auto-generation skipped: {exc}")
     return 0
 
 
