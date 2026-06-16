@@ -1241,20 +1241,24 @@ def cmd_interact(args) -> int:
               + (f" weights={len(triad_weights)}" if triad_weights else "")
               + f" ({time.time()-t0:.1f}s)", flush=True)
         results = {}
+
+        def _g3(v):  # None-safe ".3g" — omnibus fields are None when G=0 / raw transform
+            return f"{v:.3g}" if isinstance(v, (int, float)) else str(v)
+
         for transform in ("INT", "raw"):
             r = run_triad_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
                                perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                                grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
                                covariates=cov_arg, full_dump_path=_dump_path(transform))
             results[transform] = r
-            print(f"  [{transform}] G={r.get('G')} triad_ACAT_omnibus={r.get('triad_acat_omnibus'):.3g} "
+            print(f"  [{transform}] G={r.get('G')} triad_ACAT_omnibus={_g3(r.get('triad_acat_omnibus'))} "
                   f"emp={r.get('triad_acat_omnibus_emp')}"
-                  + (f" | weighted_omnibus={r['weighted']['triad_acat_omnibus_weighted']:.3g}"
+                  + (f" | weighted_omnibus={_g3(r['weighted']['triad_acat_omnibus_weighted'])}"
                      if r.get("weighted") else ""), flush=True)
             for tag, pw in r.get("pairwise", {}).items():
                 wstr = (f" | wACAT={pw['weighted']['acat_weighted']:.3g} "
                         f"wnsig={pw['weighted']['bonferroni_n_sig']}" if pw.get("weighted") else "")
-                print(f"    {tag}: ACAT={pw['acat']:.3g} minP={pw['min_p']:.3g} "
+                print(f"    {tag}: ACAT={_g3(pw['acat'])} minP={_g3(pw['min_p'])} "
                       f"λ_obs={pw['lambda_gc_obs']:.3f} nsig(α={pw['bonferroni_alpha']:.1e})={pw['n_sig']}{wstr}")
                 for h in pw["sig"]:
                     print(f"        HIT {h['triad']} p={h['p']:.3g}")
