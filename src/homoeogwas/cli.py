@@ -1197,8 +1197,13 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
                      "interact_*_ranking_pairwise_*.tsv")
     burdens = _first("interact_*_topburdens_INT.tsv",
                      "interact_*_topburdens_*.tsv")
+    # group ranking from any clique-mode run (triad=3 or generic homoeolog/clique for any n>=3)
     triad = _first("interact_*_ranking_triad_INT.tsv",
-                   "interact_*_ranking_triad_*.tsv")
+                   "interact_*_ranking_homoeolog_INT.tsv",
+                   "interact_*_ranking_clique_INT.tsv",
+                   "interact_*_ranking_triad_*.tsv",
+                   "interact_*_ranking_homoeolog_*.tsv",
+                   "interact_*_ranking_clique_*.tsv")
 
     def _trait_from(path, marker):
         # interact_<trait>_<marker>... -> <trait>; ties the label to THIS file
@@ -1212,7 +1217,9 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
 
     itrait = (_trait_from(ranking, "_ranking_pairwise")
               or _trait_from(burdens, "_topburdens")
-              or _trait_from(triad, "_ranking_triad") or prefix)
+              or _trait_from(triad, "_ranking_triad")
+              or _trait_from(triad, "_ranking_homoeolog")
+              or _trait_from(triad, "_ranking_clique") or prefix)
 
     if "variance" in dist:
         vtsv = out_dir / f"_variance_{prefix}.tsv"
@@ -1234,14 +1241,14 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
         else:
             print("[rplot] interaction/marginal: no ranking TSV — run "
                   "`interact` with outputs.full_ranking: true; skipping")
-    if "network" in dist:                     # triad-triangle network = triad data only
+    if "network" in dist:                     # clique network = group (triad/homoeolog) ranking
         if triad:
             rc |= subprocess.run(
                 base + ["--kind", "network", "--triad", triad,
                         "--prefix", itrait, "--trait", itrait]).returncode
         else:
-            print("[rplot] network: triad-triangle network needs a triad ranking "
-                  "(hexaploid run with outputs.full_ranking: true); skipping")
+            print("[rplot] network: clique network needs a group ranking "
+                  "(triad/homoeolog run with outputs.full_ranking: true); skipping")
     if "burden" in dist:
         if burdens:
             burden_cmd = base + ["--kind", "burden", "--burdens", burdens,

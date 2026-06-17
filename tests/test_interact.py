@@ -15,6 +15,7 @@ from homoeogwas.interact import (
     acat_weighted,
     block_burden_capped,
     pair_conditional_diagnostics,
+    run_clique_scan,
     run_multitrait_pair_scan,
     run_pair_scan,
     run_triad_scan,
@@ -93,6 +94,58 @@ def test_triad_null_no_false_hits():
     # inflated (mean across the 3 pairwise stays in a sane band)
     mean_lambda = np.mean([r["pairwise"][t]["lambda_gc_obs"] for t in ("AB", "AD", "BD")])
     assert 0.3 < mean_lambda < 2.2
+
+
+def test_clique_n4_quartet_detects_and_isolates_cd_and_dumps_schema(tmp_path):
+    # generic n-subgenome path: a true quartet (4 subgenomes) has C(4,2)=6 within-group
+    # pairwise interactions; inject a C-D interaction and confirm it is detected, isolated,
+    # and that the ranking dump has the generalized (4 gene / 6 p / 4 n_snp) columns.
+    rng = np.random.default_rng(4)
+    subs = ["A", "B", "C", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    quartets = [(f"g{i}", f"g{i}", f"g{i}", f"g{i}") for i in range(G)]
+    hit = 23
+    bC = block_burden_capped(subdata["C"].X, subdata["C"].gene_snp[f"g{hit}"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng)
+    y = rng.standard_normal(N) + 1.8 * (_std(bC) * _std(bD))
+
+    dump = tmp_path / "rank_clique_INT.tsv"
+    r = run_clique_scan(subdata, quartets, y, np.arange(N), cap=150, transform="INT",
+                        perm_B=0, grm_method="grm_from_X", full_dump_path=str(dump))
+    assert r["G"] == G
+    # all six within-quartet pairs are scanned
+    assert set(r["pairwise"]) == {"AB", "AC", "AD", "BC", "BD", "CD"}
+    # C-D detects the injected interaction at Bonferroni...
+    assert r["pairwise"]["CD"]["n_sig"] >= 1
+    assert any(h["triad"][2] == f"g{hit}" for h in r["pairwise"]["CD"]["sig"])
+    # ...and the injected pair dominates: CD has the smallest min-p of all six pairs
+    # (a strict "0 hits in the other 5 pairs" is too tight at 6xG null tests).
+    minp = {t: r["pairwise"][t]["min_p"] for t in r["pairwise"]}
+    assert minp["CD"] == min(minp.values())
+    assert minp["CD"] < 0.05 / G
+    assert r["triad_acat_omnibus"] < 0.05
+    # generalized ranking schema scales with n: 4 gene cols, 6 pair cols, 4 n_snp cols
+    header = dump.read_text().splitlines()[0].split("\t")
+    assert [c for c in header if c.startswith("gene_") and not c.startswith("gene_len")] == \
+        ["gene_A", "gene_B", "gene_C", "gene_D"]
+    assert [c for c in header if c.startswith("p_") and c != "p_acat"] == \
+        ["p_AB", "p_AC", "p_AD", "p_BC", "p_BD", "p_CD"]
+    assert [c for c in header if c.startswith("n_snp_") and c != "n_snp_group"] == \
+        ["n_snp_A", "n_snp_B", "n_snp_C", "n_snp_D"]
+    assert "n_snp_group" in header
+
+
+def test_clique_n3_matches_triad_alias():
+    # run_triad_scan is now an alias of run_clique_scan; n=3 behaviour is unchanged
+    assert run_triad_scan is run_clique_scan
+    rng = np.random.default_rng(7)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}", f"g{i}", f"g{i}") for i in range(G)]
+    r = run_clique_scan(subdata, triads, rng.standard_normal(N), np.arange(N),
+                        cap=150, transform="INT", perm_B=0, grm_method="grm_from_X")
+    assert r["G"] == G
+    assert set(r["pairwise"]) == {"AB", "AD", "BD"}
 
 
 def test_pairwise_2sub_detects_interaction():

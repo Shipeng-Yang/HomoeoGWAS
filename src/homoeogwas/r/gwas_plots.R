@@ -467,60 +467,77 @@ if (length(dist_kinds) > 0) {
 
   if ("triad" %in% dist_kinds && !is.null(args[["triad"]])) {
     t <- read_tsv(args[["triad"]])
-    pcols <- grep("^p_[A-Za-z0-9]{2}$", names(t), value = TRUE)
-    pcols <- setdiff(pcols, "p_acat")
-    if (length(pcols) >= 2) {
-      gcols <- names(t)[2:4]
+    gcols <- grep("^gene_", names(t), value = TRUE)          # n subgenomes (any ploidy)
+    gcols <- gcols[!grepl("^gene_len", gcols)]               # exclude gene_len_<S> metadata cols
+    subs <- sub("^gene_", "", gcols)
+    pcols <- setdiff(grep("^p_", names(t), value = TRUE),
+                     c("p_acat"))                            # all C(n,2) pairwise p-columns
+    pcols <- intersect(paste0("p_", apply(utils::combn(subs, 2), 2, paste0, collapse = "")), pcols)
+    if (length(pcols) >= 1 && length(subs) >= 2) {
       t$p_acat <- as.numeric(t$p_acat)
       tt <- utils::head(t[order(t$p_acat), ], topn)
-      tt$triad <- apply(tt[, gcols], 1, paste, collapse = "/")
+      tt$triad <- apply(tt[, gcols, drop = FALSE], 1, paste, collapse = "/")
       long <- do.call(rbind, lapply(pcols, function(pc) data.frame(
         triad = tt$triad, pair = sub("^p_", "", pc),
         nlp = -log10(pmax(as.numeric(tt[[pc]]), 1e-300)))))
       long$triad <- factor(long$triad, levels = rev(tt$triad))
+      lev <- sort(unique(long$pair))                         # arbitrary number of pairs
+      pal <- grDevices::hcl.colors(max(length(lev), 2), "Dark3")[seq_along(lev)]
+      names(pal) <- lev
       p <- ggplot(long, aes(nlp, triad, fill = pair)) +
         geom_col(position = position_dodge(width = 0.7), width = 0.65,
                  alpha = 0.92) +
-        scale_fill_manual(values = c(AB = "#1F577B", AD = "#FCBC10",
-                                     BD = "#E07370", AC = "#368650",
-                                     CD = "#A56BA7")) +
+        scale_fill_manual(values = pal) +
         labs(x = expression(-log[10](p)), y = NULL, fill = "homoeolog pair",
-             caption = "pairwise interaction within each triad (ACAT-ranked); longest bar = signal-carrying pair") +
+             caption = "pairwise interaction within each homoeolog group (ACAT-ranked); longest bar = signal-carrying pair") +
         theme_omic()
       ggw(p, "triad_breakdown", w = 7.5, h = 0.5 * nrow(tt) + 1.8)
     }
   }
 
   if ("network" %in% dist_kinds) {
-    # Homoeolog interactions are pairwise/triad-local, so a "network" only forms
-    # for 3-subgenome triads: each triad is a TRIANGLE of its three homoeologs
-    # with edges weighted by the pairwise interaction -log10 p (the signal-carrying
-    # pair shows as a thick red edge). Pairwise (tetraploid) runs give isolated
-    # dyads — no network — so this figure is produced only for triad runs.
+    # A homoeolog group of n subgenomes is drawn as a regular n-gon: one vertex per
+    # subgenome, one edge per within-group pair, edge width/colour = pairwise
+    # interaction -log10 p (the signal-carrying pair shows as a thick red edge).
+    # n=2 -> a single dyad (line), n=3 -> triangle, n=4 -> K4, ... any ploidy.
     if (is.null(args[["triad"]])) {
-      message("network: triad-triangle network needs a triad ranking (hexaploid ",
-              "3-subgenome run); skipping")
+      message("network: clique network needs a group ranking (triad/homoeolog ",
+              "run with outputs.full_ranking: true); skipping")
     } else {
       fmt_e <- function(x) formatC(as.numeric(x), format = "e", digits = 1)
       tn <- read_tsv(args[["triad"]])
-      pcols <- setdiff(grep("^p_[A-Za-z0-9]{2}$", names(tn), value = TRUE), "p_acat")
-      gcols <- names(tn)[2:4]
+      gcols <- grep("^gene_", names(tn), value = TRUE)
+      gcols <- gcols[!grepl("^gene_len", gcols)]             # exclude gene_len_<S> metadata cols
       subs <- sub("^gene_", "", gcols)
-      if (length(pcols) >= 2 && length(subs) == 3) {
+      n <- length(subs)
+      # pairs in subgenome order (matches the engine's itertools.combinations emission)
+      prs <- if (n >= 2) utils::combn(subs, 2, simplify = FALSE) else list()
+      pcn <- vapply(prs, function(pr) paste0("p_", pr[1], pr[2]), "")
+      keep <- pcn %in% names(tn)
+      prs <- prs[keep]; pcn <- pcn[keep]
+      if (n >= 2 && length(prs) >= 1) {
         tn$p_acat <- as.numeric(tn$p_acat)
         tt <- utils::head(tn[order(tn$p_acat), ], min(topn, nrow(tn)))
+        gname <- switch(as.character(n), "2" = "dyad", "3" = "triad",
+                        "4" = "quartet", "5" = "pentad", "6" = "hexad", "group")
         tt$facet <- factor(seq_len(nrow(tt)),
-          labels = paste0("triad ", seq_len(nrow(tt)), " · p=", fmt_e(tt$p_acat)))
-        vx <- c(0.5, 0.04, 0.96); vy <- c(0.92, 0.08, 0.08)   # A top, B bl, D br
+          labels = paste0(gname, " ", seq_len(nrow(tt)), " · p=", fmt_e(tt$p_acat)))
+        # regular polygon layout: first vertex at top, going clockwise
+        if (n == 2) {
+          vx <- c(0.18, 0.82); vy <- c(0.5, 0.5)
+        } else {
+          ang <- pi / 2 - 2 * pi * (seq_len(n) - 1) / n
+          vx <- 0.5 + 0.40 * cos(ang); vy <- 0.5 + 0.42 * sin(ang)
+        }
         names(vx) <- subs; names(vy) <- subs
         nodes <- do.call(rbind, lapply(seq_len(nrow(tt)), function(i)
           data.frame(facet = tt$facet[i], sub = subs, x = vx[subs], y = vy[subs])))
         edges <- do.call(rbind, lapply(seq_len(nrow(tt)), function(i)
-          do.call(rbind, lapply(pcols, function(pc) {
-            tg <- sub("^p_", "", pc); s1 <- substr(tg, 1, 1); s2 <- substr(tg, 2, 2)
-            data.frame(facet = tt$facet[i], tag = tg,
-                       x = vx[s1], y = vy[s1], xend = vx[s2], yend = vy[s2],
-                       nlp = -log10(pmax(as.numeric(tt[[pc]][i]), 1e-300)))
+          do.call(rbind, lapply(seq_along(prs), function(j) {
+            pr <- prs[[j]]
+            data.frame(facet = tt$facet[i], tag = paste0(pr[1], pr[2]),
+                       x = vx[pr[1]], y = vy[pr[1]], xend = vx[pr[2]], yend = vy[pr[2]],
+                       nlp = -log10(pmax(as.numeric(tt[[pcn[j]]][i]), 1e-300)))
           }))))
         p <- ggplot() +
           geom_segment(data = edges, aes(x, y, xend = xend, yend = yend,
@@ -533,12 +550,9 @@ if (length(dist_kinds) > 0) {
           scale_linewidth(range = c(0.4, 3.2), guide = "none") +
           facet_wrap(~facet, ncol = 3) +
           coord_fixed(xlim = c(-0.05, 1.05), ylim = c(-0.02, 1.0), clip = "off") +
-          labs(caption = paste0("each triangle = one homoeolog triad; edge = ",
-               "pairwise interaction (thick red = signal-carrying pair)")) +
           theme_void() +
           theme(strip.text = element_text(size = 8, face = "bold"),
-                legend.position = "right",
-                plot.caption = element_text(colour = "#555555", size = 9))
+                legend.position = "right")
         ggw(p, "interaction_network", w = 8, h = 0.8 + 2.4 * ceiling(nrow(tt) / 3))
       }
     }

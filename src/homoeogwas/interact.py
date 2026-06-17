@@ -29,6 +29,7 @@ Config (YAML)::
 """
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from dataclasses import dataclass, field
@@ -629,9 +630,9 @@ def run_pair_scan(
         weighted=weighted, covariates=cov_meta)
 
 
-def run_triad_scan(
+def run_clique_scan(
     subdata: dict[str, SubgenomeData],
-    triads: list[tuple],                # list of (gene_s0, gene_s1, gene_s2) aligned to subs order
+    triads: list[tuple],                # list of homoeolog groups, each aligned to subs order
     y_raw: np.ndarray,
     sample_idx: np.ndarray,
     *,
@@ -642,20 +643,20 @@ def run_triad_scan(
     seed: int = 7,
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
-    triad_weights: dict = None,         # {(g0,g1,g2): w}  y-INDEPENDENT prior (HEB/DL), frozen
+    triad_weights: dict = None,         # {group_tuple: w}  y-INDEPENDENT prior (HEB/DL), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q)} fixed effects; None=legacy
-    full_dump_path: str = None,         # if set, write FULL per-triad ranking TSV (else top-N only)
+    full_dump_path: str = None,         # if set, write FULL per-group ranking TSV (else top-N only)
 ) -> dict:
-    """Hexaploid triad burden-product scan: full {K_A,K_B,K_D} whitening, the 3 within-triad
-    pairwise interactions (s0-s1, s0-s2, s1-s2), and a triad-level ACAT omnibus. Requires all
-    three homoeologs of a triad retained (dense panels, e.g. wheat WGS). ``covariates`` enter the
-    whitener mean model and every pairwise GLS; ``None`` = intercept-only. Permutation is
-    Freedman-Lane."""
+    """Generic n-subgenome homoeolog-clique burden-product scan: full {K_s} whitening, all
+    C(n,2) within-group pairwise interactions, and a group-level ACAT omnibus. Handles any
+    ``len(subs) >= 2`` (n=2 dyad, 3 triad, 4 quartet, …); triad is the n=3 special case. Requires
+    every homoeolog of a group retained (dense panels). ``covariates`` enter the whitener mean
+    model and every pairwise GLS; ``None`` = intercept-only. Permutation is Freedman-Lane. Result
+    keys keep the ``triad_*`` names for backward compatibility (they are the group omnibus)."""
     from joblib import Parallel, delayed
 
     rng = np.random.default_rng(seed)
-    subs = list(subdata.keys())            # 3 subgenomes in config order
-    s0, s1, s2 = subs
+    subs = list(subdata.keys())            # n subgenomes in config order
     n_t = sample_idx.size
     kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
     cov_meta = dict(policy="none")
@@ -668,14 +669,14 @@ def run_triad_scan(
     cols = {s: [] for s in subs}
     nsnp = {s: [] for s in subs}                     # callable SNP count per gene, per subgenome
     kept = []
-    for g0, g1, g2 in triads:
-        gmap = {s0: g0, s1: g1, s2: g2}
+    for group in triads:
+        gmap = dict(zip(subs, group, strict=True))   # subgenome -> gene id for this group
         if all(gmap[s] in subdata[s].gene_snp for s in subs):
             for s in subs:
                 cols[s].append(block_burden_capped(subdata[s].X, subdata[s].gene_snp[gmap[s]],
                                                     cap, rng)[sample_idx])
                 nsnp[s].append(int(np.asarray(subdata[s].gene_snp[gmap[s]]).size))
-            kept.append((g0, g1, g2))
+            kept.append(tuple(group))
     G = len(kept)
     if G < 1:
         return dict(G=0, note="no triads with all three homoeologs retained")
@@ -691,7 +692,7 @@ def run_triad_scan(
     y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
     Wh, cv = whiten_multi(kernels, y, X=C, seed=42)
 
-    pairwise_defs = [(s0, s1), (s0, s2), (s1, s2)]
+    pairwise_defs = list(itertools.combinations(subs, 2))   # all C(n,2) within-group pairs
     pw_p = {}
     for sx, sy in pairwise_defs:
         pw_p[f"{sx}{sy}"] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C)
@@ -703,9 +704,9 @@ def run_triad_scan(
         # Full genome-wide per-triad ranking by ascending triad-ACAT (descriptive). gene_len is
         # emitted as NA (engine has no coordinates) and joined downstream from the GFF.
         tags = [f"{sx}{sy}" for sx, sy in pairwise_defs]
-        pmat = np.column_stack([pw_p[t] for t in tags])      # (G, 3) per-pairwise p
+        pmat = np.column_stack([pw_p[t] for t in tags])      # (G, C(n,2)) per-pairwise p
         pmat = np.where(np.isfinite(pmat), pmat, 1.0)         # sanitize before ranking
-        # local finite copy of the per-triad ACAT for ranking (persisted stats untouched)
+        # local finite copy of the per-group ACAT for ranking (persisted stats untouched)
         acat_rank = np.where(np.isfinite(triad_acat), triad_acat, 1.0)
         min_pair = pmat.min(1)
         min_tag = np.array(tags)[pmat.argmin(1)]
@@ -715,18 +716,28 @@ def run_triad_scan(
         ns = {s: np.asarray(nsnp[s]) for s in subs}
         ns_sum = sum(ns[s] for s in subs)
         cbin = _decile_bin(ns_sum)
-        rows = [[int(rank_of[i]), kept[i][0], kept[i][1], kept[i][2],
-                 repr(float(pmat[i, 0])), repr(float(pmat[i, 1])), repr(float(pmat[i, 2])),
-                 repr(float(acat_rank[i])), repr(float(nl[i])), repr(float(min_pair[i])),
-                 str(min_tag[i]), int(ns[s0][i]), int(ns[s1][i]), int(ns[s2][i]), int(ns_sum[i]),
-                 int(cbin[i]), int(tie_of[i]), int(acat_rank[i] < bonf_ac), "NA", "NA", "NA"]
-                for i in np.argsort(acat_rank, kind="stable")]
-        _write_ranking_tsv(full_dump_path,
-                           ["rank", f"gene_{s0}", f"gene_{s1}", f"gene_{s2}",
-                            f"p_{tags[0]}", f"p_{tags[1]}", f"p_{tags[2]}", "p_acat", "neglog10p_acat",
-                            "min_pair_p", "min_pair_tag", f"n_snp_{s0}", f"n_snp_{s1}", f"n_snp_{s2}",
-                            "n_snp_triad", "callable_snp_decile", "tie_group", "bonferroni_sig_acat",
-                            f"gene_len_{s0}", f"gene_len_{s1}", f"gene_len_{s2}"], rows)
+        na_len = ["NA"] * len(subs)
+        rows = []
+        for i in np.argsort(acat_rank, kind="stable"):
+            row = [int(rank_of[i])]
+            row += [kept[i][j] for j in range(len(subs))]                 # gene_<s>
+            row += [repr(float(pmat[i, j])) for j in range(len(tags))]    # p_<tag>
+            row += [repr(float(acat_rank[i])), repr(float(nl[i])),
+                    repr(float(min_pair[i])), str(min_tag[i])]
+            row += [int(ns[s][i]) for s in subs]                          # n_snp_<s>
+            row += [int(ns_sum[i]), int(cbin[i]), int(tie_of[i]), int(acat_rank[i] < bonf_ac)]
+            row += na_len                                                 # gene_len_<s>
+            rows.append(row)
+        # n=3 keeps the legacy column name `n_snp_triad` for byte-compat with existing
+        # triad rankings; n!=3 uses the generic `n_snp_group`.
+        n_snp_total_col = "n_snp_triad" if len(subs) == 3 else "n_snp_group"
+        header = (["rank"] + [f"gene_{s}" for s in subs]
+                  + [f"p_{t}" for t in tags]
+                  + ["p_acat", "neglog10p_acat", "min_pair_p", "min_pair_tag"]
+                  + [f"n_snp_{s}" for s in subs]
+                  + [n_snp_total_col, "callable_snp_decile", "tie_group", "bonferroni_sig_acat"]
+                  + [f"gene_len_{s}" for s in subs])
+        _write_ranking_tsv(full_dump_path, header, rows)
 
     pw_res = {}
     for sx, sy in pairwise_defs:
@@ -789,6 +800,10 @@ def run_triad_scan(
             note=("per-triad y-independent prior (HEB/DL) frozen pre-association; weighted "
                   "Bonferroni controls per-pairwise FWER, weighted ACAT is the prior-weighted omnibus."))
     return out
+
+
+# Backward-compat alias: the hexaploid triad scan is the n=3 special case of the generic clique scan.
+run_triad_scan = run_clique_scan
 
 
 def _ols_rss(Xd: np.ndarray, yv: np.ndarray):
@@ -1178,12 +1193,17 @@ def cmd_interact(args) -> int:
     ic = cfg["interact"]
     subs = list(ic["subgenomes"])
     mode = ic.get("mode", "pairwise")
+    GROUP_MODES = ("triad", "homoeolog", "clique")     # generic n-subgenome clique scan
     if mode == "pairwise" and len(subs) != 2:
         print(f"ERROR: interact mode=pairwise needs exactly 2 subgenomes; got {subs}. "
-              f"For hexaploids use mode=triad with 3 subgenomes.")
+              f"For 3+ subgenomes use mode=homoeolog (any n) or mode=triad (exactly 3).")
         return 1
     if mode == "triad" and len(subs) != 3:
-        print(f"ERROR: interact mode=triad needs exactly 3 subgenomes; got {subs}.")
+        print(f"ERROR: interact mode=triad needs exactly 3 subgenomes; got {subs}. "
+              f"For other ploidies use mode=homoeolog (any n>=2).")
+        return 1
+    if mode in ("homoeolog", "clique") and len(subs) < 2:
+        print(f"ERROR: interact mode={mode} needs at least 2 subgenomes; got {subs}.")
         return 1
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1234,10 +1254,16 @@ def cmd_interact(args) -> int:
         return (str(out_dir / f"interact_{trait}_topburdens_{transform}.tsv")
                 if dump_on else None)
 
-    if mode == "triad":
-        triads = _load_pairs(ic["triads"], subs)            # gene_<S> columns -> (g0, g1, g2)
+    if mode in GROUP_MODES:
+        # gene_<S> columns -> n-tuple per homoeolog group; key `groups` (generic) or legacy `triads`
+        group_file = ic.get("groups") or ic.get("triads")
+        if not group_file:
+            print(f"ERROR: interact mode={mode} needs a homoeolog-group TSV via "
+                  f"`interact.groups` (or legacy `interact.triads` for 3 subgenomes).")
+            return 1
+        triads = _load_pairs(group_file, subs)
         triad_weights = _load_pair_weights(ic.get("weights"), subs) if ic.get("weights") else None
-        print(f"  n={len(valid)} triads(raw)={len(triads)}"
+        print(f"  n={len(valid)} groups(raw)={len(triads)} (n_sub={len(subs)})"
               + (f" weights={len(triad_weights)}" if triad_weights else "")
               + f" ({time.time()-t0:.1f}s)", flush=True)
         results = {}
@@ -1246,7 +1272,7 @@ def cmd_interact(args) -> int:
             return f"{v:.3g}" if isinstance(v, (int, float)) else str(v)
 
         for transform in ("INT", "raw"):
-            r = run_triad_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
+            r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
                                perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                                grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
                                covariates=cov_arg, full_dump_path=_dump_path(transform))
