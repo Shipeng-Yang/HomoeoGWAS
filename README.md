@@ -50,6 +50,60 @@ See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. CLI
 subcommands: `fit`, `validate`, `demo`, `split`, `interact`.
 
+## Run it by talking to an AI agent (no YAML, no coding)
+
+You do **not** have to write config files. HomoeoGWAS ships an **agent interface**:
+tell an AI coding agent your data files and which trait you care about, and the
+agent writes the configs, runs the analysis, and explains the results for you.
+This is the fastest way for a breeder or bioinformatician to get going.
+
+You just say, in plain language:
+
+> "Run a subgenome-stratified GWAS on my wheat. Genotypes are in
+> `data/A.bed`, `data/B.bed`, `data/D.bed`; phenotype is `pheno.tsv`,
+> sample column `id`, trait `heading_date`. Then plot it."
+
+The agent collects only those *biological* inputs and does the rest. Three ways
+to connect, pick whichever matches the agent you already use:
+
+```bash
+# ── Option A · Claude Code (zero setup) ───────────────────────────────────────
+# The skill is bundled at .claude/skills/homoeogwas/. Open this repo in Claude
+# Code and just ask in plain language — the `homoeogwas` skill auto-activates.
+
+# ── Option B · Any MCP client (Cursor, Cline, Windsurf, Claude Desktop, …) ─────
+pip install "homoeogwas[mcp]"     # adds the MCP dependency
+homoeogwas mcp                    # starts the MCP server (stdio)
+# Then register this server in your client's MCP config. Minimal entry:
+#   {"mcpServers": {"homoeogwas": {"command": "homoeogwas", "args": ["mcp"]}}}
+#   ^ replace "command" with an absolute path if `homoeogwas` is not on PATH,
+#     e.g. "/home/you/miniconda3/envs/poly/bin/homoeogwas"
+
+# ── Option C · Any other LLM/agent (ChatGPT, Gemini, a custom bot) ────────────
+# Point it at AGENTS.md in the repo root — that file IS the full, canonical
+# spec the agent follows. No plugin needed; the agent reads it and drives the CLI.
+```
+
+`AGENTS.md` is the single source of truth; the Claude skill and the MCP server
+both defer to it, so all three routes behave identically. Under the hood the
+agent calls the same `src/homoeogwas/workflow.py` engine (high-level inputs →
+auto-generated YAML → run → summary), and it **blocks on common mistakes**
+(wrong chromosome naming, missing homoeolog map, …) before wasting a run.
+
+**No GPU? You're fine — CPU is the default.** Plain `pip install homoeogwas`
+runs everything on CPU; the agent uses `--backend auto`, which silently picks
+GPU *only if one is present* and otherwise falls back to CPU with identical
+results. A GPU is **purely optional acceleration** for the genome-wide per-SNP
+scan and the deep-learning variant prior — never a requirement. So tell the
+agent "use CPU" (or just say nothing) and it works on any laptop:
+
+```bash
+# Force CPU explicitly if you like (this is also the no-GPU auto behaviour):
+homoeogwas fit -c run.yaml --backend cpu     # any machine, no GPU needed
+homoeogwas fit -c run.yaml --backend auto    # GPU if available, else CPU (default)
+homoeogwas fit -c run.yaml --backend gpu     # opt-in acceleration; needs CUDA
+```
+
 ## Containers
 
 ```bash
