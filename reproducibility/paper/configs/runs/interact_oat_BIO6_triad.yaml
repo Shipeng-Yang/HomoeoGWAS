@@ -1,0 +1,24 @@
+# Oat (Avena sativa AACCDD) gene-resolution homoeolog triad A/C/D interaction scan.
+# 6298 strict 1:1:1 triads (diamond-RBH + MCScanX), body SNPs.
+# Panel: OLD rahman2025. Trait: BIO6 (min temp coldest month).
+interact:
+  mode: triad
+  subgenomes: [A, C, D]
+  genotype:
+    A: data/processed/avena_sativa_logical/A/all
+    C: data/processed/avena_sativa_logical/C/all
+    D: data/processed/avena_sativa_logical/D/all
+  snp_to_gene:
+    A: results/phase7/bio_oat/interact_prep_avena/snp_to_gene_A.npz
+    C: results/phase7/bio_oat/interact_prep_avena/snp_to_gene_C.npz
+    D: results/phase7/bio_oat/interact_prep_avena/snp_to_gene_D.npz
+  triads: results/phase7/bio_oat/triads_strict_genecols.tsv
+  phenotype: data/processed/oat/pheno_clean.tsv
+  sample_col: sample_id
+  trait: BIO6
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/phase7/interact_oat
+  full_ranking: true

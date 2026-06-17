@@ -1,0 +1,22 @@
+# Rapeseed (Brassica napus AACC) gene-resolution homoeolog A<->C interaction scan.
+# Same-number 1:1 homoeolog pairs (diamond-RBH + MCScanX), body SNPs.
+# Panel: Horvath2020 (428). Trait: bloom 50%. NOTE: callable pair universe is tiny (G=2).
+interact:
+  mode: pairwise
+  subgenomes: [A, C]
+  genotype:
+    A: data/processed/rapeseed/horvath/A/all
+    C: data/processed/rapeseed/horvath/C/all
+  snp_to_gene:
+    A: results/phase7/bio_rapeseed/snp_to_gene_body.npz
+    C: results/phase7/bio_rapeseed/snp_to_gene_body.npz
+  pairs: results/phase7/bio_rapeseed/pairs_body_same.tsv
+  phenotype: data/processed/rapeseed/horvath/pheno_clean.tsv
+  sample_col: sample
+  trait: bloom_50pct
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/phase7/interact_rapeseed
+  full_ranking: true

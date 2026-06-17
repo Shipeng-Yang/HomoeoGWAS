@@ -1,0 +1,25 @@
+# Strawberry (Fragaria x ananassa, octoploid 8n) homoeolog triad A/C/D interaction scan.
+# Strict 4/4 quartets reduced to A/C/D triad (camarosa annotation). Body+/-1kb SNPs.
+# NOTE: 48K Axiom array is A-subgenome-biased (C/D ~few hundred SNPs) -> array-limited
+# underpowered boundary (expected near-empty callable set; honest negative).
+interact:
+  mode: triad
+  subgenomes: [A, C, D]
+  genotype:
+    A: data/processed/fragaria_ananassa/A/all
+    C: data/processed/fragaria_ananassa/C/all
+    D: data/processed/fragaria_ananassa/D/all
+  snp_to_gene:
+    A: results/phase7/bio_strawberry/interact_prep/snp_to_gene_A.npz
+    C: results/phase7/bio_strawberry/interact_prep/snp_to_gene_C.npz
+    D: results/phase7/bio_strawberry/interact_prep/snp_to_gene_D.npz
+  triads: results/phase7/bio_strawberry/interact_prep/triads_ACD.tsv
+  phenotype: data/processed/strawberry/pheno_clean.tsv
+  sample_col: sample_id
+  trait: mean_score
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/phase7/interact_strawberry
+  full_ranking: true
