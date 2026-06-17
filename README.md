@@ -125,16 +125,48 @@ Pass `--build-arg PIP_INDEX_URL=<mirror>` to build through a faster pip mirror.
 
 ## How it works
 
+One genotype file goes in; it is split by subgenome and feeds two analyses — a
+**subgenome-stratified mixed model** (whose signature output is the per-subgenome
+heritability partition) and a **homoeolog-interaction test** (whose output is the
+interaction network). A zero-shot deep-learning variant prior can optionally
+re-rank the scan.
+
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica, Arial, sans-serif","fontSize":"14px","lineColor":"#8A8A8A"}}}%%
 flowchart LR
-    G["VCF / PLINK genotypes"] -->|split| S["per-subgenome<br/>genotype sets"]
-    S --> K["per-subgenome GRM<br/>(+ optional K_hom)"]
-    K --> R["multi-kernel REML<br/>mixed model"]
-    R --> SC["per-SNP scan<br/>(CPU / GPU, LOCO)"]
-    SC --> O["sumstats + QQ +<br/>Manhattan + &lambda;_GC"]
-    SC -. optional .-> D["DL-prior<br/>re-ranking"]
-    D --> RR["re-ranked candidates"]
+    G(["VCF / PLINK<br/>genotypes"]) --> S["split by<br/>subgenome"]
+
+    subgraph MODEL["subgenome-stratified mixed model"]
+        K["per-subgenome GRM<br/>+ homoeolog kernel"] --> R["multi-kernel<br/>REML"]
+        R --> SC["per-SNP scan<br/>LOCO · CPU / GPU"]
+    end
+
+    subgraph INT["homoeolog-interaction test"]
+        I["pair / clique<br/>burden product"] --> N["ACAT omnibus"]
+    end
+
+    S --> K
+    S --> I
+    R --> V["variance fingerprint<br/>per-subgenome PVE"]
+    SC --> O["Manhattan · QQ · λ_GC"]
+    N --> W["interaction network<br/>any ploidy 2n→8n+"]
+    SC -. optional .-> D["zero-shot DL prior<br/>re-ranking"]
+
+    classDef stage fill:#1F577B,stroke:#13384f,color:#ffffff;
+    classDef out   fill:#FBFAF7,stroke:#368650,color:#2A2A2A;
+    classDef star  fill:#FBEDEC,stroke:#CB3E35,color:#2A2A2A,font-weight:bold;
+    classDef opt   fill:#F3ECE2,stroke:#C0584C,color:#2A2A2A,stroke-dasharray:4 3;
+    class G,S,K,R,SC,I,N stage;
+    class O out;
+    class V,W star;
+    class D opt;
+    style MODEL fill:#F6F9FB,stroke:#1F577B,color:#1F577B;
+    style INT   fill:#FCF6EE,stroke:#C0584C,color:#C0584C;
 ```
+
+The two red-bordered boxes — the **variance fingerprint** and the **interaction
+network** — are HomoeoGWAS's two distinctive outputs; everything else is standard
+GWAS machinery made subgenome-aware.
 
 ## Adding a new species
 
