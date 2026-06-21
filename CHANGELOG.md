@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- `homoeogwas design`: parametric sequencing-depth pre-flight calculator.
+  Allopolyploid genomes are large, so blind WGS is expensive; this estimates how
+  much coverage depth (x) is needed by chaining depth -> per-genotype confident-
+  call recovery -> usable in-gene density -> the validated callable-pair density
+  curve -> discovery design-band, separately for the marginal subgenome scan and
+  the stricter homoeolog-interaction test (which needs more depth to genotype and
+  distinguish both homoeolog copies). Reports the inverted "depth to reach the
+  discovery-feasible/strong band" with a mappability sensitivity range, and built-
+  in species anchors (`--like wheat|cotton|oat|rapeseed`) so a planner needs no
+  VCF. Framed as a planning heuristic, not an empirical depth calibration (no raw
+  reads are used). New module `design_depth.py`.
+
 ## v1.0.2 — homoeolog-interaction dominance adjustment
 
 - `homoeolog interaction`: optional `dominance_adjust` flag (config

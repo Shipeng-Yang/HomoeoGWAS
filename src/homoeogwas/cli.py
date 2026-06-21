@@ -1034,6 +1034,44 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--rscript", default=None, help="path to Rscript")
     rp.add_argument("--check-deps", action="store_true",
                     help="report R package availability and exit")
+
+    dsg = sub.add_parser("design", help="parametric pre-flight: how much WGS "
+                                        "depth is enough? (depth -> callable "
+                                        "homoeolog pairs -> design band)")
+    dsg.add_argument("--like", default=None,
+                     help="use a built-in species anchor "
+                          "{wheat,cotton,oat,rapeseed} (no VCF needed)")
+    dsg.add_argument("--g-full", dest="g_full", type=float, default=None,
+                     help="observed full-depth callable homoeolog-pair count "
+                          "(overrides --like; required if no --like)")
+    dsg.add_argument("--species", default=None, help="label for custom anchor")
+    dsg.add_argument("--ploidy", default=None, help="label, e.g. 6n (custom)")
+    dsg.add_argument("--subgenomes", type=int, default=None,
+                     help="number of subgenomes (custom anchor)")
+    dsg.add_argument("--genome-gb", dest="genome_gb", type=float, default=None,
+                     help="genome size in Gb (custom anchor; context only)")
+    dsg.add_argument("--samples", type=int, default=None,
+                     help="planned sample count N (default: preset or 400)")
+    dsg.add_argument("--lambda-full", dest="lambda_full", type=float,
+                     default=49.44485384426431,
+                     help="usable in-gene SNPs per gene copy at saturating depth "
+                          "(default = wheat-measured 49.4; lower it for "
+                          "low-polymorphism species to test sensitivity)")
+    dsg.add_argument("--depth-grid", dest="depth_grid",
+                     default="1,2,3,5,8,10,15,20,30",
+                     help="comma list of depths (x) to evaluate")
+    dsg.add_argument("--marginal-min-dp", dest="marginal_min_dp", type=int,
+                     default=None, help="override marginal confident-call depth")
+    dsg.add_argument("--marginal-mappability", dest="marginal_mappability",
+                     type=float, default=None,
+                     help="override marginal effective mappability")
+    dsg.add_argument("--interaction-min-dp", dest="interaction_min_dp", type=int,
+                     default=None, help="override interaction confident-call depth")
+    dsg.add_argument("--interaction-mappability", dest="interaction_mappability",
+                     type=float, default=None,
+                     help="override interaction effective mappability")
+    dsg.add_argument("-o", "--out", default=None,
+                     help="write full JSON (table + summary + caveats) here")
     return ap
 
 
@@ -1507,6 +1545,9 @@ def main(argv=None) -> int:
     if args.subcommand == "mcp":
         from .mcp_server import main as mcp_main
         return mcp_main()
+    if args.subcommand == "design":
+        from .design_depth import cmd_design
+        return cmd_design(args)
     return 1
 
 
