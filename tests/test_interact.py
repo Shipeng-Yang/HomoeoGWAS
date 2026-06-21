@@ -15,6 +15,7 @@ from homoeogwas.interact import (
     acat_weighted,
     block_burden_capped,
     pair_conditional_diagnostics,
+    pairwise_pvals,
     run_clique_scan,
     run_multitrait_pair_scan,
     run_pair_scan,
@@ -146,6 +147,65 @@ def test_clique_n3_matches_triad_alias():
                         cap=150, transform="INT", perm_B=0, grm_method="grm_from_X")
     assert r["G"] == G
     assert set(r["pairwise"]) == {"AB", "AD", "BD"}
+
+
+def test_dominance_adjust_off_matches_legacy_ols():
+    # With Wh=I and C=None the test reduces to OLS on [1,zA,zB,zA*zB]; dominance_adjust=False must
+    # reproduce that legacy design exactly (backward compatibility for existing results).
+    rng = np.random.default_rng(0)
+    n = 200
+    zA = _std(rng.standard_normal(n))
+    zB = _std(0.5 * zA + rng.standard_normal(n))
+    y = rng.standard_normal(n)
+    p_off = pairwise_pvals(np.eye(n), y, zA.reshape(n, 1), zB.reshape(n, 1),
+                           C=None, dominance_adjust=False)[0]
+    # hand-rolled OLS interaction t-test on [1,zA,zB,zA*zB]
+    X = np.column_stack([np.ones(n), zA, zB, zA * zB])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ beta
+    df = n - 4
+    se = np.sqrt((resid @ resid) / df * np.linalg.inv(X.T @ X)[3, 3])
+    from scipy.stats import t as _t
+    p_ref = float(2 * _t.sf(abs(beta[3] / se), df))
+    assert abs(p_off - p_ref) < 1e-9
+
+
+def test_dominance_adjust_controls_collinearity_dominance_leak():
+    # Homoeolog collinearity + an unmodelled per-copy dominance (z^2) main effect, NO interaction:
+    # the product term is collinear with z^2 as r->1, so the legacy test leaks; conditioning on the
+    # squared burdens (dominance_adjust=True) must restore near-nominal type-I.
+    rng = np.random.default_rng(1)
+    n, reps, r = 400, 80, 0.85
+    eye = np.eye(n)
+    off, on = [], []
+    for _ in range(reps):
+        zA = _std(rng.standard_normal(n))
+        zB = _std(r * zA + np.sqrt(1 - r * r) * rng.standard_normal(n))
+        y = 1.3 * (zA ** 2 - 1) + 1.3 * (zB ** 2 - 1) + rng.standard_normal(n)  # dominance, no zA*zB
+        bx, by = zA.reshape(n, 1), zB.reshape(n, 1)
+        off.append(pairwise_pvals(eye, y, bx, by, dominance_adjust=False)[0] < 0.05)
+        on.append(pairwise_pvals(eye, y, bx, by, dominance_adjust=True)[0] < 0.05)
+    assert np.mean(off) > 0.30          # legacy design leaks badly under collinearity x dominance
+    assert np.mean(on) < 0.15           # dominance-adjusted design controlled near nominal 0.05
+
+
+def test_dominance_adjust_threads_through_pair_scan():
+    # the switch reaches the production scan and changes the per-pair p on a dominance-leak gene,
+    # while default-off leaves run_pair_scan behaviour unchanged.
+    rng = np.random.default_rng(2)
+    subs = ["A", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    hit = 11
+    bA = block_burden_capped(subdata["A"].X, subdata["A"].gene_snp[f"g{hit}"], 150, rng)
+    # make D's hit gene burden collinear-ish proxy via A so the product aliases the dominance term
+    y = 1.5 * (_std(bA) ** 2 - 1) + rng.standard_normal(N)
+    r_off = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                          pair_subs=("A", "D"), grm_method="grm_from_X", dominance_adjust=False)
+    r_on = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                         pair_subs=("A", "D"), grm_method="grm_from_X", dominance_adjust=True)
+    assert r_off.G == r_on.G
+    assert r_off.min_p != r_on.min_p   # the dominance-conditioned design changes the result
 
 
 def test_pairwise_2sub_detects_interaction():

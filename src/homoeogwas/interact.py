@@ -165,30 +165,47 @@ def whiten_multi(kernels: dict[str, np.ndarray], y: np.ndarray, X: np.ndarray = 
 
 
 def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray,
-                   C: np.ndarray = None) -> np.ndarray:
+                   C: np.ndarray = None, dominance_adjust: bool = False) -> np.ndarray:
     """Per-pair interaction p (whitened GLS t-test on the b_X*b_Y coefficient).
 
     ``C`` is the fixed-effect covariate block (n, p_c) that already includes the intercept column
     (e.g. ``[1, PC1..PCk, env...]``); default ``None`` => intercept-only, i.e. design
     ``[1, b_X, b_Y, b_X*b_Y]``. With ``C`` given the design is ``[C, b_X, b_Y, b_X*b_Y]`` and the
-    residual df is ``n - (p_c + 3)``."""
+    residual df is ``n - (p_c + 3)``.
+
+    ``dominance_adjust`` (default ``False`` => byte-identical to the legacy design) appends the two
+    per-gene squared burdens, giving ``[C, b_X, b_Y, b_X^2, b_Y^2, b_X*b_Y]`` (df ``n-(p_c+5)``).
+    Because the product ``b_X*b_Y`` becomes collinear with ``b_X^2`` (and ``b_Y^2``) as the two
+    homoeolog burdens become correlated, an unmodelled per-copy dominance/curvature main effect can
+    otherwise leak into the interaction term under homoeolog collinearity; conditioning on the
+    squared burdens removes that leak. The tested coefficient is then the product effect CONDITIONAL
+    on the additive AND per-gene quadratic terms — not a generic dominance test. Costs 2 df and
+    increases rank-deficiency (more conservative ``p=1``) at extreme collinearity."""
     n, G = BX.shape
     yw = Wh @ y
     BXw = Wh @ BX
     BYw = Wh @ BY
     INTw = Wh @ (BX * BY)
+    if dominance_adjust:
+        BX2w = Wh @ (BX * BX)
+        BY2w = Wh @ (BY * BY)
     if C is None:
         Cw = (Wh @ np.ones(n)).reshape(-1, 1)
     else:
         Cw = Wh @ np.asarray(C, float).reshape(n, -1)
     p_c = Cw.shape[1]
-    j_int = p_c + 2                          # index of the interaction coef in [C, bX, bY, INT]
-    p_full = p_c + 3                         # full column count when the design is full rank
+    extra = 2 if dominance_adjust else 0
+    j_int = p_c + 2 + extra                  # interaction coef = last column of the design
+    p_full = p_c + 3 + extra                 # full column count when the design is full rank
     pv = np.empty(G)
     for g in range(G):
-        Xw = np.column_stack([Cw, BXw[:, g], BYw[:, g], INTw[:, g]])
+        cols = [Cw, BXw[:, g], BYw[:, g]]
+        if dominance_adjust:
+            cols += [BX2w[:, g], BY2w[:, g]]
+        cols.append(INTw[:, g])              # interaction stays last so j_int is column -1
+        Xw = np.column_stack(cols)
         beta, _res, rank, _sv = np.linalg.lstsq(Xw, yw, rcond=None)
-        df = n - rank                        # rank-aware df (== n-(p_c+3) when full rank)
+        df = n - rank                        # rank-aware df (== n-p_full when full rank)
         if rank < p_full or df < 1:          # rank-deficient: interaction not estimable
             pv[g] = 1.0                      # conservative
             continue
@@ -458,6 +475,7 @@ def run_pair_scan(
     maf_min: float = 0.01,
     pair_weights: dict = None,          # {(gx,gy): w}  y-INDEPENDENT prior (DL/HEB), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q) array} fixed effects; None=legacy
+    dominance_adjust: bool = False,     # add per-gene b^2 covariates to the interaction test
     full_dump_path: str = None,         # if set, write FULL per-pair ranking TSV (else top-N only)
     burden_dump_path: str = None,       # if set, write per-sample burdens for the top-K pairs
     top_k_burden: int = 5,              # number of top pairs to export burdens for
@@ -508,7 +526,7 @@ def run_pair_scan(
 
     y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
     Wh, cv = whiten_multi(kernels, y, X=C, seed=42)
-    pv = pairwise_pvals(Wh, y, BX, BY, C=C)
+    pv = pairwise_pvals(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust)
     pv = np.where(np.isfinite(pv), pv, 1.0)
     p_acat_obs = acat(pv)
     minp_obs = float(pv.min())
@@ -605,7 +623,7 @@ def run_pair_scan(
         ys = y[perm] if C is None else (fl_fit + fl_resid[perm])
         try:
             Whp, _ = whiten_multi(kernels, ys, X=C, seed=seed_i % 100000)
-            pp = pairwise_pvals(Whp, ys, BX, BY, C=C)
+            pp = pairwise_pvals(Whp, ys, BX, BY, C=C, dominance_adjust=dominance_adjust)
             return acat(pp), lambda_gc(pp)
         except Exception:  # noqa: BLE001
             return None
@@ -645,6 +663,7 @@ def run_clique_scan(
     maf_min: float = 0.01,
     triad_weights: dict = None,         # {group_tuple: w}  y-INDEPENDENT prior (HEB/DL), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q)} fixed effects; None=legacy
+    dominance_adjust: bool = False,     # add per-gene b^2 covariates to every pairwise interaction
     full_dump_path: str = None,         # if set, write FULL per-group ranking TSV (else top-N only)
 ) -> dict:
     """Generic n-subgenome homoeolog-clique burden-product scan: full {K_s} whitening, all
@@ -695,7 +714,7 @@ def run_clique_scan(
     pairwise_defs = list(itertools.combinations(subs, 2))   # all C(n,2) within-group pairs
     pw_p = {}
     for sx, sy in pairwise_defs:
-        pw_p[f"{sx}{sy}"] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C)
+        pw_p[f"{sx}{sy}"] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C, dominance_adjust=dominance_adjust)
     triad_acat = np.array([acat([pw_p[f"{sx}{sy}"][i] for sx, sy in pairwise_defs])
                            for i in range(G)])
     triad_omnibus = acat(triad_acat)
@@ -770,7 +789,7 @@ def run_clique_scan(
         ys = y[perm] if C is None else (fl_fit + fl_resid[perm])
         try:
             Whp, _ = whiten_multi(kernels, ys, X=C, seed=seed_i % 100000)
-            pp = {f"{sx}{sy}": pairwise_pvals(Whp, ys, Bd[sx], Bd[sy], C=C) for sx, sy in pairwise_defs}
+            pp = {f"{sx}{sy}": pairwise_pvals(Whp, ys, Bd[sx], Bd[sy], C=C, dominance_adjust=dominance_adjust) for sx, sy in pairwise_defs}
             tacat = np.array([acat([pp[f"{sx}{sy}"][i] for sx, sy in pairwise_defs]) for i in range(G)])
             return acat(tacat), {f"{sx}{sy}": lambda_gc(pp[f"{sx}{sy}"]) for sx, sy in pairwise_defs}
         except Exception:  # noqa: BLE001
@@ -920,6 +939,7 @@ def run_multitrait_pair_scan(
     pair_subs: tuple = None,
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
+    dominance_adjust: bool = False,     # add per-gene b^2 covariates to every pairwise interaction
 ) -> dict:
     """Multi-trait (pleiotropy) pairwise scan: ACAT-across-traits.
 
@@ -978,7 +998,7 @@ def run_multitrait_pair_scan(
     cv_by_trait = {}
     for j, t in enumerate(traits):
         Wh, cv = whiten_multi(kernels, y_t[t], seed=42 + j)
-        pv = pairwise_pvals(Wh, y_t[t], BX, BY)
+        pv = pairwise_pvals(Wh, y_t[t], BX, BY, dominance_adjust=dominance_adjust)
         P[:, j] = np.where(np.isfinite(pv), pv, 1.0)
         cv_by_trait[t] = {s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))}
 
@@ -1008,7 +1028,7 @@ def run_multitrait_pair_scan(
             ys = y_t[t][perm]
             try:
                 Whp, _ = whiten_multi(kernels, ys, seed=seed_i % 100000)
-                pp = pairwise_pvals(Whp, ys, BX, BY)
+                pp = pairwise_pvals(Whp, ys, BX, BY, dominance_adjust=dominance_adjust)
             except Exception:  # noqa: BLE001
                 return None
             cols.append(np.where(np.isfinite(pp), pp, 1.0))
@@ -1134,6 +1154,7 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     pairs = _load_pairs(ic["pairs"], subs)
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
+    dominance_adjust = bool(burden.get("dominance_adjust", False))
     perm_B = int(ic.get("calibration", {}).get("perm_B", 2000))
     grm_cfg = ic.get("grm", {})
     grm_method = grm_cfg.get("method", "compute_grm_maf")
@@ -1148,7 +1169,7 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                                      cap=cap, transform=transform,
                                      perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                                      pair_subs=(subs[0], subs[1]), grm_method=grm_method,
-                                     maf_min=maf_min)
+                                     maf_min=maf_min, dominance_adjust=dominance_adjust)
         results[transform] = r
         print(f"  [{transform}] G={r['G']} pleio_ACAT_omnibus={r['pleio_acat_omnibus']:.3g} "
               f"emp={r['pleio_acat_omnibus_emp']} minP={r['min_p']:.3g} λ_obs={r['lambda_gc_obs']:.3f} "
@@ -1163,7 +1184,8 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                  if Path(pairs_path).exists() else None)
     provenance = dict(
         version=__version__, mode="pairwise", multi_trait=True, transform="INT(primary)+raw(sens)",
-        grm_method=grm_method, maf_min=maf_min, burden_cap=cap, perm_B=perm_B,
+        grm_method=grm_method, maf_min=maf_min, burden_cap=cap, dominance_adjust=dominance_adjust,
+        perm_B=perm_B,
         covariate_policy="none: subgenome-stratified GRMs only (no PCs/covariates)",
         trait_set=tlist, trait_set_digest=trait_set.digest, n_traits=len(tlist),
         n_complete_case=len(valid), complete_case_sha256=cc_hash, complete_case_sample_order=valid,
@@ -1233,6 +1255,7 @@ def cmd_interact(args) -> int:
 
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
+    dominance_adjust = bool(burden.get("dominance_adjust", False))
     perm_B = int(ic.get("calibration", {}).get("perm_B", 2000))
     grm_cfg = ic.get("grm", {})
     grm_method = grm_cfg.get("method", "compute_grm_maf")
@@ -1273,6 +1296,7 @@ def cmd_interact(args) -> int:
 
         for transform in ("INT", "raw"):
             r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
+                               dominance_adjust=dominance_adjust,
                                perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                                grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
                                covariates=cov_arg, full_dump_path=_dump_path(transform))
@@ -1301,6 +1325,7 @@ def cmd_interact(args) -> int:
                               perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
                               pair_weights=pair_weights, covariates=cov_arg,
+                              dominance_adjust=dominance_adjust,
                               full_dump_path=_dump_path(transform),
                               burden_dump_path=_burden_path(transform))
             r.trait = trait
@@ -1324,7 +1349,8 @@ def cmd_interact(args) -> int:
         import hashlib
         weights_sha = hashlib.sha256(Path(weights_path).read_bytes()).hexdigest()[:16]
     provenance = dict(version=__version__, mode=mode, grm_method=grm_method, maf_min=maf_min,
-                      burden_cap=cap, perm_B=perm_B, n_samples=len(valid), n_units_raw=n_units,
+                      burden_cap=cap, dominance_adjust=dominance_adjust,
+                      perm_B=perm_B, n_samples=len(valid), n_units_raw=n_units,
                       psd_floor=1e-6 if grm_method == "grm_from_X" else None,
                       covariate_policy=(cov_label if cov_arg else
                                         "none: subgenome-stratified GRMs only (no PCs/covariates)"),
