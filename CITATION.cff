@@ -13,7 +13,8 @@ authors:
   - family-names: Yang
     given-names: Shipeng
     email: qhyysp@gmail.com
-version: 1.0.0
+version: 1.0.2
+date-released: "2026-06-21"
 license: MIT
 repository-code: "https://github.com/Shipeng-Yang/HomoeoGWAS"
 keywords:

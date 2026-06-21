@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.2 — homoeolog-interaction dominance adjustment
+
+- `homoeolog interaction`: optional `dominance_adjust` flag (config
+  `interact.burden.dominance_adjust`, default `False` → byte-identical to the
+  legacy `[C, b_X, b_Y, b_X·b_Y]` design, existing results unchanged). When
+  enabled, the per-pair whitened GLS design adds the per-copy quadratic terms
+  `b_X², b_Y²`, so the tested product effect is conditional on both the additive
+  and per-gene dominance/curvature main effects. This closes a type-I leak under
+  homoeolog collinearity (a calibration simulation showed genome-wide FWER
+  rising toward ~1.0 as cross-copy correlation increases when the squared
+  burdens are unmodelled; conditioning restores ~0.05). Threaded through
+  `run_pair_scan`, `run_clique_scan`, and `run_multitrait_pair_scan` (observed +
+  permutation paths) and recorded in run provenance.
+
 ## v1.0.1 — first PyPI / conda release
 
 First release published to PyPI (and submitted to bioconda) — `pip install
