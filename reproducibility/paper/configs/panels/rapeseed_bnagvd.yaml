@@ -1,0 +1,36 @@
+panel: rapeseed_bnagvd
+species: rapeseed
+species_latin: Brassica napus
+ploidy: tetraploid
+subgenomes: [A, C]
+
+reference:
+  name: Darmor-bzh v4.1
+  chrom_style: "chr{A01..A10},chr{C01..C09}"
+
+geno:
+  source: BnaGVD whole-genome diversity panel
+  processed_dir: data/processed/rapeseed/bnagvd
+  n_samples: 926
+  n_snp_A: 735832
+  n_snp_C: 1080939
+  biallelic_only: true
+  snps_only: true
+
+pheno:
+  processed: data/processed/rapeseed/bnagvd/pheno_multi.tsv
+  traits:
+    - {name: flowering_time, n: 926}
+    - {name: soc_cx, n: 269}
+    - {name: soc_jh, n: 269}
+    - {name: trichome_cx, n: 269}
+    - {name: trichome_zjg, n: 269}
+  discovery_trait: flowering_time
+
+covariates:
+  n_pcs: 10
+
+interact:
+  pairing: diamond reciprocal-best-hit, min-snp-pair 3
+  n_pairs_AC: 17404
+  lead: {trait: flowering_time, pair: [BnaA02g19610D, BnaC02g22960D]}

@@ -1,0 +1,25 @@
+cotton_cottongvd1245:
+  panel: {n: 1245, G: 3757}
+  FibElo:
+    config: reproducibility/paper/configs/runs/interact_cotton_cottongvd1245_FibElo_perm2000.yaml
+    top_pair: [Gh_A01G025100, Gh_D01G022200]
+    min_p: 1.2275442470795263e-05
+    lambda_gc_perm_median: 0.9926660951442994
+    minp_perm_emp: 0.03648175912043978
+  FibLen:
+    config: reproducibility/paper/configs/runs/interact_cotton_cottongvd1245_FibLen_perm2000.yaml
+    top_pair: [Gh_A05G118800, Gh_D05G131200]
+    min_p: 5.985552347494514e-06
+    lambda_gc_perm_median: 0.9903653538015618
+    minp_perm_emp: 0.017991004497751123
+
+rapeseed_bnagvd:
+  panel: {n: 926, G: 17404}
+  flowering_time:
+    config: reproducibility/paper/configs/runs/interact_rapeseed_bnagvd_flowering_time.yaml
+    top_pair: [BnaA02g19610D, BnaC02g22960D]
+    min_p: 3.2681766125110916e-07
+    bonferroni_alpha: 2.872902780969892e-06
+    lambda_gc_perm_median: 0.9815132422904269
+    minp_perm_emp: 0.007992007992007992
+    covariates: {n_pcs: 10}

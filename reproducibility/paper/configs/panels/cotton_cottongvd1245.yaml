@@ -1,0 +1,35 @@
+panel: cotton_cottongvd1245
+species: cotton
+species_latin: Gossypium hirsutum
+ploidy: tetraploid
+subgenomes: [A, D]
+
+reference:
+  name: Gh_CRI v1 (NCBI GCA_006980745.1)
+  gff: CottonGen analysis/251
+  chrom_style: "{A,D}{01..13}"
+
+geno:
+  source: CottonGVD diversity panel (CNGB)
+  raw: data/raw/cotton/cottongvd/gwasSample.2allel.vcf.gz
+  processed_dir: data/processed/cotton/cottongvd
+  n_samples: 1245
+  n_snp_A: 805046
+  n_snp_D: 303984
+  maf_prefilter: 0.10
+  biallelic_only: true
+  snps_only: true
+
+pheno:
+  raw: data/raw/cotton/cottongvd/phenotype.fiber.quality.xlsx
+  sheet: dxm_2019_blup
+  processed: data/processed/cotton/cottongvd/pheno_cgvd1245.tsv
+  traits: [FibLen, FibStr, FibMic, FibElo]
+  discovery_traits: [FibLen, FibElo]
+
+interact:
+  pairing: diamond reciprocal-best-hit, base-group restricted, min-snp-pair 3
+  n_pairs_AD: 3757
+  leads:
+    - {trait: FibElo, pair: [Gh_A01G025100, Gh_D01G022200]}
+    - {trait: FibLen, pair: [Gh_A05G118800, Gh_D05G131200]}

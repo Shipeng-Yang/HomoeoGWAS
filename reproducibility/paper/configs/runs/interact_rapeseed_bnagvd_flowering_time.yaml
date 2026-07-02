@@ -1,0 +1,20 @@
+interact:
+  mode: pairwise
+  subgenomes: [A, C]
+  genotype:
+    A: data/processed/rapeseed/bnagvd/A/all
+    C: data/processed/rapeseed/bnagvd/C/all
+  snp_to_gene:
+    A: data/processed/rapeseed/bnagvd/interact/snp_to_gene_A.npz
+    C: data/processed/rapeseed/bnagvd/interact/snp_to_gene_C.npz
+  pairs: data/processed/rapeseed/bnagvd/interact/pairs_AC.tsv
+  phenotype: data/processed/rapeseed/bnagvd/pheno_multi.tsv
+  sample_col: sample
+  trait: flowering_time
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  covariates: {n_pcs: 10}
+  calibration: {perm_B: 1000}
+outputs:
+  out_dir: results/paper_leads/rapeseed_bnagvd/flowering_time
+  full_ranking: true

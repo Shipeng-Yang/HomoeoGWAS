@@ -1,0 +1,19 @@
+interact:
+  mode: pairwise
+  subgenomes: [A, D]
+  genotype:
+    A: data/processed/cotton/cottongvd/A/all
+    D: data/processed/cotton/cottongvd/D/all
+  snp_to_gene:
+    A: data/processed/cotton/cottongvd/interact/snp_to_gene_A.npz
+    D: data/processed/cotton/cottongvd/interact/snp_to_gene_D.npz
+  pairs: data/processed/cotton/cottongvd/interact/pairs_AD.tsv
+  phenotype: data/processed/cotton/cottongvd/pheno_cgvd1245.tsv
+  sample_col: sample
+  trait: FibLen
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: compute_grm_maf}
+  calibration: {perm_B: 2000}
+outputs:
+  out_dir: results/paper_leads/cotton_cottongvd1245/FibLen_perm2000
+  full_ranking: true
