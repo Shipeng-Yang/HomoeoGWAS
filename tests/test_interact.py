@@ -14,11 +14,17 @@ from homoeogwas.interact import (
     acat,
     acat_weighted,
     block_burden_capped,
+    gene_pc1_matrix,
+    gene_pc_scores,
+    kernel_interaction_pvals,
+    omnibus_pvals,
     pair_conditional_diagnostics,
     pairwise_pvals,
     run_clique_scan,
+    run_clique_scan_omnib,
     run_multitrait_pair_scan,
     run_pair_scan,
+    run_pair_scan_omnib,
     run_triad_scan,
 )
 
@@ -52,6 +58,139 @@ def test_acat_extreme_small_p_robust_and_bit_exact():
     p = np.array([0.01, 0.2, 0.5, 0.8])
     t = float(np.mean(np.tan((0.5 - p) * np.pi)))
     assert acat(p) == float(0.5 - np.arctan(t) / np.pi)
+
+
+def _ld_block(rng, n, m):
+    """Dosage block (0/1/2) with LD so PCs are non-trivial."""
+    lat = rng.standard_normal((n, 3)) @ rng.standard_normal((3, m))
+    out = np.zeros((n, m))
+    for j in range(m):
+        p = rng.uniform(0.15, 0.5)
+        out[:, j] = ((lat[:, j] > np.quantile(lat[:, j], 1 - p)).astype(float)
+                     + (lat[:, j] > np.quantile(lat[:, j], 1 - p / 2)).astype(float))
+    return out
+
+
+def test_gene_pc_scores_invariant_to_ref_alt_flip():
+    # per-SNP REF/ALT swap (x -> 2 - x) sends z -> -z; PC scores must be numerically identical.
+    rng = np.random.default_rng(3)
+    X = _ld_block(rng, 200, 14)
+    idx = np.arange(14)
+    s0 = gene_pc_scores(X, idx, 150, rng, n_pc=3)
+    flip = rng.random(14) < 0.5
+    Xf = X.copy(); Xf[:, flip] = 2 - Xf[:, flip]
+    s1 = gene_pc_scores(Xf, idx, 150, rng, n_pc=3)
+    assert np.allclose(s0, s1, atol=1e-9)
+    # the burden is NOT invariant under a partial flip (the estimand the reviewer flagged)
+    b0 = block_burden_capped(X, idx, 150, rng)
+    b1 = block_burden_capped(Xf, idx, 150, rng)
+    assert not np.allclose(b0, b1, atol=1e-6)
+
+
+def test_pc_and_kernel_interaction_invariant_burden_not():
+    # inject a coherent burden-product signal, then flip half of each gene's SNPs: the burden-product
+    # p moves, but PC1xPC1 and the low-rank kernel-interaction p are invariant to numerical precision.
+    rng = np.random.default_rng(5)
+    n = 300
+    X, D = _ld_block(rng, n, 12), _ld_block(rng, n, 10)
+    ix, iD = np.arange(12), np.arange(10)
+    bx = _std(block_burden_capped(X, ix, 150, rng)); bd = _std(block_burden_capped(D, iD, 150, rng))
+    y = rng.standard_normal(n) + 1.2 * _std(bx * bd)
+    Wh = np.eye(n)
+
+    def three(Xi, Di):
+        pb = pairwise_pvals(Wh, y, block_burden_capped(Xi, ix, 150, rng).reshape(n, 1),
+                            block_burden_capped(Di, iD, 150, rng).reshape(n, 1))[0]
+        ppc = pairwise_pvals(Wh, y, gene_pc1_matrix(Xi, ["g"], {"g": ix}, 150, rng),
+                             gene_pc1_matrix(Di, ["g"], {"g": iD}, 150, rng))[0]
+        pk = kernel_interaction_pvals(Wh, y, [gene_pc_scores(Xi, ix, 150, rng, 3)],
+                                      [gene_pc_scores(Di, iD, 150, rng, 3)])[0]
+        return pb, ppc, pk
+
+    b0 = three(X, D)
+    fx, fd = rng.random(12) < 0.5, rng.random(10) < 0.5
+    Xf, Df = X.copy(), D.copy(); Xf[:, fx] = 2 - Xf[:, fx]; Df[:, fd] = 2 - Df[:, fd]
+    b1 = three(Xf, Df)
+    assert abs(b1[1] - b0[1]) < 1e-9 and abs(b1[2] - b0[2]) < 1e-9   # PC & kernel invariant
+    assert abs(b1[0] - b0[0]) > 1e-6                                 # burden-product moves
+    # the omnibus stays significant even when the flipped burden collapses
+    o1 = omnibus_pvals(np.array([b1[0]]), np.array([b1[1]]), np.array([b1[2]]))[0]
+    assert o1 < 1e-3
+
+
+def test_null_replicates_preserve_kinship_yshuffle_does_not():
+    # A raw y-shuffle destroys the kinship covariance: refitting REML on the shuffled phenotype
+    # drives the genetic variance components to ~0, so the permuted scans run effectively
+    # unwhitened. The bootstrap / whitened-residual nulls must REPRODUCE the genetic variance.
+    from homoeogwas.interact import grm_from_X, null_replicates, whiten_multi
+
+    rng = np.random.default_rng(0)
+    n, m = 150, 400
+    pop = np.repeat(np.arange(3), n // 3)
+    freq = rng.uniform(0.1, 0.9, (3, m))
+    X = np.array([rng.binomial(2, freq[pop[i]]) for i in range(n)], float)
+    XA, XD = X[:, :200], X[:, 200:]
+    kernels = {"A": grm_from_X(XA), "D": grm_from_X(XD)}
+    gA = _std(XA @ rng.standard_normal(200))
+    gD = _std(XD @ rng.standard_normal(200))
+    y = _std(1.5 * gA + 1.5 * gD + rng.standard_normal(n))
+    _, cv_obs = whiten_multi(kernels, y, seed=1)
+    g_obs = cv_obs.get("A", 0.0) + cv_obs.get("D", 0.0)
+    assert g_obs > 0.3                                   # the observed phenotype IS kinship-structured
+
+    def _gvar(method):
+        reps, _, _ = null_replicates(kernels, y, B=3, method=method, seed=5)
+        cvs = [whiten_multi(kernels, r, seed=1)[1] for r in reps]
+        return np.mean([c.get("A", 0.0) + c.get("D", 0.0) for c in cvs])
+
+    assert _gvar("yshuffle") < 0.15 * g_obs              # kinship destroyed
+    assert _gvar("bootstrap") > 0.5 * g_obs              # kinship reproduced
+    assert _gvar("whitened") > 0.5 * g_obs               # kinship reproduced
+
+
+def test_minor_allele_burden_strictly_invariant():
+    # minor-allele-coded burden is fixed by frequency, not REF/ALT -> a swap leaves it identical,
+    # while the default (REF-coded) burden changes under a partial flip.
+    rng = np.random.default_rng(4)
+    X = _ld_block(rng, 200, 13)
+    # append an exact freq=0.5 double-tie SNP (equal homozygotes) — the case that broke a float rule
+    tie = np.array(([2] * 50 + [0] * 50 + [1] * 100), float)
+    X = np.column_stack([X, tie])
+    idx = np.arange(14)
+    b0 = block_burden_capped(X, idx, 150, rng, minor=True)
+    for f in (0.25, 0.5, 1.0):
+        fl = rng.random(14) < f
+        Xf = X.copy(); Xf[:, fl] = 2 - Xf[:, fl]
+        assert np.allclose(b0, block_burden_capped(Xf, idx, 150, rng, minor=True), atol=1e-12)
+    Xh = X.copy(); Xh[:, :7] = 2 - Xh[:, :7]
+    assert not np.allclose(block_burden_capped(X, idx, 150, rng),
+                           block_burden_capped(Xh, idx, 150, rng), atol=1e-6)
+
+
+def test_omnibus_drops_nonestimable_component():
+    # a non-estimable component (NaN or the p==1 sentinel) must be DROPPED, not clipped to 1-eps
+    # (which injects a huge negative Cauchy term and would mask a real signal).
+    pb = np.array([1e-6, 0.4])
+    ppc = np.array([np.nan, 0.5])          # NaN component
+    pk = np.array([1.0, 0.6])              # p==1 sentinel
+    o = omnibus_pvals(pb, ppc, pk)
+    # pair 0: only the 1e-6 burden survives -> omnibus stays significant despite NaN + p==1
+    assert o[0] < 1e-3
+    # equivalent to ACAT of the burden alone for pair 0
+    assert abs(o[0] - acat(np.array([1e-6]))) < 1e-12
+    with pytest.raises(ValueError):
+        omnibus_pvals(np.array([0.1, 0.2]), np.array([0.3]))   # unequal length
+
+
+def test_kernel_interaction_nonestimable_is_nan():
+    # a monomorphic / rank-0 gene block yields no estimable interaction -> NaN (not p=1)
+    rng = np.random.default_rng(9)
+    n = 120
+    y = rng.standard_normal(n)
+    good = gene_pc_scores(_ld_block(rng, n, 8), np.arange(8), 150, rng, 3)
+    mono = np.zeros((n, 1))                 # degenerate block -> zero PC column
+    pk = kernel_interaction_pvals(np.eye(n), y, [good], [mono])
+    assert np.isnan(pk[0])
 
 
 def test_triad_detects_and_isolates_bd_interaction():
@@ -618,3 +757,114 @@ def test_full_dump_off_writes_nothing(tmp_path):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --- omniB production path (encoding-invariant primary + kinship-preserving bootstrap) ---------
+
+def _make_sub_maf(rng, n=N, g=G, spg=SPG):
+    """Synthetic genotypes with every SNP common (MAF>=0.01 gate is a no-op) so the omniB
+    production path (which gates burden SNPs at MAF>=0.01) retains all genes."""
+    X = rng.integers(0, 3, size=(n, g * spg)).astype(float)
+    gene_snp = {f"g{i}": np.arange(i * spg, (i + 1) * spg) for i in range(g)}
+    return SubgenomeData(X=X, gene_snp=gene_snp, samples=[f"s{j}" for j in range(n)], chunk=None)
+
+
+def test_omnib_pair_scan_detects_and_isolates_interaction():
+    rng = np.random.default_rng(11)
+    subdata = {"A": _make_sub_maf(rng), "D": _make_sub_maf(rng)}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    hit = 30
+    bA = block_burden_capped(subdata["A"].X, subdata["A"].gene_snp[f"g{hit}"], 150, rng, minor=True)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng, minor=True)
+    y = rng.standard_normal(N) + 3.0 * (_std(bA) * _std(bD))
+    r = run_pair_scan_omnib(subdata, pairs, y, np.arange(N), cap=150, n_pc=3, bootstrap_B=0,
+                            n_jobs=1, pair_subs=("A", "D"), grm_method="grm_from_X")
+    assert r.statistic == "omniB"
+    # omniB is a 3-way ACAT (minor-burden + PC1 + kernel), so a single-component injected signal is
+    # diluted vs a lone burden test; assert the injected pair is the genome-wide strongest, not that
+    # it clears the small-sample Bonferroni bar.
+    assert tuple(r.top[0]["pair"])[0] == f"g{hit}"
+    assert r.min_p < 1e-2
+
+
+def test_omnib_strictly_invariant_to_ref_alt_recoding():
+    # recode every SNP dosage x -> 2 - x; omniB per pair must be unchanged (the paper's #1 claim)
+    rng = np.random.default_rng(12)
+    subdata = {"A": _make_sub_maf(rng), "D": _make_sub_maf(rng)}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    bA = block_burden_capped(subdata["A"].X, subdata["A"].gene_snp["g10"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp["g10"], 150, rng)
+    y = rng.standard_normal(N) + 1.5 * (_std(bA) * _std(bD))
+    r0 = run_pair_scan_omnib(subdata, pairs, y, np.arange(N), cap=150, bootstrap_B=0, n_jobs=1,
+                             pair_subs=("A", "D"), grm_method="grm_from_X")
+    flip = {s: SubgenomeData(X=2.0 - d.X, gene_snp=d.gene_snp, samples=d.samples, chunk=None)
+            for s, d in subdata.items()}
+    r1 = run_pair_scan_omnib(flip, pairs, y, np.arange(N), cap=150, bootstrap_B=0, n_jobs=1,
+                             pair_subs=("A", "D"), grm_method="grm_from_X")
+    p0 = {tuple(h["pair"]): h["p"] for h in r0.top}
+    p1 = {tuple(h["pair"]): h["p"] for h in r1.top}
+    # minor-burden and PC1 are exactly invariant; the low-rank kernel component drifts by a tiny
+    # amount from tied-singular-value rotation on recoding, so omniB is invariant to numerical
+    # tolerance (the honest "strictly invariant up to float/SVD tolerance" claim), not bit-exact.
+    assert r0.min_p == pytest.approx(r1.min_p, rel=1e-5)
+    for k in p0:
+        assert p0[k] == pytest.approx(p1[k], rel=1e-5)
+
+
+def test_omnib_bootstrap_reports_fwer_and_tail_excess():
+    rng = np.random.default_rng(13)
+    subdata = {"A": _make_sub_maf(rng), "D": _make_sub_maf(rng)}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    y = rng.standard_normal(N)                                   # pure null
+    r = run_pair_scan_omnib(subdata, pairs, y, np.arange(N), cap=150, bootstrap_B=50,
+                            bootstrap_seed=1, n_jobs=1, pair_subs=("A", "D"),
+                            grm_method="grm_from_X")
+    assert r.calibration_method == "bootstrap"
+    assert r.bootstrap_B == 50
+    assert 0.0 < r.minp_boot_emp <= 1.0                          # experiment-wide FWER is a valid p
+    assert "n_below_0.01" in r.tail_excess
+    assert 0.0 < r.tail_excess["n_below_0.01"]["empirical_p"] <= 1.0
+
+
+def test_omnib_bootstrap_whitens_once_never_refits_null():
+    # the critical pitfall guard: the kinship-preserving bootstrap must fit the null LMM / build the
+    # whitener EXACTLY once (never refit REML on a bootstrap phenotype, which would collapse the
+    # variance components as the legacy permutation does).
+    import homoeogwas.interact as I
+
+    rng = np.random.default_rng(14)
+    subdata = {"A": _make_sub_maf(rng), "D": _make_sub_maf(rng)}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    y = rng.standard_normal(N)
+    calls = {"n": 0}
+    orig = I.null_lmm_fit
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    I.null_lmm_fit = _counting
+    try:
+        run_pair_scan_omnib(subdata, pairs, y, np.arange(N), cap=150, bootstrap_B=40, n_jobs=1,
+                            pair_subs=("A", "D"), grm_method="grm_from_X")
+    finally:
+        I.null_lmm_fit = orig
+    # one fit for the scan whitener + one inside null_replicates for the bootstrap null: both
+    # one-time, neither scales with B (B=40 here), which is the guarantee that matters.
+    assert calls["n"] <= 2
+
+
+def test_omnib_clique_triad_is_acat_of_pairwise_omnib():
+    rng = np.random.default_rng(15)
+    subdata = {s: _make_sub_maf(rng) for s in ("A", "B", "D")}
+    groups = [(f"g{i}", f"g{i}", f"g{i}") for i in range(G)]
+    hit = 20
+    bB = block_burden_capped(subdata["B"].X, subdata["B"].gene_snp[f"g{hit}"], 150, rng, minor=True)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng, minor=True)
+    y = rng.standard_normal(N) + 3.0 * (_std(bB) * _std(bD))     # inject on the B-D pair (minor burden)
+    r = run_clique_scan_omnib(subdata, groups, y, np.arange(N), cap=150, bootstrap_B=0, n_jobs=1,
+                              grm_method="grm_from_X")
+    assert r.statistic == "omniB"
+    # group p = ACAT of the 3 pairwise omniBs (only B-D carries signal) -> further diluted; assert
+    # the injected group is the strongest.
+    assert tuple(r.top[0]["pair"])[0] == f"g{hit}"

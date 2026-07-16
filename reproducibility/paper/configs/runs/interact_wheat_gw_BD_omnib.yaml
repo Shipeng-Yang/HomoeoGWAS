@@ -1,0 +1,22 @@
+# Genome-wide wheat B-D homoeolog-pair interaction, encoding-invariant omniB primary + kinship
+# bootstrap (the paper method, now the production default). `homoeogwas interact -c <this>` reproduces
+# the paper's lead omniB = 3.9335e-06 (chr1B x chr1D) and the aggregate tail-excess.
+interact:
+  mode: pairwise
+  subgenomes: [B, D]
+  statistic: omniB
+  calibration: {method: bootstrap, B: 100, seed: 101}
+  genotype:
+    B: results/phase7/interact_validate/wheat_gw/B/all
+    D: results/phase7/interact_validate/wheat_gw/D/all
+  snp_to_gene:
+    B: results/phase7/interact_validate/wheat_gw/snp_to_gene_B.npz
+    D: results/phase7/interact_validate/wheat_gw/snp_to_gene_D.npz
+  pairs: results/phase7/interact_validate/wheat_gw/pairs_BD_headered.tsv
+  phenotype: data/processed/wheat/pheno_clean.tsv
+  sample_col: sample
+  trait: days_to_emerg
+  burden: {cap: 150, n_pc: 3}
+  grm: {method: compute_grm_maf, maf_min: 0.01}
+outputs:
+  out_dir: results/phase7/interact_cli_omnib_test

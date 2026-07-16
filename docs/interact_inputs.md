@@ -127,16 +127,22 @@ homoeogwas prep-snps \
   used as the gene id (GFF3 `ID=` or GTF `gene_id "..."`).
 - `--flank-bp` — bp added on each side of a gene when assigning SNPs (0 = inside
   gene body only).
-- `--min-snp` — drop genes with fewer than this many assigned SNPs.
+- `--min-snp` — a gene enters the burden **NPZ** (and is marked `callable=1` in
+  `genes_<S>.tsv`) only with at least this many assigned SNPs. It does **not**
+  restrict the gene-id universe: `genes_<S>.tsv` lists every gene regardless, so
+  homoeolog pairing stays defined on the full genome (callability is a separate
+  downstream gate, never a determinant of which genes are homoeologs).
 
 **Outputs** (in `--out-dir`):
 
 - `snp_to_gene_<S>.npz` — `gene_ids` (1-D string array) and `snp_idx` (object
   array; `snp_idx[i]` is the **0-based row indices into that subgenome's
   `.bim`** = the BED dosage-column indices) for gene `gene_ids[i]`.
-- `genes_<S>.tsv` — `gene_id, subgenome, chrom, start, end, strand, n_snp`. This
-  is the **authoritative gene-id universe** that `prep-homoeologs` validates
-  against, so the two files always agree on gene ids.
+- `genes_<S>.tsv` — `gene_id, subgenome, chrom, start, end, strand, n_snp,
+  callable`. This is the **full gene-id universe** (every gene, including
+  `n_snp=0`); `callable` = the gene is in the burden NPZ (`n_snp >= --min-snp`).
+  `prep-homoeologs` defines homology over this full universe and gates testability
+  on `callable`.
 
 > The stored SNP indices are 0-based `.bim` row numbers, **not** SNP IDs or
 > coordinates — this is what `interact` indexes into the genotype matrix.
@@ -161,13 +167,22 @@ homoeogwas prep-homoeologs --mode triad --subgenomes A,B,C \
 ```
 
 - `long`: columns `gene`, `group` (one row per gene). Genes are grouped by
-  `group`; one gene per subgenome per group is emitted (the gene with the most
-  callable SNPs wins ties).
+  `group`; a group must resolve to **exactly one** gene per subgenome.
 - `wide`: a `group` column plus one column per subgenome holding
   comma-separated gene lists.
 
-Only genes present in `genes_<S>.tsv` are used; a group missing any required
-subgenome is skipped.
+Homology and callability are kept strictly separate (this is what prevents a
+SNP-rich paralog from being substituted for a SNP-poor true homoeolog):
+
+- A group with **>1 candidate** in any subgenome is genuine 1:many ambiguity →
+  **dropped and recorded** (never collapsed by picking the SNP-richest member).
+- A resolved 1:1 pair/triad is emitted only if **every copy is `callable`** (and
+  `>= --min-snp-pair`); otherwise the whole group is **dropped and recorded**.
+- `--min-snp-pair` (default 1) is the per-copy callability gate.
+- Coverage (`tested / total` true groups) and the drop breakdown are printed, and
+  a per-group `<out>.audit.tsv` (status + `n_snp` per copy) is written, so the
+  fraction of true homoeolog pairs that are untestable in a SNP-sparse panel is
+  an explicit, honest number — not a silent source of mispairings.
 
 ### 2b. Compute with DIAMOND reciprocal best hits (`--method diamond-rbh`)
 

@@ -192,33 +192,41 @@ def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
                         hit = True
                 if hit:
                     n_assigned += 1
-        # order genes deterministically (chrom, start, end, id) and apply min_snp
+        # order genes deterministically (chrom, start, end, id); the NPZ (burden
+        # source for `interact`) keeps only ``>= min_snp`` genes, but the
+        # genes_<S>.tsv "universe" lists EVERY gene (n_snp 0 included) so that
+        # homoeolog pairing is defined on the full genome, independent of SNP
+        # callability — callability is a separate downstream gate, never a
+        # determinant of which genes are homoeologs. See prep-homoeologs.
         gmeta = {g["gene_id"]: g for g in by_sub.get(sub, [])}
-        kept = [gid for gid in
-                sorted(gene_snp, key=lambda gid: (gmeta[gid]["chrom"],
+        all_gids = sorted(gmeta, key=lambda gid: (gmeta[gid]["chrom"],
                                                   gmeta[gid]["start"],
                                                   gmeta[gid]["end"], gid))
-                if len(gene_snp[gid]) >= min_snp]
+        kept = [gid for gid in all_gids if len(gene_snp.get(gid, ())) >= min_snp]
         gene_ids = np.array(kept, dtype=object)
         snp_idx = np.empty(len(kept), dtype=object)
         for j, gid in enumerate(kept):
             snp_idx[j] = np.asarray(gene_snp[gid], dtype=np.int64)
         npz_path = out / f"snp_to_gene_{sub}.npz"
         np.savez(npz_path, gene_ids=gene_ids, snp_idx=snp_idx)
-        # readable gene table
+        # readable gene table = the FULL gene universe (all genes), with the
+        # callable SNP count and an explicit ``callable`` flag (n_snp>=min_snp).
         rows_tsv = [{"gene_id": gid, "subgenome": sub,
                      "chrom": gmeta[gid]["chrom"], "start": gmeta[gid]["start"],
                      "end": gmeta[gid]["end"], "strand": gmeta[gid]["strand"],
-                     "n_snp": int(len(gene_snp[gid]))} for gid in kept]
+                     "n_snp": int(len(gene_snp.get(gid, ()))),
+                     "callable": int(len(gene_snp.get(gid, ())) >= min_snp)}
+                    for gid in all_gids]
         genes_tsv = out / f"genes_{sub}.tsv"
         pd.DataFrame(rows_tsv, columns=["gene_id", "subgenome", "chrom",
                                         "start", "end", "strand",
-                                        "n_snp"]).to_csv(
+                                        "n_snp", "callable"]).to_csv(
             genes_tsv, sep="\t", index=False)
         summary["subgenomes"][sub] = {
             "n_snp_bim": int(bim_chrom.size), "n_snp_in_genes": int(n_assigned),
             "n_genes_total": int(len(by_sub.get(sub, []))),
             "n_genes_with_snp": int(len(kept)),
+            "min_snp": int(min_snp),
             "npz": str(npz_path), "genes_tsv": str(genes_tsv)}
     return summary
 
@@ -238,6 +246,26 @@ def _load_gene_universe(genes_template: str, subs: list[str]) -> dict[str, dict]
     return uni
 
 
+def _load_callable(genes_template: str, subs: list[str]) -> dict[str, set]:
+    """Read genes_<S>.tsv → {subgenome: set(gene_id with callable==1)}.
+
+    ``callable`` == the gene is in the burden NPZ (n_snp >= the prep-snps
+    ``min_snp``). Gating pairs on THIS set (not a re-thresholded n_snp) keeps the
+    prep-homoeologs "tested" set identical to what ``interact`` can actually
+    burden, so prep never reports a pair as testable that interact then drops.
+    Falls back to "all genes callable" for legacy genes_<S>.tsv without the column.
+    """
+    out: dict[str, set] = {}
+    for s in subs:
+        df = pd.read_csv(genes_template.replace("{S}", s), sep="\t",
+                         dtype={"gene_id": str})
+        if "callable" in df.columns:
+            out[s] = set(df.loc[df["callable"].astype(int) == 1, "gene_id"])
+        else:
+            out[s] = set(df["gene_id"])
+    return out
+
+
 def _gene_to_sub(uni: dict[str, dict]) -> dict[str, str]:
     g2s: dict[str, str] = {}
     for s, genes in uni.items():
@@ -248,16 +276,18 @@ def _gene_to_sub(uni: dict[str, dict]) -> dict[str, str]:
 
 def homoeologs_from_table(table: str, table_format: str, subs: list[str],
                           uni: dict[str, dict], *, gene_col: str = "gene",
-                          group_col: str = "group",
+                          group_col: str = "group", min_snp_pair: int = 1,
+                          callable_map: dict | None = None,
                           drop_missing: bool = False) -> pd.DataFrame:
     """Assemble gene_<S> rows from a user orthology table.
 
     ``long``: two columns (gene, group). ``wide``: a group column plus one
-    column per subgenome holding comma-separated gene lists. Only genes present
-    in the ``genes_<S>.tsv`` universe are emitted (so the output gene ids always
-    match the NPZ); other table ids are ignored — normal, since the universe is
-    only the SNP-carrying genes. The ignored count is reported; with
-    ``drop_missing=False`` (default) it is printed as a heads-up.
+    column per subgenome holding comma-separated gene lists. Homology is taken
+    from the table over the FULL gene universe (``genes_<S>.tsv`` now lists every
+    gene, callable or not); a resolved 1:1 pair/triad is then emitted only if all
+    copies are callable (in the burden NPZ / >= min_snp_pair), else dropped and
+    recorded — never paralog-substituted. Table ids absent from the universe are
+    ignored (reported unless ``drop_missing``).
     """
     g2s = _gene_to_sub(uni)
     groups: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -293,30 +323,77 @@ def homoeologs_from_table(table: str, table_format: str, subs: list[str],
     if n_ignored and not drop_missing:
         print(f"  note: {n_ignored} table gene id(s) not in any genes_<S>.tsv "
               "(ignored; pass --drop-missing to silence)")
-    return _assemble_rows(groups, subs, uni, drop_missing=drop_missing)
+    return _assemble_rows(groups, subs, uni, min_snp_pair=min_snp_pair,
+                          callable_map=callable_map, drop_missing=drop_missing)
 
 
 def _assemble_rows(groups: dict, subs: list[str], uni: dict[str, dict], *,
+                   min_snp_pair: int = 1, callable_map: dict | None = None,
                    drop_missing: bool) -> pd.DataFrame:
-    """One row per group with exactly one gene per subgenome (most SNPs wins)."""
-    rows, ambiguous = [], []
+    """One row per group, one TRUE homoeolog per subgenome, then callability gate.
+
+    Homology and callability are kept strictly separate:
+
+    * Homology (genome property): a group must resolve to **exactly one** gene
+      per subgenome. A group with >1 candidate in a subgenome is genuine 1:many
+      ortholog ambiguity — it is **dropped and recorded**, never silently
+      collapsed by picking the SNP-richest member (that would substitute a
+      paralog for the true homoeolog when the latter is SNP-poor).
+    * Callability (data property): a fully-resolved true pair/triad is **tested**
+      only if every member carries ``>= min_snp_pair`` callable SNPs; otherwise
+      the whole pair/triad is **dropped and recorded** — again, never substituted.
+
+    Returns the testable rows; ``out.attrs`` carries coverage counts and a
+    per-group ``audit`` frame (status in tested / ambiguous_1tomany /
+    incomplete_group / dropped_callability).
+    """
+    def _is_callable(s: str, g: str) -> bool:
+        # callability == in the burden NPZ (callable_map, the ground truth) AND
+        # >= the optional stricter min_snp_pair; falls back to n_snp when no map.
+        in_npz = (g in callable_map[s]) if callable_map is not None else True
+        return in_npz and int(uni[s].get(g, 0)) >= min_snp_pair
+
+    rows, audit = [], []
+    n_amb = n_uncall = n_incomplete = 0
     for grp, persub in groups.items():
         chosen: dict[str, str] = {}
-        ok = True
+        status = "tested"
         for s in subs:
             cands = [g for g in persub.get(s, []) if g in uni[s]]
             if not cands:
-                ok = False
+                status = "incomplete_group"
                 break
-            # pick the gene with the most callable SNPs (deterministic tiebreak)
-            cands.sort(key=lambda g: (-int(uni[s].get(g, 0)), g))
-            chosen[s] = cands[0]
             if len(cands) > 1:
-                ambiguous.append(grp)
-        if ok:
+                status = "ambiguous_1tomany"
+                break
+            chosen[s] = cands[0]
+        if status == "tested":                       # fully resolved 1:1(:1)
+            if any(not _is_callable(s, chosen[s]) for s in subs):
+                status = "dropped_callability"
+        if status == "tested":
             rows.append({f"gene_{s}": chosen[s] for s in subs})
+        elif status == "ambiguous_1tomany":
+            n_amb += 1
+        elif status == "dropped_callability":
+            n_uncall += 1
+        else:
+            n_incomplete += 1
+        # audit shows the gene actually displayed (resolved or a fallback
+        # candidate) AND its real n_snp — so an ambiguous/uncallable row never
+        # mislabels a SNP-bearing gene as n_snp 0.
+        disp = {s: chosen.get(s) or (persub.get(s) or [None])[0] for s in subs}
+        audit.append({"group": grp, "status": status,
+                      **{f"gene_{s}": disp[s] for s in subs},
+                      **{f"n_snp_{s}": int(uni[s].get(disp[s] or "", 0))
+                         for s in subs}})
     out = pd.DataFrame(rows, columns=[f"gene_{s}" for s in subs])
-    out.attrs["n_ambiguous_groups"] = len(set(ambiguous))
+    out.attrs["n_groups"] = len(groups)
+    out.attrs["n_tested"] = len(rows)
+    out.attrs["n_dropped_ambiguous"] = n_amb
+    out.attrs["n_dropped_callability"] = n_uncall
+    out.attrs["n_incomplete_group"] = n_incomplete
+    out.attrs["n_ambiguous_groups"] = n_amb        # back-compat alias
+    out.attrs["audit"] = pd.DataFrame(audit)
     return out
 
 
@@ -348,6 +425,7 @@ def _diamond_rbh(faa_a: str, faa_b: str, diamond: str, threads: int,
 def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
                        uni: dict[str, dict], *, diamond: str | None = None,
                        threads: int = 8, mode: str = "triad",
+                       min_snp_pair: int = 1, callable_map: dict | None = None,
                        gene_base_group: dict[str, str] | None = None
                        ) -> pd.DataFrame:
     """Build triad/pair rows from DIAMOND reciprocal best hits across subgenomes.
@@ -357,6 +435,12 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
     ``gene_base_group`` is given (gene_id -> base chromosome group), only pairs
     whose genes share a base group are kept — this stops an autopolyploid's
     paralogs on non-homologous chromosomes from being mistaken for homoeologs.
+
+    RBH must be run on the **full proteomes** (homology is genotype-independent);
+    callability is then a separate gate: a true RBH pair/triad is emitted only
+    if every member carries ``>= min_snp_pair`` callable SNPs, else it is
+    **dropped and recorded** (never replaced by a SNP-richer paralog). Coverage
+    counts + a per-group ``audit`` frame are attached to ``out.attrs``.
     """
     diamond = diamond or shutil.which("diamond")
     if not diamond or not shutil.which(diamond):
@@ -372,29 +456,58 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
         # reject if any gene lacks a real base group, or the groups disagree
         return len(groups) == 1 and not (groups & _NA)
 
+    def _callable(s: str, g: str) -> bool:
+        in_npz = (g in callable_map[s]) if callable_map is not None else True
+        return in_npz and int(uni[s].get(g, 0)) >= min_snp_pair
+
+    def _finish(true_rows: list, sub_order: list) -> pd.DataFrame:
+        """``true_rows`` = list of dicts {gene_<S>} that are valid homoeolog
+        groups (RBH-consistent, same base group, all genes exist). Apply the
+        callability gate (drop, never substitute) and record an audit."""
+        rows, audit, n_uncall = [], [], 0
+        for r in true_rows:
+            uncall = [s for s in sub_order if not _callable(s, r[f"gene_{s}"])]
+            status = "tested" if not uncall else "dropped_callability"
+            if status == "tested":
+                rows.append(r)
+            else:
+                n_uncall += 1
+            audit.append({**r, "status": status,
+                          **{f"n_snp_{s}": int(uni[s].get(r[f"gene_{s}"], 0))
+                             for s in sub_order}})
+        out = pd.DataFrame(rows, columns=[f"gene_{s}" for s in sub_order])
+        out.attrs["n_groups"] = len(true_rows)
+        out.attrs["n_tested"] = len(rows)
+        out.attrs["n_dropped_callability"] = n_uncall
+        out.attrs["n_dropped_ambiguous"] = 0       # RBH is 1:1 by construction
+        out.attrs["n_incomplete_group"] = 0
+        out.attrs["n_ambiguous_groups"] = 0
+        out.attrs["audit"] = pd.DataFrame(audit)
+        return out
+
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         if mode == "pairwise":
             sx, sy = subs
             rbh = _diamond_rbh(proteins[sx], proteins[sy], diamond, threads, tmp)
-            rows = [{f"gene_{sx}": a, f"gene_{sy}": b} for a, b in rbh.items()
-                    if a in uni[sx] and b in uni[sy] and g2s.get(a) == sx
-                    and g2s.get(b) == sy and _same_group(a, b)]
-            return pd.DataFrame(rows, columns=[f"gene_{sx}", f"gene_{sy}"])
+            true_rows = [{f"gene_{sx}": a, f"gene_{sy}": b}
+                         for a, b in rbh.items()
+                         if a in uni[sx] and b in uni[sy] and g2s.get(a) == sx
+                         and g2s.get(b) == sy and _same_group(a, b)]
+            return _finish(true_rows, [sx, sy])
         a, b, c = subs
         ab = _diamond_rbh(proteins[a], proteins[b], diamond, threads, tmp)
         bc = _diamond_rbh(proteins[b], proteins[c], diamond, threads, tmp)
         ac = _diamond_rbh(proteins[a], proteins[c], diamond, threads, tmp)
-        rows = []
+        true_rows = []
         for ga, gb in ab.items():
             gc = bc.get(gb)
             if gc is not None and ac.get(ga) == gc:        # consistent triangle
                 if (ga in uni[a] and gb in uni[b] and gc in uni[c]
                         and _same_group(ga, gb, gc)):
-                    rows.append({f"gene_{a}": ga, f"gene_{b}": gb,
-                                 f"gene_{c}": gc})
-        return pd.DataFrame(rows, columns=[f"gene_{a}", f"gene_{b}",
-                                           f"gene_{c}"])
+                    true_rows.append({f"gene_{a}": ga, f"gene_{b}": gb,
+                                      f"gene_{c}": gc})
+        return _finish(true_rows, [a, b, c])
 
 
 # ----------------------------------------------------------------------
@@ -444,7 +557,9 @@ def add_prep_subparsers(sub) -> None:
     ph.add_argument("--method", choices=["diamond-rbh"], default=None,
                     help="compute homoeologs via DIAMOND RBH (needs --proteins)")
     ph.add_argument("--proteins", action="append", default=[],
-                    metavar="SUB=FAA", help="per-subgenome protein FASTA; repeat")
+                    metavar="SUB=FAA", help="per-subgenome FULL protein FASTA "
+                    "(the whole proteome, NOT a SNP-callable subset — homology "
+                    "must be genotype-independent); repeat")
     ph.add_argument("--diamond", default=None, help="path to diamond binary")
     ph.add_argument("--threads", type=int, default=8)
     ph.add_argument("--restrict-base-group", action="store_true",
@@ -456,6 +571,11 @@ def add_prep_subparsers(sub) -> None:
     ph.add_argument("--drop-missing", action="store_true",
                     help="silence the heads-up about table gene ids not present "
                          "in genes_<S>.tsv (they are ignored either way)")
+    ph.add_argument("--min-snp-pair", type=int, default=1,
+                    help="callability gate: a true homoeolog pair/triad is "
+                         "tested only if EVERY copy has >= this many callable "
+                         "SNPs; under-covered true pairs are dropped + recorded "
+                         "(never paralog-substituted). Coverage is reported.")
 
 
 def cmd_prep_snps(args) -> int:
@@ -483,12 +603,16 @@ def cmd_prep_homoeologs(args) -> int:
     if args.mode == "pairwise" and len(subs) != 2:
         raise SystemExit("ERR: --mode pairwise needs 2 subgenomes")
     uni = _load_gene_universe(args.genes, subs)
+    callable_map = _load_callable(args.genes, subs)   # = burden-NPZ membership
     print(f"=== homoeogwas prep-homoeologs (mode={args.mode}) "
           f"subgenomes={subs} ===", flush=True)
+    min_snp_pair = int(getattr(args, "min_snp_pair", 1))
     if args.from_table:
         df = homoeologs_from_table(args.from_table, args.table_format, subs, uni,
                                    gene_col=args.gene_col,
                                    group_col=args.group_col,
+                                   min_snp_pair=min_snp_pair,
+                                   callable_map=callable_map,
                                    drop_missing=args.drop_missing)
         src = f"table:{args.table_format}"
     elif args.method == "diamond-rbh":
@@ -511,14 +635,30 @@ def cmd_prep_homoeologs(args) -> int:
                     gene_bg[gid] = chrom_bg.get(str(c))
         df = homoeologs_diamond(proteins, subs, uni, diamond=args.diamond,
                                 threads=args.threads, mode=args.mode,
+                                min_snp_pair=min_snp_pair,
+                                callable_map=callable_map,
                                 gene_base_group=gene_bg)
         src = "diamond-rbh" + ("+base_group" if gene_bg else "")
     else:
         raise SystemExit("ERR: provide --from-table or --method diamond-rbh")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, sep="\t", index=False)
-    n_amb = df.attrs.get("n_ambiguous_groups", 0)
-    print(f"  [{src}] wrote {len(df)} {args.mode} groups -> {args.out}"
-          + (f"  ({n_amb} groups had >1 candidate, kept most-SNP gene)"
-             if n_amb else ""))
+    # coverage: testable true homoeolog groups / all true groups, with the
+    # honest breakdown of WHY groups were dropped (never paralog-substituted).
+    n_groups = int(df.attrs.get("n_groups", len(df)))
+    n_tested = int(df.attrs.get("n_tested", len(df)))
+    n_uncall = int(df.attrs.get("n_dropped_callability", 0))
+    n_amb = int(df.attrs.get("n_dropped_ambiguous", 0))
+    n_inc = int(df.attrs.get("n_incomplete_group", 0))
+    cov = (n_tested / n_groups) if n_groups else 0.0
+    print(f"  [{src}] min_snp_pair={min_snp_pair}: {n_tested}/{n_groups} true "
+          f"{args.mode} groups testable (coverage {cov:.1%}) -> {args.out}")
+    print(f"       dropped: {n_uncall} callability (homoeolog in SNP-desert), "
+          f"{n_amb} ambiguous 1:many, {n_inc} incomplete "
+          f"(dropped, NOT paralog-substituted)")
+    audit = df.attrs.get("audit")
+    if audit is not None and len(audit):
+        audit_path = str(args.out) + ".audit.tsv"
+        audit.to_csv(audit_path, sep="\t", index=False)
+        print(f"       per-group audit (status + n_snp per copy) -> {audit_path}")
     return 0

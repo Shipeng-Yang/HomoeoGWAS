@@ -104,12 +104,19 @@ def rank_int(y: np.ndarray) -> np.ndarray:
     return stats.norm.ppf((r - 0.5) / n)
 
 
-def block_burden_capped(X: np.ndarray, snp_idx, cap: int, rng) -> np.ndarray:
-    """Mean of column-standardized dosages over a gene's SNPs; subsample to ``cap`` if larger."""
+def block_burden_capped(X: np.ndarray, snp_idx, cap: int, rng, minor: bool = False) -> np.ndarray:
+    """Mean of column-standardized dosages over a gene's SNPs; subsample to ``cap`` if larger.
+
+    ``minor=True`` first orients every SNP to its minor allele (:func:`orient_minor`), a coding fixed
+    by allele frequency rather than the arbitrary REF/ALT label. The resulting burden is invariant to
+    a REF/ALT swap (unlike the default), so it can enter a STRICTLY encoding-invariant omnibus while
+    retaining a burden's power for direction-coherent signals (the fast canonicalization path)."""
     idx = np.asarray(snp_idx, int)
     if cap and idx.size > cap:
         idx = np.sort(rng.choice(idx, size=cap, replace=False))
     M = X[:, idx].astype(float)
+    if minor:
+        M = orient_minor(M)
     mu = np.nanmean(M, axis=0)
     mu = np.where(np.isfinite(mu), mu, 0.0)
     Mi = np.where(np.isnan(M), mu, M)
@@ -118,6 +125,103 @@ def block_burden_capped(X: np.ndarray, snp_idx, cap: int, rng) -> np.ndarray:
     Z = (Mi - mu) / sd_safe
     Z[:, sd <= 1e-12] = 0.0
     return Z.mean(1)
+
+
+def orient_minor(M: np.ndarray) -> np.ndarray:
+    """Orient each dosage column to the MINOR allele (count of the less-frequent allele).
+
+    The coding is set by the integer allele count in the sample, not by the reference-genome REF/ALT
+    label, so a REF/ALT swap (``x -> 2-x``, which sends the ALT count ``n_alt -> n_ref``) re-orients to
+    the SAME physical allele and leaves the output unchanged. Integer counts (not a float frequency)
+    are used so the decision cannot flip on rounding noise near ``freq == 0.5``. A SNP whose two
+    alleles are exactly equinumerous has no defined minor allele (REF/ALT-symmetric): it is neutralised
+    to a constant column (zero variance -> dropped from the burden), which is itself invariant under
+    ``x -> 2-x``. This makes the minor-allele burden STRICTLY invariant to any REF/ALT recoding."""
+    M = np.asarray(M, float)
+    nonmiss = np.sum(~np.isnan(M), axis=0)
+    n_alt = np.nansum(M, axis=0)                       # ALT-allele count; n_ref = 2*nonmiss - n_alt
+    flip = n_alt > nonmiss + 1e-9                      # ALT is the major allele -> orient to minor
+    tie = np.abs(n_alt - nonmiss) <= 1e-9             # exact allele tie -> minor undefined
+    out = M.copy()
+    out[:, flip] = 2.0 - out[:, flip]
+    out[:, tie] = 1.0                                  # neutralise symmetric SNPs (invariant: 2-1=1)
+    return out
+
+
+def null_lmm_fit(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray = None, seed: int = 42):
+    """Fit the null LMM y = C.beta + sum_k g_k + e and return (W, V, beta, cv).
+
+    ``W = V^-1/2`` is the whitener implied by the FITTED variance components; ``V`` is the null
+    covariance that any valid null replicate must reproduce."""
+    from .lmm import fit_multi_reml
+
+    n = next(iter(kernels.values())).shape[0]
+    if C is None:
+        C = np.ones((n, 1))
+    res = fit_multi_reml(y, C, kernels, n_starts=3, random_state=int(seed) % 100000)
+    cv = res.component_var
+    V = max(cv.get("e", 1e-6), 1e-6) * np.eye(n)
+    for name, K in kernels.items():
+        V = V + cv.get(name, 0.0) * K
+    V = 0.5 * (V + V.T)
+    w, Q = np.linalg.eigh(V)
+    w = np.clip(w, 1e-10, None)
+    W = (Q * (1.0 / np.sqrt(w))) @ Q.T
+    beta, *_ = np.linalg.lstsq(W @ C, W @ y, rcond=None)      # GLS fixed effects
+    return W, V, beta, cv
+
+
+def null_replicates(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray = None,
+                    B: int = 1000, method: str = "bootstrap", seed: int = 0):
+    """``B`` null phenotypes for experiment-wide calibration under KINSHIP.
+
+    A raw ``y``-shuffle is NOT a valid null here: samples are not exchangeable under a GRM, and the
+    shuffled phenotype carries no kinship signal, so a re-fitted REML drives the genetic variance
+    components to zero and the permuted tests end up effectively UNWHITENED while the observed test
+    is whitened. Two kinship-preserving alternatives are provided:
+
+    ``bootstrap`` (recommended primary FWER basis)
+        Parametric bootstrap from the fitted null model: ``y* = C.beta_hat + V_hat^{1/2} z``,
+        ``z ~ N(0, I)``. The null covariance ``V_hat`` (hence the kinship) is reproduced exactly.
+
+    ``whitened``
+        Freedman-Lane on the WHITENED residuals: whiten with the FIXED observed-fit ``W``, project
+        out ``C`` in the whitened space, permute the residuals there (they are exchangeable under the
+        null LMM), then map back. The kinship covariance is preserved by construction.
+
+    ``yshuffle``
+        The legacy raw permutation, kept only so the mis-calibration can be quantified.
+
+    Returns ``(list_of_y_star, W_obs, cv_obs)``; the replicates live in the ORIGINAL space, so the
+    caller whitens them exactly as it whitens the observed phenotype."""
+    n = next(iter(kernels.values())).shape[0]
+    if C is None:
+        C = np.ones((n, 1))
+    W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    rng = np.random.default_rng(seed)
+    fit = C @ beta
+    out = []
+    if method == "bootstrap":
+        w_, Q_ = np.linalg.eigh(0.5 * (V + V.T))
+        L = (Q_ * np.sqrt(np.clip(w_, 1e-12, None))) @ Q_.T          # V^{1/2}
+        for _ in range(B):
+            out.append(fit + L @ rng.standard_normal(n))
+    elif method == "whitened":
+        yw = W @ y
+        Cw = W @ C
+        bw, *_ = np.linalg.lstsq(Cw, yw, rcond=None)
+        fitw = Cw @ bw
+        residw = yw - fitw
+        w_, Q_ = np.linalg.eigh(0.5 * (V + V.T))
+        L = (Q_ * np.sqrt(np.clip(w_, 1e-12, None))) @ Q_.T          # W^{-1} = V^{1/2}
+        for _ in range(B):
+            out.append(L @ (fitw + residw[rng.permutation(n)]))
+    elif method == "yshuffle":
+        for _ in range(B):
+            out.append(y[rng.permutation(n)])
+    else:
+        raise ValueError(f"unknown null method: {method}")
+    return out, W, cv
 
 
 def scols_safe(M: np.ndarray) -> np.ndarray:
@@ -250,6 +354,122 @@ def marginal_pvals(Wh: np.ndarray, y: np.ndarray, B: np.ndarray,
     return pv
 
 
+def gene_pc_scores(X: np.ndarray, snp_idx, cap: int, rng, n_pc: int = 1) -> np.ndarray:
+    """Top-``n_pc`` standardized principal-component scores (n, k) of a gene's SNP block.
+
+    Encoding-invariant companion to :func:`block_burden_capped`: a per-SNP REF/ALT swap sends the
+    standardized dosage column ``z -> -z`` (i.e. ``Z -> Z diag(+-1)``), which flips the right
+    singular vectors but leaves ``U`` and the singular values unchanged, so the PC scores are
+    numerically identical. The burden ``mean(Z)`` is NOT invariant (a signed average that assumes a
+    coherent within-gene direction and a meaningful REF/ALT sign); the PC-score interaction removes
+    that dependence on the arbitrary reference-allele coding. Each score column is sign-fixed by its
+    own largest-magnitude entry (itself flip-invariant) and scaled to unit variance."""
+    idx = np.asarray(snp_idx, int)
+    if cap and idx.size > cap:
+        idx = np.sort(rng.choice(idx, size=cap, replace=False))
+    M = X[:, idx].astype(float)
+    mu = np.nanmean(M, axis=0)
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    Mi = np.where(np.isnan(M), mu, M)
+    sd = Mi.std(0, ddof=0)
+    sd_safe = np.where(sd > 1e-12, sd, 1.0)
+    Z = (Mi - mu) / sd_safe
+    Z[:, sd <= 1e-12] = 0.0
+    return pc_scores_std(Z, n_pc)
+
+
+def pc_scores_std(Z: np.ndarray, n_pc: int = 1) -> np.ndarray:
+    """Top-``n_pc`` sign-fixed, unit-variance PC scores of an ALREADY-standardized block ``Z`` (n, m).
+    Split out from :func:`gene_pc_scores` so callers holding a pre-standardized SNP block (e.g. the
+    benchmark's ``scols_safe`` columns) reuse the same encoding-invariant scores. Directions below the
+    numerical-rank tolerance are dropped so unit-scaling never amplifies arbitrary noise."""
+    k = int(min(n_pc, Z.shape[1], max(1, Z.shape[0] - 1)))
+    U, S, _Vt = np.linalg.svd(Z, full_matrices=False)
+    tol = max(Z.shape) * np.finfo(float).eps * (S[0] if S.size else 0.0)
+    rank = int(np.sum(S > tol))
+    if rank == 0:
+        return np.zeros((Z.shape[0], 1))
+    k = int(min(k, rank, S.size))
+    scores = U[:, :k] * S[:k]
+    for j in range(k):
+        col = scores[:, j]
+        s = np.sign(col[int(np.argmax(np.abs(col)))])       # sign from the score (flip-invariant)
+        if s != 0:
+            scores[:, j] = col * s
+    sc_sd = scores.std(0, ddof=0)
+    sc_sd = np.where(sc_sd > 1e-12, sc_sd, 1.0)
+    return (scores - scores.mean(0)) / sc_sd
+
+
+def gene_pc1_matrix(sd_X, genes, snp_idx_map, cap: int, rng) -> np.ndarray:
+    """(n, G) matrix of gene PC1 scores, aligned to ``genes`` order (drop-in for a burden matrix in
+    :func:`pairwise_pvals`, giving the encoding-invariant PC1 x PC1 interaction)."""
+    cols = [gene_pc_scores(sd_X, snp_idx_map[g], cap, rng, n_pc=1)[:, 0] for g in genes]
+    return np.column_stack(cols)
+
+
+def kernel_interaction_pvals(Wh: np.ndarray, y: np.ndarray, PX: list, PY: list,
+                             C: np.ndarray = None) -> np.ndarray:
+    """Per-pair low-rank pairwise-kernel interaction p (whitened GLS F-test).
+
+    ``PX``/``PY`` are length-G lists of per-gene top-k PC score blocks (n, k_x)/(n, k_y) from
+    :func:`gene_pc_scores`. For each pair the design is ``[C, PX, PY, PX (x) PY]`` and the test is the
+    joint F-test of the ``k_x * k_y`` cross-product columns conditional on the two main-effect PC
+    blocks. This is the rank-k eigen-approximation of the Hadamard interaction of the two linear gene
+    kernels ``(Z_X Z_X') o (Z_Y Z_Y')`` (PC1 x PC1 is the k=1 case), and is encoding-invariant for the
+    same reason the scores are. F-based, so it drops into the existing permutation/ACAT null."""
+    n = y.shape[0]
+    G = len(PX)
+    yw = Wh @ y
+    if C is None:
+        Cw = (Wh @ np.ones(n)).reshape(-1, 1)
+    else:
+        Cw = Wh @ np.asarray(C, float).reshape(n, -1)
+    pv = np.empty(G)
+    for g in range(G):
+        Ax = np.asarray(PX[g], float).reshape(n, -1)
+        Ay = np.asarray(PY[g], float).reshape(n, -1)
+        cross = (Ax[:, :, None] * Ay[:, None, :]).reshape(n, -1)     # k_x * k_y cross-products
+        Axw = Wh @ Ax
+        Ayw = Wh @ Ay
+        crossw = Wh @ cross
+        Xred = np.column_stack([Cw, Axw, Ayw])
+        Xfull = np.column_stack([Xred, crossw])
+        br, _r, rank_r, _s = np.linalg.lstsq(Xred, yw, rcond=None)
+        bf, _r2, rank_f, _s2 = np.linalg.lstsq(Xfull, yw, rcond=None)
+        dfd = n - rank_f
+        if rank_f <= rank_r or dfd < 1:                              # interaction block not estimable:
+            pv[g] = np.nan                                           # NaN (not p=1) so ACAT omits it
+            continue
+        rss_r = float(((yw - Xred @ br) ** 2).sum())
+        rss_f = float(((yw - Xfull @ bf) ** 2).sum())
+        dfn = rank_f - rank_r                                        # estimable interaction df
+        denom = rss_f / dfd
+        if denom <= 1e-300:                                         # full model fits ~perfectly
+            pv[g] = 0.0 if rss_r - rss_f > 1e-300 else np.nan
+            continue
+        F = ((rss_r - rss_f) / dfn) / denom
+        pv[g] = float(stats.f.sf(max(F, 0.0), dfn, dfd))
+    return pv
+
+
+def omnibus_pvals(*pval_arrays: np.ndarray) -> np.ndarray:
+    """Per-pair ACAT (Cauchy) combination of the encoding-dependent burden-product p and the
+    encoding-invariant PC/kernel interaction p, giving an adaptive test that keeps the burden's power
+    for direction-coherent signals while covering mixed-direction / haplotype interactions.
+
+    A non-estimable component (``NaN`` or the conservative ``p==1`` sentinel) is dropped from the
+    combination rather than clipped to ``1-eps``: the latter injects a large negative Cauchy term
+    that would spuriously drag the omnibus toward the null and mask a valid component."""
+    arrs = [np.asarray(p, float).ravel() for p in pval_arrays]
+    L = arrs[0].size
+    if not arrs or any(a.size != L for a in arrs):
+        raise ValueError("omnibus_pvals: components must be non-empty and equal length")
+    stack = np.vstack(arrs)
+    stack = np.where(stack >= 1.0 - 1e-12, np.nan, stack)
+    return np.array([acat(stack[:, j]) for j in range(L)])
+
+
 def _gene_coord(sub, snp_idx) -> tuple:
     """(chrom, pos) for a gene = first SNP's chrom + median SNP bp (NA/-1 if none)."""
     idx = np.asarray(snp_idx, int)
@@ -369,6 +589,17 @@ class InteractResult:
     sigma_hat: dict = field(default_factory=dict)
     weighted: dict = None
     covariates: dict = None
+    minp_perm_emp: float = float("nan")        # empirical p of the observed min pair-p (permutation FWER)
+    minp_perm_threshold: float = float("nan")  # 5th-percentile of permuted min-p = experiment-wide FWER alpha=0.05 cutoff
+    # --- omniB + parametric-bootstrap production path (None on the legacy burden+permutation path,
+    #     so a legacy result serializes byte-identically once these are dropped from the summary) ---
+    statistic: str = "burden"                  # "omniB" (encoding-invariant primary) | "burden" (legacy)
+    calibration_method: str = "permutation"    # "bootstrap" (kinship-preserving) | "permutation" (legacy FL)
+    bootstrap_B: int = None
+    bootstrap_seed: int = None
+    minp_boot_emp: float = None                # experiment-wide FWER: empirical p of observed min-p under bootstrap null
+    minp_boot_threshold: float = None          # 5th-percentile of bootstrap min-p (alpha=0.05 experiment-wide cutoff)
+    tail_excess: dict = None                   # aggregate tail-excess: observed vs bootstrap null (per threshold)
 
 
 def _load_subgenome(plink_prefix: str, npz_path: str) -> SubgenomeData:
@@ -624,20 +855,26 @@ def run_pair_scan(
         try:
             Whp, _ = whiten_multi(kernels, ys, X=C, seed=seed_i % 100000)
             pp = pairwise_pvals(Whp, ys, BX, BY, C=C, dominance_adjust=dominance_adjust)
-            return acat(pp), lambda_gc(pp)
+            return acat(pp), lambda_gc(pp), float(np.min(pp))   # 3rd term = per-permutation min pair-p (FWER)
         except Exception:  # noqa: BLE001
             return None
 
     p_acat_emp = float("nan")
     lam_perm = float("nan")
+    minp_perm_emp = float("nan")
+    minp_perm_threshold = float("nan")
     if perm_B and perm_B > 0:
         res = Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
         res = [r for r in res if r is not None]
         if res:
             ap = np.array([r[0] for r in res])
             lam = np.array([r[1] for r in res])
+            mp = np.array([r[2] for r in res])                  # permuted min pair-p distribution
             p_acat_emp = float((1 + int((ap <= p_acat_obs).sum())) / (len(ap) + 1))
             lam_perm = float(np.median(lam))
+            # experiment-wide FWER: empirical p of observed min-p, and the alpha=0.05 min-p cutoff
+            minp_perm_emp = float((1 + int((mp <= minp_obs).sum())) / (len(mp) + 1))
+            minp_perm_threshold = float(np.quantile(mp, 0.05))
 
     return InteractResult(
         trait="", transform=transform, n=int(n_t), G=int(G),
@@ -645,7 +882,346 @@ def run_pair_scan(
         lambda_gc_obs=float(lam_obs), lambda_gc_perm_median=lam_perm,
         bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
         sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
-        weighted=weighted, covariates=cov_meta)
+        weighted=weighted, covariates=cov_meta,
+        minp_perm_emp=minp_perm_emp, minp_perm_threshold=minp_perm_threshold)
+
+
+def _batch_nested_f(Yw: np.ndarray, Xred: np.ndarray, Xadd: np.ndarray) -> np.ndarray:
+    """Whitened nested-F p for the ``Xadd`` block over EVERY column of ``Yw`` at once.
+
+    The designs depend only on genotypes, so a single orthonormalization serves all phenotype columns
+    (the observed phenotype plus every bootstrap null), which is what makes the bootstrap affordable.
+    With one added column F == t^2, so this reproduces the per-pair burden/PC1 t-test exactly and
+    generalizes to the multi-column kernel block. Non-estimable interaction blocks return NaN (not
+    p=1) so ACAT omits them rather than injecting a spurious large-p term."""
+    from scipy.linalg import orth
+
+    n = Yw.shape[0]
+    Qr, Qf = orth(Xred), orth(np.column_stack([Xred, Xadd]))
+    dfd = n - Qf.shape[1]
+    if Qf.shape[1] <= Qr.shape[1] or dfd < 1:
+        return np.full(Yw.shape[1], np.nan)
+    tot = (Yw ** 2).sum(0)
+    rss_r = tot - ((Qr.T @ Yw) ** 2).sum(0)
+    rss_f = tot - ((Qf.T @ Yw) ** 2).sum(0)
+    dfn = Qf.shape[1] - Qr.shape[1]
+    denom = rss_f / dfd
+    bad = denom <= 1e-300
+    f = np.maximum(rss_r - rss_f, 0.0) / dfn / np.where(bad, 1.0, denom)
+    return np.where(bad, np.nan, stats.f.sf(f, dfn, dfd))
+
+
+def _omnib_pair_over_Y(Wh, Yw, Cw, gsx, gsy):
+    """omniB = ACAT(minor-burden, PC1xPC1, kernel-Hadamard) for one pair over all Yw columns.
+
+    ``gsx``/``gsy`` are (minor_burden[n,1], pc1[n,1], pc_block[n,n_pc]) for the two genes, built once
+    (genotype-only). The reduced model of each component is its two constituent main effects plus the
+    fixed-effect block ``Cw`` (whitened), so every component is tested CONDITIONAL on its main
+    effects, and all three are encoding-invariant."""
+    bx, p1x, PX = gsx
+    by, p1y, PY = gsy
+    comps = []
+    for ax, ay in ((bx, by), (p1x, p1y), (PX, PY)):
+        Xred = np.column_stack([Cw, Wh @ ax, Wh @ ay])
+        cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
+        comps.append(_batch_nested_f(Yw, Xred, Wh @ cross))
+    P = np.vstack(comps)                                   # 3 x n_pheno
+    return np.array([acat(P[:, j]) for j in range(P.shape[1])])
+
+
+def run_pair_scan_omnib(
+    subdata: dict[str, SubgenomeData],
+    pairs: list,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int = 150,
+    n_pc: int = 3,
+    transform: str = "INT",
+    bootstrap_B: int = 2000,
+    bootstrap_seed: int = 2026,
+    n_jobs: int = 8,
+    pair_subs: tuple = None,
+    grm_method: str = "compute_grm_maf",
+    maf_min: float = 0.01,
+    burden_maf: float = 0.01,
+    min_snp: int = 3,
+    covariates: dict = None,
+    tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
+) -> InteractResult:
+    """Encoding-invariant primary interaction scan (omniB) with kinship-preserving bootstrap.
+
+    Per pair omniB = ACAT(minor-allele burden product, PC1xPC1 product, low-rank kernel-Hadamard),
+    each strictly invariant to a REF/ALT swap. The whitener is built ONCE from the subgenome GRMs;
+    the parametric bootstrap draws null phenotypes ``y* = C.beta_hat + V^{1/2}z`` (kinship exact) and
+    the SAME whitener rescans every pair for each ``y*`` — never refitting REML on a bootstrap
+    phenotype (that is the permutation flaw). Experiment-wide FWER is the empirical p of the observed
+    minimum omniB against the bootstrap min-p distribution; the aggregate tail-excess compares the
+    observed count of small omniB p-values to its bootstrap null at each threshold."""
+    rng = np.random.default_rng(bootstrap_seed)
+    subs = list(subdata.keys())
+    sx, sy = pair_subs
+    n_t = sample_idx.size
+    kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
+    C = None
+    cov_meta = dict(policy="none")
+    if covariates:
+        C, cov_meta = build_covariate_block(kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
+                                            extra=covariates.get("extra"))
+
+    y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
+    # whiten once (kinship is recoding- and phenotype-independent given the fitted null variance comps)
+    W, _V, _beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    Cw = (W @ (np.ones(n_t) if C is None else C)).reshape(n_t, -1)
+
+    # gene -> in-gene SNPs passing the burden MAF gate (computed IN the analysis cohort, so the
+    # scored SNP set matches the paper's omniB universe). A gene is testable only with >= min_snp
+    # such SNPs. block_burden_capped / gene_pc_scores index only these columns of the FULL matrix
+    # (cheap); restrict to the phenotyped rows AFTER (avoid copying the whole genome-wide matrix).
+    def _gene_snp_gated(sub, gid):
+        idx = np.asarray(subdata[sub].gene_snp[gid], int)
+        mu = np.nanmean(subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
+        return idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
+
+    def _feat(sub, gidx):
+        # slice to the analysis rows AND the gene's columns first (small), so the burden/PC
+        # standardization is over the phenotyped cohort -- matching the paper's omniB exactly.
+        Xg = subdata[sub].X[np.ix_(sample_idx, gidx)]
+        loc = np.arange(gidx.size)
+        b = block_burden_capped(Xg, loc, cap, rng, minor=True).reshape(-1, 1)
+        P = gene_pc_scores(Xg, loc, cap, rng, n_pc)
+        return b, P[:, :1], P
+
+    gated = {}
+    kept, feats = [], {}
+    for p in pairs:
+        gx, gy = p
+        if gx not in subdata[sx].gene_snp or gy not in subdata[sy].gene_snp:
+            continue
+        for sub, g in ((sx, gx), (sy, gy)):
+            if (sub, g) not in gated:
+                gated[(sub, g)] = _gene_snp_gated(sub, g)
+        if gated[(sx, gx)].size < min_snp or gated[(sy, gy)].size < min_snp:
+            continue
+        # key features by (subgenome, gene) -- a gene id can occur in BOTH subgenomes (e.g. a family
+        # cross with shared marker names), and keying by gene id alone would reuse one copy's features
+        # for the other and turn the interaction into a self-product.
+        if (sx, gx) not in feats:
+            feats[(sx, gx)] = _feat(sx, gated[(sx, gx)])
+        if (sy, gy) not in feats:
+            feats[(sy, gy)] = _feat(sy, gated[(sy, gy)])
+        kept.append((gx, gy))
+    G = len(kept)
+    if G < 1:
+        raise ValueError("no homoeolog pairs retained (none present in both subgenomes)")
+
+    # observed + bootstrap null phenotypes as columns, whitened by the SAME fitted-null W. The
+    # bootstrap draws y* = C.beta_hat + V_hat^{1/2} z from that same fitted null (kinship exact); they
+    # are already on the analyzed scale, so they are NOT re-transformed -- re-applying rank-INT would
+    # distort the covariance the whitener assumes. null_replicates re-fits the null with the identical
+    # seed=42, so its V_hat matches W.
+    ncol = 1 + max(int(bootstrap_B), 0)
+    Yall = np.empty((n_t, ncol))
+    Yall[:, 0] = y
+    if bootstrap_B and bootstrap_B > 0:
+        ystars, _W2, _cv2 = null_replicates(kernels, y, C=C, B=int(bootstrap_B),
+                                            method="bootstrap", seed=int(bootstrap_seed))
+        Yall[:, 1:] = np.column_stack([np.asarray(v, float) for v in ystars])
+    Yw = W @ Yall
+
+    from joblib import Parallel, delayed
+
+    # Threading backend: the per-pair work is numpy linear algebra (orth/matmul) that releases the
+    # GIL, so threads parallelize without pickling the shared whitener/phenotype/feature arrays each
+    # dispatch (the loky/multiprocessing pickling of W, Yw and every gene feature was the bottleneck).
+    def _block(lo_hi):
+        lo, hi = lo_hi
+        out = np.empty((hi - lo, ncol))
+        for j, g in enumerate(range(lo, hi)):
+            gx, gy = kept[g]
+            out[j] = _omnib_pair_over_Y(W, Yw, Cw, feats[(sx, gx)], feats[(sy, gy)])
+        return lo, out
+
+    step = max(1, G // (max(n_jobs, 1) * 8))
+    blocks = [(i, min(i + step, G)) for i in range(0, G, step)]
+    res = Parallel(n_jobs=n_jobs, backend="threading")(delayed(_block)(b) for b in blocks)
+    P = np.empty((G, ncol))
+    for lo, arr in res:
+        P[lo:lo + arr.shape[0]] = arr
+
+    p_obs = P[:, 0]
+    finite = np.isfinite(p_obs)
+    if not finite.any():
+        raise ValueError("no estimable pairs (every omniB component was non-estimable)")
+    minp_obs = float(np.nanmin(p_obs))
+    bonf = 0.05 / G
+    order = np.argsort(np.where(finite, p_obs, np.inf))
+    sig = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
+    top = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order[:5]]
+    p_acat_obs = acat(p_obs)
+
+    minp_boot_emp = minp_boot_threshold = None
+    tail_excess = None
+    if bootstrap_B and bootstrap_B > 0:
+        null_min = np.nanmin(P[:, 1:], axis=0)
+        minp_boot_emp = float((1 + int((null_min <= minp_obs).sum())) / (null_min.size + 1))
+        minp_boot_threshold = float(np.quantile(null_min, 0.05))
+        tail_excess = {}
+        for t in tail_thresholds:
+            obs_ct = int((p_obs[finite] < t).sum())
+            null_ct = (P[:, 1:] < t).sum(0).astype(float)
+            tail_excess[f"n_below_{t:g}"] = dict(
+                observed=obs_ct, null_mean=float(null_ct.mean()),
+                null_q95=float(np.quantile(null_ct, 0.95)),
+                empirical_p=float((1 + int((null_ct >= obs_ct).sum())) / (null_ct.size + 1)))
+
+    return InteractResult(
+        trait="", transform=transform, n=int(n_t), G=int(G),
+        pair_acat=float(p_acat_obs), pair_acat_emp=float("nan"), min_p=minp_obs,
+        lambda_gc_obs=float(lambda_gc(p_obs[finite])), lambda_gc_perm_median=float("nan"),
+        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
+        weighted=None, covariates=cov_meta,
+        statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
+        bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
+        minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
+        tail_excess=tail_excess)
+
+
+def run_clique_scan_omnib(
+    subdata: dict[str, SubgenomeData],
+    groups: list,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int = 150,
+    n_pc: int = 3,
+    transform: str = "INT",
+    bootstrap_B: int = 2000,
+    bootstrap_seed: int = 2026,
+    n_jobs: int = 8,
+    grm_method: str = "compute_grm_maf",
+    maf_min: float = 0.01,
+    burden_maf: float = 0.01,
+    min_snp: int = 3,
+    covariates: dict = None,
+    tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
+) -> InteractResult:
+    """n-subgenome homoeolog-clique omniB scan (triad = n=3 special case; wheat/JA/8x).
+
+    Each group's p is the ACAT of the omniB of its C(n,2) constituent subgenome pairs, so every copy
+    pair is tested with the encoding-invariant primary and the group omnibus inherits invariance.
+    Same kinship-preserving bootstrap as :func:`run_pair_scan_omnib`: whiten once, rescan every group
+    for each null phenotype, and calibrate the experiment-wide FWER and tail-excess on group p."""
+    rng = np.random.default_rng(bootstrap_seed)
+    subs = list(subdata.keys())
+    n_t = sample_idx.size
+    kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
+    C = None
+    cov_meta = dict(policy="none")
+    if covariates:
+        C, cov_meta = build_covariate_block(kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
+                                            extra=covariates.get("extra"))
+    y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
+    W, _V, _beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    Cw = (W @ (np.ones(n_t) if C is None else C)).reshape(n_t, -1)
+
+    def _gene_snp_gated(sub, gid):
+        idx = np.asarray(subdata[sub].gene_snp[gid], int)
+        mu = np.nanmean(subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
+        return idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
+
+    def _feat(sub, gidx):
+        Xg = subdata[sub].X[np.ix_(sample_idx, gidx)]
+        loc = np.arange(gidx.size)
+        b = block_burden_capped(Xg, loc, cap, rng, minor=True).reshape(-1, 1)
+        P = gene_pc_scores(Xg, loc, cap, rng, n_pc)
+        return b, P[:, :1], P
+
+    pair_defs = list(itertools.combinations(subs, 2))
+    kept, feats = [], {}
+    for group in groups:
+        gmap = dict(zip(subs, group, strict=True))
+        if not all(gmap[s] in subdata[s].gene_snp for s in subs):
+            continue
+        gated = {s: _gene_snp_gated(s, gmap[s]) for s in subs}
+        if any(gated[s].size < min_snp for s in subs):
+            continue
+        for s in subs:
+            key = (s, gmap[s])
+            if key not in feats:
+                feats[key] = _feat(s, gated[s])
+        kept.append(tuple(group))
+    G = len(kept)
+    if G < 1:
+        raise ValueError("no homoeolog groups retained (need all copies present with >= min_snp SNPs)")
+
+    ncol = 1 + max(int(bootstrap_B), 0)
+    Yall = np.empty((n_t, ncol))
+    Yall[:, 0] = y
+    if bootstrap_B and bootstrap_B > 0:
+        ystars, _W2, _cv2 = null_replicates(kernels, y, C=C, B=int(bootstrap_B),
+                                            method="bootstrap", seed=int(bootstrap_seed))
+        Yall[:, 1:] = np.column_stack([np.asarray(v, float) for v in ystars])
+    Yw = W @ Yall
+
+    from joblib import Parallel, delayed
+
+    def _block(lo_hi):
+        lo, hi = lo_hi
+        out = np.empty((hi - lo, ncol))
+        for j, gi in enumerate(range(lo, hi)):
+            group = kept[gi]
+            gmap = dict(zip(subs, group, strict=True))
+            pw = [_omnib_pair_over_Y(W, Yw, Cw, feats[(sa, gmap[sa])], feats[(sb, gmap[sb])])
+                  for sa, sb in pair_defs]
+            M = np.vstack(pw)                              # C(n,2) x ncol
+            out[j] = np.array([acat(M[:, c]) for c in range(ncol)])
+        return lo, out
+
+    step = max(1, G // (max(n_jobs, 1) * 8))
+    blocks = [(i, min(i + step, G)) for i in range(0, G, step)]
+    res = Parallel(n_jobs=n_jobs, backend="threading")(delayed(_block)(b) for b in blocks)
+    P = np.empty((G, ncol))
+    for lo, arr in res:
+        P[lo:lo + arr.shape[0]] = arr
+
+    p_obs = P[:, 0]
+    finite = np.isfinite(p_obs)
+    if not finite.any():
+        raise ValueError("no estimable pairs (every omniB component was non-estimable)")
+    minp_obs = float(np.nanmin(p_obs))
+    bonf = 0.05 / G
+    order = np.argsort(np.where(finite, p_obs, np.inf))
+    sig = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
+    top = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order[:5]]
+
+    minp_boot_emp = minp_boot_threshold = None
+    tail_excess = None
+    if bootstrap_B and bootstrap_B > 0:
+        null_min = np.nanmin(P[:, 1:], axis=0)
+        minp_boot_emp = float((1 + int((null_min <= minp_obs).sum())) / (null_min.size + 1))
+        minp_boot_threshold = float(np.quantile(null_min, 0.05))
+        tail_excess = {}
+        for t in tail_thresholds:
+            obs_ct = int((p_obs[finite] < t).sum())
+            null_ct = (P[:, 1:] < t).sum(0).astype(float)
+            tail_excess[f"n_below_{t:g}"] = dict(
+                observed=obs_ct, null_mean=float(null_ct.mean()),
+                null_q95=float(np.quantile(null_ct, 0.95)),
+                empirical_p=float((1 + int((null_ct >= obs_ct).sum())) / (null_ct.size + 1)))
+
+    return InteractResult(
+        trait="", transform=transform, n=int(n_t), G=int(G),
+        pair_acat=float(acat(p_obs)), pair_acat_emp=float("nan"), min_p=minp_obs,
+        lambda_gc_obs=float(lambda_gc(p_obs[finite])), lambda_gc_perm_median=float("nan"),
+        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
+        weighted=None, covariates=cov_meta,
+        statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
+        bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
+        minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
+        tail_excess=tail_excess)
 
 
 def run_clique_scan(
@@ -1256,7 +1832,20 @@ def cmd_interact(args) -> int:
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
     dominance_adjust = bool(burden.get("dominance_adjust", False))
-    perm_B = int(ic.get("calibration", {}).get("perm_B", 2000))
+    calib = ic.get("calibration", {})
+    # Primary = encoding-invariant omniB + kinship-preserving parametric bootstrap (the paper method);
+    # the legacy REF-burden product + Freedman-Lane permutation stays available as explicit opt-in.
+    statistic = str(ic.get("statistic", "omniB")).lower()
+    calib_method = str(calib.get("method", "bootstrap" if statistic == "omnib" else "permutation")).lower()
+    if (statistic, calib_method) not in (("omnib", "bootstrap"), ("burden", "permutation")):
+        print(f"ERROR: interact: only statistic=omniB + calibration.method=bootstrap (paper default) "
+              f"or statistic=burden + calibration.method=permutation (legacy) are supported; got "
+              f"statistic={statistic}, calibration.method={calib_method}.")
+        return 1
+    perm_B = int(calib.get("perm_B", calib.get("B", 2000)))
+    boot_B = int(calib.get("B", calib.get("perm_B", 2000)))
+    boot_seed = int(calib.get("seed", 2026))
+    n_pc = int(burden.get("n_pc", 3))
     grm_cfg = ic.get("grm", {})
     grm_method = grm_cfg.get("method", "compute_grm_maf")
     maf_min = float(grm_cfg.get("maf_min", 0.01))
@@ -1294,24 +1883,43 @@ def cmd_interact(args) -> int:
         def _g3(v):  # None-safe ".3g" — omnibus fields are None when G=0 / raw transform
             return f"{v:.3g}" if isinstance(v, (int, float)) else str(v)
 
-        for transform in ("INT", "raw"):
-            r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
-                               dominance_adjust=dominance_adjust,
-                               perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
-                               grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
-                               covariates=cov_arg, full_dump_path=_dump_path(transform))
-            results[transform] = r
-            print(f"  [{transform}] G={r.get('G')} triad_ACAT_omnibus={_g3(r.get('triad_acat_omnibus'))} "
-                  f"emp={r.get('triad_acat_omnibus_emp')}"
-                  + (f" | weighted_omnibus={_g3(r['weighted']['triad_acat_omnibus_weighted'])}"
-                     if r.get("weighted") else ""), flush=True)
-            for tag, pw in r.get("pairwise", {}).items():
-                wstr = (f" | wACAT={pw['weighted']['acat_weighted']:.3g} "
-                        f"wnsig={pw['weighted']['bonferroni_n_sig']}" if pw.get("weighted") else "")
-                print(f"    {tag}: ACAT={_g3(pw['acat'])} minP={_g3(pw['min_p'])} "
-                      f"λ_obs={pw['lambda_gc_obs']:.3f} nsig(α={pw['bonferroni_alpha']:.1e})={pw['n_sig']}{wstr}")
-                for h in pw["sig"]:
-                    print(f"        HIT {h['triad']} p={h['p']:.3g}")
+        if statistic == "omnib":
+            for transform in ("INT", "raw"):
+                r = run_clique_scan_omnib(
+                    subdata, triads, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
+                    bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
+                    n_jobs=n_jobs, grm_method=grm_method, maf_min=maf_min, covariates=cov_arg)
+                r.trait = trait
+                results[transform] = r.__dict__
+                te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
+                print(f"  [{transform}] G={r.G} statistic=omniB group-omnibus min_p={r.min_p:.3g} "
+                      f"nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
+                      f"bootFWER(minP_emp={r.minp_boot_emp})"
+                      + (f" tail(p<1e-3 obs={te['observed']} null={te['null_mean']:.1f} "
+                         f"emp_p={te['empirical_p']:.3g})" if te else ""), flush=True)
+                for h in r.sig:
+                    print(f"      HIT {h['pair']} p={h['p']:.3g}")
+        else:
+            for transform in ("INT", "raw"):
+                r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
+                                    dominance_adjust=dominance_adjust,
+                                    perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
+                                    grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
+                                    covariates=cov_arg, full_dump_path=_dump_path(transform))
+                results[transform] = r
+                print(f"  [{transform}] G={r.get('G')} "
+                      f"triad_ACAT_omnibus={_g3(r.get('triad_acat_omnibus'))} "
+                      f"emp={r.get('triad_acat_omnibus_emp')}"
+                      + (f" | weighted_omnibus={_g3(r['weighted']['triad_acat_omnibus_weighted'])}"
+                         if r.get("weighted") else ""), flush=True)
+                for tag, pw in r.get("pairwise", {}).items():
+                    wstr = (f" | wACAT={pw['weighted']['acat_weighted']:.3g} "
+                            f"wnsig={pw['weighted']['bonferroni_n_sig']}" if pw.get("weighted") else "")
+                    print(f"    {tag}: ACAT={_g3(pw['acat'])} minP={_g3(pw['min_p'])} "
+                          f"λ_obs={pw['lambda_gc_obs']:.3f} "
+                          f"nsig(α={pw['bonferroni_alpha']:.1e})={pw['n_sig']}{wstr}")
+                    for h in pw["sig"]:
+                        print(f"        HIT {h['triad']} p={h['p']:.3g}")
         n_units = len(triads)
     else:
         pairs = _load_pairs(ic["pairs"], subs)
@@ -1321,6 +1929,25 @@ def cmd_interact(args) -> int:
               + f" ({time.time()-t0:.1f}s)", flush=True)
         results = {}
         for transform in ("INT", "raw"):
+            if statistic == "omnib":
+                # encoding-invariant primary: omniB + kinship-preserving parametric bootstrap
+                r = run_pair_scan_omnib(
+                    subdata, pairs, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
+                    bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
+                    n_jobs=n_jobs, pair_subs=(subs[0], subs[1]), grm_method=grm_method,
+                    maf_min=maf_min, covariates=cov_arg)
+                r.trait = trait
+                results[transform] = r.__dict__
+                te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
+                print(f"  [{transform}] G={r.G} statistic=omniB minP={r.min_p:.3g} "
+                      f"λ_obs={r.lambda_gc_obs:.3f} nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
+                      f"bootFWER(minP_emp={r.minp_boot_emp} thr05="
+                      f"{r.minp_boot_threshold if r.minp_boot_threshold is None else f'{r.minp_boot_threshold:.2g}'})"
+                      + (f" tail(p<1e-3 obs={te['observed']} null={te['null_mean']:.1f} "
+                         f"emp_p={te['empirical_p']:.3g})" if te else ""), flush=True)
+                for h in r.sig:
+                    print(f"      HIT {h['pair']} p={h['p']:.3g}")
+                continue
             r = run_pair_scan(subdata, pairs, y_raw, sample_idx, cap=cap, transform=transform,
                               perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
@@ -1332,7 +1959,8 @@ def cmd_interact(args) -> int:
             results[transform] = r.__dict__
             print(f"  [{transform}] G={r.G} pair_ACAT={r.pair_acat:.3g} emp={r.pair_acat_emp} "
                   f"minP={r.min_p:.3g} λ_obs={r.lambda_gc_obs:.3f} λ_perm={r.lambda_gc_perm_median} "
-                  f"nsig(α={r.bonferroni_alpha:.1e})={r.n_sig}", flush=True)
+                  f"nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
+                  f"permFWER(minP_emp={r.minp_perm_emp} thr05={r.minp_perm_threshold:.2g})", flush=True)
             for h in r.sig:
                 print(f"      HIT {h['pair']} p={h['p']:.3g}")
             if r.weighted:

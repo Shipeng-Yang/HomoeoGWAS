@@ -183,6 +183,99 @@ def test_diamond_missing_errors(tmp_path):
                                 diamond="/no/such/diamond")
 
 
+def _subst_fixture(tmp_path):
+    """A/D fixture engineered to trigger the OLD paralog-substitution bug.
+
+    chrD has a SNP-poor TRUE homoeolog (gD1t, 0 SNPs) and a SNP-rich paralog
+    (gD1p, 1 SNP) in the same ortholog group as gA1; and a clean 1:1 group
+    (gA2/gD2) whose D copy gD2 is SNP-poor (0 SNPs). With the decoupled
+    definition both groups must be DROPPED (recorded), never substituted.
+    """
+    gff = tmp_path / "g.gff"
+    gff.write_text(
+        "chrA\ts\tgene\t100\t200\t.\t+\t.\tID=gA1\n"
+        "chrA\ts\tgene\t300\t400\t.\t+\t.\tID=gA2\n"
+        "chrA\ts\tgene\t500\t600\t.\t+\t.\tID=gA3\n"
+        "chrD\ts\tgene\t100\t200\t.\t+\t.\tID=gD1t\n"   # true homoeolog, 0 SNP
+        "chrD\ts\tgene\t300\t400\t.\t+\t.\tID=gD1p\n"   # paralog, has SNP
+        "chrD\ts\tgene\t500\t600\t.\t+\t.\tID=gD2\n"    # 0 SNP
+        "chrD\ts\tgene\t700\t800\t.\t+\t.\tID=gD3\n")
+    _write_bed(tmp_path / "sub_A", 12, ["chrA"] * 3, [150, 350, 550])
+    _write_bed(tmp_path / "sub_D", 12, ["chrD"] * 2, [350, 750])  # in gD1p, gD3
+    sgmap = tmp_path / "sg.tsv"
+    pd.DataFrame({"chrom": ["chrA", "chrD"], "subgenome": ["A", "D"]}).to_csv(
+        sgmap, sep="\t", index=False)
+    out = tmp_path / "prep"
+    sg = prep.load_subgenome_map(str(sgmap))
+    prep.build_snp_to_gene(str(gff), {"A": str(tmp_path / "sub_A"),
+                                      "D": str(tmp_path / "sub_D")}, sg,
+                           min_snp=1, out_dir=str(out))
+    uni = prep._load_gene_universe(str(out / "genes_{S}.tsv"), ["A", "D"])
+    return uni
+
+
+def test_genes_universe_is_full_not_callable_filtered(tmp_path):
+    """genes_<S>.tsv must list EVERY gene (incl. 0-SNP), so homology is defined
+    on the full genome — the decoupling that prevents paralog substitution."""
+    uni = _subst_fixture(tmp_path)
+    # 0-SNP true homoeologs are present in the universe (not filtered out)
+    assert uni["D"]["gD1t"] == 0 and uni["D"]["gD2"] == 0
+    assert uni["D"]["gD1p"] == 1 and uni["D"]["gD3"] == 1
+
+
+def test_uncallable_true_homoeolog_dropped_not_substituted(tmp_path):
+    uni = _subst_fixture(tmp_path)
+    tbl = tmp_path / "ortho.tsv"
+    pd.DataFrame({
+        "gene": ["gA1", "gD1t", "gD1p", "gA2", "gD2", "gA3", "gD3"],
+        "group": ["og1", "og1", "og1", "og2", "og2", "og3", "og3"],
+    }).to_csv(tbl, sep="\t", index=False)
+    df = prep.homoeologs_from_table(str(tbl), "long", ["A", "D"], uni)
+    # og1 is 1:many ambiguous -> dropped; og2's D copy is uncallable -> dropped;
+    # the SNP-rich paralog gD1p must NEVER be substituted in.
+    assert "gD1p" not in set(df.get("gene_D", []))
+    # only the clean, fully-callable og3 survives
+    assert set(zip(df["gene_A"], df["gene_D"])) == {("gA3", "gD3")}
+    audit = df.attrs["audit"].set_index("group")
+    assert audit.loc["og1", "status"] == "ambiguous_1tomany"
+    assert audit.loc["og2", "status"] == "dropped_callability"
+    assert audit.loc["og3", "status"] == "tested"
+    assert df.attrs["n_dropped_callability"] == 1
+    assert df.attrs["n_dropped_ambiguous"] == 1
+
+
+def test_gate_follows_npz_callable_not_just_nsnp(tmp_path):
+    """If prep-snps --min-snp > 1, a gene with 1 SNP is NOT in the NPZ. The pair
+    gate must follow that NPZ membership (callable_map), so prep never reports a
+    pair as testable that `interact` would then silently drop for lack of burden.
+    """
+    gff = tmp_path / "g.gff"
+    gff.write_text(
+        "chrA\ts\tgene\t100\t200\t.\t+\t.\tID=gA1\n"
+        "chrD\ts\tgene\t100\t200\t.\t+\t.\tID=gD1\n")
+    _write_bed(tmp_path / "sub_A", 12, ["chrA"], [150])   # gA1: 1 SNP
+    _write_bed(tmp_path / "sub_D", 12, ["chrD"], [150])   # gD1: 1 SNP
+    sgmap = tmp_path / "sg.tsv"
+    pd.DataFrame({"chrom": ["chrA", "chrD"], "subgenome": ["A", "D"]}).to_csv(
+        sgmap, sep="\t", index=False)
+    out = tmp_path / "prep"
+    sg = prep.load_subgenome_map(str(sgmap))
+    prep.build_snp_to_gene(str(gff), {"A": str(tmp_path / "sub_A"),
+                                      "D": str(tmp_path / "sub_D")}, sg,
+                           min_snp=2, out_dir=str(out))   # 1-SNP genes uncallable
+    uni = prep._load_gene_universe(str(out / "genes_{S}.tsv"), ["A", "D"])
+    cmap = prep._load_callable(str(out / "genes_{S}.tsv"), ["A", "D"])
+    assert uni["A"]["gA1"] == 1 and cmap["A"] == set()    # present but uncallable
+    tbl = tmp_path / "t.tsv"
+    pd.DataFrame({"gene": ["gA1", "gD1"], "group": ["og1", "og1"]}).to_csv(
+        tbl, sep="\t", index=False)
+    df = prep.homoeologs_from_table(str(tbl), "long", ["A", "D"], uni,
+                                    min_snp_pair=1, callable_map=cmap)
+    # n_snp>=1 would WRONGLY pass; the callable gate (NPZ membership) drops it
+    assert len(df) == 0
+    assert df.attrs["audit"].iloc[0]["status"] == "dropped_callability"
+
+
 def test_cli_prep_snps_dispatch(tmp_path):
     from homoeogwas.cli import main
     gff, sgmap, bed_by_sub = _fixture(tmp_path)

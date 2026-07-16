@@ -1,0 +1,24 @@
+# Rapeseed (Brassica napus AACC) homoeolog A<->C interaction scan — FLANK (body ±2kb).
+# Same-number 1:1 homoeolog pairs (diamond-RBH + MCScanX), gene body +/-2 kb SNPs.
+# Flank widens the callable-pair universe vs the body G=2 boundary mode -> G~14.
+# Used by r2_realdata_collinearity.py so the cross-copy |r| distribution for
+# rapeseed is computed on the SAME non-degenerate mode shown in Fig 2a (not G=2).
+interact:
+  mode: pairwise
+  subgenomes: [A, C]
+  genotype:
+    A: data/processed/rapeseed/horvath/A/all
+    C: data/processed/rapeseed/horvath/C/all
+  snp_to_gene:
+    A: results/phase7/bio_rapeseed/snp_to_gene_flank2000bp.npz
+    C: results/phase7/bio_rapeseed/snp_to_gene_flank2000bp.npz
+  pairs: results/phase7/bio_rapeseed/pairs_flank_same.tsv
+  phenotype: data/processed/rapeseed/horvath/pheno_clean.tsv
+  sample_col: sample
+  trait: bloom_50pct
+  burden: {cap: 150, min_snp: 3}
+  grm: {method: grm_from_X}
+  calibration: {perm_B: 500}
+outputs:
+  out_dir: results/phase7/interact_rapeseed
+  full_ranking: true

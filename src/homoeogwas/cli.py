@@ -924,6 +924,13 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--force", action="store_true",
                      help="overwrite a non-empty output directory")
 
+    # subgenome-stratified GBLUP genomic prediction (reuses the fit panel config)
+    pred = sub.add_parser("predict", help="cross-validated subgenome-stratified GBLUP genomic "
+                                          "prediction (tier0 pooled vs tier1 per-subgenome vs "
+                                          "tier2 +K_hom) from the same YAML config as `fit`")
+    pred.add_argument("-c", "--config", required=True, help="YAML run-config path")
+    pred.add_argument("-o", "--out-dir", default=None, help="override outputs.out_dir")
+
     # generalized subgenome split driven by a species YAML
     from .species_split import add_split_subparser
     add_split_subparser(sub)
@@ -1516,10 +1523,76 @@ def cmd_demo(args) -> int:
     return rc
 
 
+def cmd_predict(args) -> int:
+    """Subgenome-stratified GBLUP genomic prediction (cross-validated).
+
+    Reuses the same panel config as ``fit`` (join_samples + build_kernels), then runs cross-validated
+    GBLUP across three kernel tiers: tier0 = one pooled GRM (the rrBLUP baseline), tier1 = per-
+    subgenome GRMs as separate variance components, tier2 = tier1 + the homoeolog K_hom kernel. It
+    reports prediction accuracy (mean r^2) per tier, the paired-bootstrap gain of the subgenome-
+    stratified tiers over the pooled baseline, and top-10% selection enrichment -- the breeding
+    question 'does modelling subgenomes separately (and their homoeolog interaction) predict better?'"""
+    import json
+
+    from .gp import run_cv_gblup
+
+    t0 = time.time()
+    cfg = load_config(args.config)
+    validate_config(cfg)
+    if args.out_dir:
+        cfg.setdefault("outputs", {})["out_dir"] = args.out_dir
+    out_dir = Path(_get(cfg, "outputs.out_dir", "results/homoeogwas_predict"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    subg = _get(cfg, "panel.subgenomes")
+    trait = _get(cfg, "phenotype.trait")
+    panel = _get(cfg, "panel.name", "?")
+    print(f"=== homoeogwas predict (subgenome-stratified GBLUP) — trait={trait} "
+          f"subgenomes={subg} ===", flush=True)
+
+    analysis, y, X = join_samples(cfg)
+    n = len(analysis)
+    print(f"[1] analysis set: n={n}  var(y)={np.var(y, ddof=1):.4g} ({time.time()-t0:.1f}s)", flush=True)
+    kernels, grm_info = build_kernels(cfg, analysis)
+    per_sub = {sg: kernels[sg] for sg in subg}
+    # SNP-count weights for the pooled tier0 GRM; require a real positive count for EVERY subgenome
+    # (a -1 "unknown" sentinel from an npz GRM must not become a weight), else fall back to equal
+    # weight inside run_cv_gblup.
+    _nm = {sg: int(grm_info["raw"].get(sg, {}).get("n_markers") or 0) for sg in subg}
+    snp_counts = _nm if all(v > 0 for v in _nm.values()) else None
+    print(f"[2] per-subgenome GRMs: {list(per_sub)}  snp_counts={snp_counts} "
+          f"({time.time()-t0:.1f}s)", flush=True)
+
+    gp_cfg = cfg.get("predict", {})
+    res = run_cv_gblup(
+        y, X, per_sub, snp_counts=snp_counts,
+        tiers=tuple(gp_cfg.get("tiers", ("tier0", "tier1", "tier2"))),
+        n_folds=int(gp_cfg.get("n_folds", 5)), n_repeats=int(gp_cfg.get("n_repeats", 20)),
+        seed=int(gp_cfg.get("seed", 2026)), n_starts=int(gp_cfg.get("n_starts", 5)),
+        panel=panel, trait=trait, verbose=False)
+
+    print(f"\n[3] cross-validated prediction accuracy (mean r^2 +/- SE; {res.n_repeats}x{res.n_folds} CV):",
+          flush=True)
+    for tk, ts in res.tiers.items():
+        d = res.delta_vs_tier0.get(tk, {})
+        gain = (f"  Δr² vs tier0 = {d.get('delta_r2_mean', 0):+.4f} "
+                f"[{d.get('ci_lo', float('nan')):+.4f}, {d.get('ci_hi', float('nan')):+.4f}]"
+                + ("*" if d.get("significant_95") else "")
+                if tk != "tier0" and d else "")
+        print(f"    {tk:6s}: r^2 = {ts.mean_r2:.4f} +/- {ts.se_r2:.4f}  "
+              f"top10%-enrichment = {ts.mean_top10_enrichment:.2f}{gain}", flush=True)
+
+    out = out_dir / f"predict_{trait}.json"
+    out.write_text(json.dumps(res.to_dict(), indent=2, default=float))
+    print(f"\nhomoeogwas predict -> {out} ({time.time()-t0:.1f}s)", flush=True)
+    return 0
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.subcommand == "fit":
         return cmd_fit(args)
+    if args.subcommand == "predict":
+        return cmd_predict(args)
     if args.subcommand == "split":
         from .species_split import cmd_split
         return cmd_split(args)
