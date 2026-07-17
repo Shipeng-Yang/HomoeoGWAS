@@ -144,15 +144,20 @@ def main():
                 continue
             best = hs[0]
             nxt = hs[1] if len(hs) > 1 else None
-            margin = best["bitscore"] - (nxt["bitscore"] if nxt else 0.0)
+            # a competing paralog sits on the SAME subgenome; the cross-subgenome homoeolog ranking
+            # second is what a true 1:1:1:1 correspondence looks like (amendment 1)
+            same_sub = [h for h in hs[1:] if _sub(h["sseqid"]) == _sub(best["sseqid"])]
+            para = same_sub[0] if same_sub else None
+            margin = best["bitscore"] - (para["bitscore"] if para else 0.0)
             rbh_back = rev.get(best["sseqid"], [{}])[0].get("sseqid")
             ok_rbh = rbh_back == g
             ok_sub = _sub(best["sseqid"]) == _sub(g)
             ok_margin = margin >= MARGIN
             n_snp = None
-            if best["sseqid"] in span:
-                c, s, e = span[best["sseqid"]]
-                sub = _sub(best["sseqid"])
+            ndm8_gene = best["sseqid"].split(".")[0]   # diamond returns GhM_A05G1465.1; the GFF keys GhM_A05G1465
+            if ndm8_gene in span:
+                c, s, e = span[ndm8_gene]
+                sub = _sub(ndm8_gene)
                 if sub in bim:
                     ch, po = bim[sub]
                     n_snp = int(((ch == c) & (po >= s - 2000) & (po <= e + 2000)).sum())
@@ -160,11 +165,13 @@ def main():
                                       bitscore=best["bitscore"],
                                       next_best=(nxt["sseqid"] if nxt else None),
                                       next_bitscore=(nxt["bitscore"] if nxt else None),
-                                      margin=margin, reciprocal=ok_rbh,
+                                      nearest_same_subgenome=(para["sseqid"] if para else None),
+                                      nearest_same_subgenome_bits=(para["bitscore"] if para else None),
+                                      margin_vs_same_subgenome=margin, reciprocal=ok_rbh,
                                       subgenome_consistent=ok_sub, n_snp_pm2kb=n_snp)
             for cond, why in ((ok_rbh, "not a reciprocal best hit"),
                               (ok_sub, "subgenome-inconsistent"),
-                              (ok_margin, f"next-best within {MARGIN} bits (paralog in contention)"),
+                              (ok_margin, f"a same-subgenome paralog is within {MARGIN} bits"),
                               (n_snp is not None and n_snp >= MIN_SNP, f"<{MIN_SNP} callable SNPs")):
                 if not cond:
                     entry["testable"] = False
@@ -172,11 +179,11 @@ def main():
         res["pairs"][trait] = entry
 
     (OUT / "lead_mapping.json").write_text(json.dumps(res, indent=2))
-    print(f"\n{'trait':<18}{'CRI gene':<16}{'NDM8':<18}{'pid':>6}{'qcov':>6}{'margin':>8}{'RBH':>5}{'sub':>5}{'SNP':>6}")
+    print(f"\n{'trait':<18}{'CRI gene':<16}{'NDM8':<18}{'pid':>6}{'qcov':>6}{'paraMargin':>11}{'RBH':>5}{'sub':>5}{'SNP':>6}")
     for trait, e in res["pairs"].items():
         for g, m in e["mapped"].items():
             print(f"{trait:<18}{g:<16}{m['ndm8']:<18}{m['pident']:>6.1f}{m['qcov']:>6.1f}"
-                  f"{m['margin']:>8.1f}{str(m['reciprocal']):>5}{str(m['subgenome_consistent']):>5}"
+                  f"{m['margin_vs_same_subgenome']:>11.1f}{str(m['reciprocal']):>5}{str(m['subgenome_consistent']):>5}"
                   f"{str(m['n_snp_pm2kb']):>6}")
         print(f"  -> {trait}: {'TESTABLE' if e['testable'] else 'NON-TESTABLE: ' + '; '.join(e['reasons'])}\n")
     print(f"wrote {OUT/'lead_mapping.json'}  (no p-value was read by this script)")

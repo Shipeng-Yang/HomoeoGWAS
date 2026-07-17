@@ -1,0 +1,84 @@
+{
+  "prereg": "reproducibility/paper/notes/PREREGISTRATION_cotton_hebau_replication.md",
+  "prereg_blob": "3b675e8ca696",
+  "pairs": {
+    "fibre_length": {
+      "cri_pair": [
+        "Gh_A05G118800",
+        "Gh_D05G131200"
+      ],
+      "mapped": {
+        "Gh_A05G118800": {
+          "ndm8": "GhM_A05G1465.1",
+          "pident": 100.0,
+          "qcov": 100.0,
+          "bitscore": 699.0,
+          "next_best": "GhM_D05G1479.1",
+          "next_bitscore": 686.0,
+          "nearest_same_subgenome": "GhM_A08G2195.1",
+          "nearest_same_subgenome_bits": 251.0,
+          "margin_vs_same_subgenome": 448.0,
+          "reciprocal": true,
+          "subgenome_consistent": true,
+          "n_snp_pm2kb": 0
+        },
+        "Gh_D05G131200": {
+          "ndm8": "GhM_D05G1479.1",
+          "pident": 100.0,
+          "qcov": 100.0,
+          "bitscore": 700.0,
+          "next_best": "GhM_A05G1465.1",
+          "next_bitscore": 687.0,
+          "nearest_same_subgenome": "GhM_D08G2152.1",
+          "nearest_same_subgenome_bits": 250.0,
+          "margin_vs_same_subgenome": 450.0,
+          "reciprocal": true,
+          "subgenome_consistent": true,
+          "n_snp_pm2kb": 8
+        }
+      },
+      "testable": false,
+      "reasons": [
+        "Gh_A05G118800: <3 callable SNPs"
+      ]
+    },
+    "fibre_elongation": {
+      "cri_pair": [
+        "Gh_A01G025100",
+        "Gh_D01G022200"
+      ],
+      "mapped": {
+        "Gh_A01G025100": {
+          "ndm8": "GhM_A01G0263.1",
+          "pident": 100.0,
+          "qcov": 100.0,
+          "bitscore": 291.0,
+          "next_best": "GhM_D01G0230.1",
+          "next_bitscore": 288.0,
+          "nearest_same_subgenome": null,
+          "nearest_same_subgenome_bits": null,
+          "margin_vs_same_subgenome": 291.0,
+          "reciprocal": true,
+          "subgenome_consistent": true,
+          "n_snp_pm2kb": 11
+        },
+        "Gh_D01G022200": {
+          "ndm8": "GhM_D01G0230.1",
+          "pident": 100.0,
+          "qcov": 100.0,
+          "bitscore": 292.0,
+          "next_best": "GhM_A01G0263.1",
+          "next_bitscore": 288.0,
+          "nearest_same_subgenome": null,
+          "nearest_same_subgenome_bits": null,
+          "margin_vs_same_subgenome": 292.0,
+          "reciprocal": true,
+          "subgenome_consistent": true,
+          "n_snp_pm2kb": 67
+        }
+      },
+      "testable": true,
+      "reasons": []
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "prereg": "reproducibility/paper/notes/PREREGISTRATION_cotton_hebau_replication.md",
+  "prereg_blob": "3b675e8ca696",
+  "amendment": "24f820e",
+  "computed": "from the DISCOVERY p-values only; no replication p-value was read",
+  "n_discovery": 1245,
+  "n_replication": 419,
+  "alpha": 0.025,
+  "pairs": {
+    "fibre_elongation": {
+      "status": "TESTABLE",
+      "ndm8": [
+        "GhM_A01G0263",
+        "GhM_D01G0230"
+      ],
+      "n_snp": [
+        11,
+        67
+      ],
+      "discovery_p": 1.23e-05,
+      "discovery_t": 4.389982634196268,
+      "discovery_pve": 0.015291895980338243,
+      "power_at_discovery_effect": 0.6185675665281342,
+      "power_at_half_effect": 0.3263533068921267
+    },
+    "fibre_length": {
+      "status": "NON-TESTABLE",
+      "reason": "A copy GhM_A05G1465 carries 0 callable SNPs",
+      "ndm8": [
+        "GhM_A05G1465",
+        "GhM_D05G1479"
+      ],
+      "n_snp": [
+        0,
+        8
+      ],
+      "discovery_p": 5.99e-06,
+      "discovery_t": 4.546414915003791,
+      "discovery_pve": 0.016382960999919774,
+      "power_at_discovery_effect": 0.6525967917193902,
+      "power_at_half_effect": 0.3494848117778492
+    }
+  },
+  "mde_pve_80pct": {
+    "n_1245": 0.007591969105163688,
+    "n_419": 0.02231383207288561
+  },
+  "VERDICT": "UNDERPOWERED: the testable pair's discovery effect (PVE 1.53%) lies below the replication panel's 80%-power detection limit (PVE 2.23%). Power is 62% at the winner's-curse-inflated discovery estimate and 33% at half of it. Per prereg s6, a null is INCONCLUSIVE and carries no evidential weight against the discovery; only a positive is informative. Frozen before the look-up."
+}
