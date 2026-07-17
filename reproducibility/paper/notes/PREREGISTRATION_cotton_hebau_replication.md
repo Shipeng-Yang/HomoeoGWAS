@@ -148,3 +148,45 @@ This is one test of two pre-specified pairs. If it does not corroborate them, we
 not widen to neighbouring genes, do not switch to a local-haplotype variant of the statistic, and do
 not scan the panel for something else to report. Those are separate hypotheses requiring their own
 pre-registration and their own denominator.
+
+---
+
+## AMENDMENT 1 — 2026-07-17, after the mapping ran, before any p-value was read
+
+The mapping (`cotton_replication_map.py`, step 1) returned NON-TESTABLE for both pairs. Both
+verdicts were artefacts of §3 as I first wrote it, not properties of the data. Recording the change
+here, with the reason, before the look-up:
+
+**(a) The callable-SNP rule fired on a failed lookup.** DIAMOND returns NDM8 protein ids with a
+transcript suffix (`GhM_A05G1465.1`); the NDM8 GFF keys genes without it (`GhM_A05G1465`). The span
+lookup missed, `n_snp` stayed `None`, and `None` was then treated as "fewer than 3". A failed lookup
+is not a SNP count. Fixed by stripping the suffix; the rule itself is unchanged.
+
+**(b) The paralog-margin rule was measuring the wrong thing.** §3 required the next-best hit to be
+≥5 bits behind. But for a homoeolog query the natural next-best IS the gene's own homoeolog on the
+other subgenome, and it is ~98-99% identical by definition. Observed:
+
+| query | best | bits | next-best | bits | margin |
+|---|---|---|---|---|---|
+| Gh_A05G118800 (A) | GhM_A05G1465 | 699 | **GhM_D05G1479 (its own D copy)** | 686 | 13 |
+| Gh_D05G131200 (D) | GhM_D05G1479 | 700 | **GhM_A05G1465 (its own A copy)** | 687 | 13 |
+| Gh_A01G025100 (A) | GhM_A01G0263 | 291 | **GhM_D01G0230 (its own D copy)** | 288 | 3 |
+| Gh_D01G022200 (D) | GhM_D01G0230 | 292 | **GhM_A01G0263 (its own A copy)** | 288 | 4 |
+
+The four map to two clean, mutually consistent reciprocal pairs: each copy's best hit is its own
+subgenome's gene and its second hit is the other copy's best hit. That is exactly what a 1:1:1:1
+homoeolog correspondence looks like — the opposite of the paralog substitution the rule was written
+to catch.
+
+**Amended rule:** the margin is taken against the next-best hit **on the same subgenome as the
+query**, which is what a competing paralog would be. A cross-subgenome homoeolog ranking second is
+expected and is not evidence of contention. Every other condition in §3 (reciprocity, subgenome
+consistency, ≥3 callable SNPs) is unchanged, and all four genes already satisfy reciprocity and
+subgenome consistency at 100% identity and 100% coverage.
+
+**What protects this amendment from being outcome-driven:** the look-up is a separate script and a
+separate commit, and no interaction p-value has been read at the time of writing. The mapping script
+reads only proteomes, the GFF and the .bim; it never opens a ranking table. The audit trail is
+prereg (3b675e8ca696) → mapping → this amendment → look-up, in that order and in that many commits.
+Both fixes are mechanical (an id suffix; the definition of a competing hit) and neither was chosen by
+looking at a result.
