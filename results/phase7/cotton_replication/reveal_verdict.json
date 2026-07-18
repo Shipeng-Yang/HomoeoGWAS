@@ -1,0 +1,29 @@
+{
+  "prereg_blob": "3b675e8ca696",
+  "amendment": "24f820e",
+  "pair_cri": [
+    "Gh_A01G025100",
+    "Gh_D01G022200"
+  ],
+  "pair_ndm8": [
+    "GhM_A01G0263",
+    "GhM_D01G0230"
+  ],
+  "trait": "elongation_BLUE",
+  "n_analysed": 419,
+  "phenotype": "data/processed/cotton/pheno_m3_4_blue.tsv",
+  "omnib_p": 0.36906021946746065,
+  "omnib_perm_p": NaN,
+  "p_used": 0.36906021946746065,
+  "alpha_direction": 0.025,
+  "alpha_magnitude_only": 0.0125,
+  "anchor_sign": "POSITIVE",
+  "replication_sign": "POSITIVE",
+  "replication_beta": 0.0274362082261227,
+  "direction_concordant": true,
+  "magnitude_only_significant": false,
+  "power_at_discovery_effect": 0.7763333333333333,
+  "underpowered": true,
+  "VERDICT": "INCONCLUSIVE (null at alpha=0.025 but the test is underpowered; no weight against discovery)",
+  "note": "omniB p is encoding-invariant; direction from REF-coded burden sign vs the frozen discovery anchor. Reported whatever the outcome, per prereg s9."
+}

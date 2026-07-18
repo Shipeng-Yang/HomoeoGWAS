@@ -30,13 +30,31 @@ OUT = ROOT / "results/phase7/cotton_replication/cross_panel_ibs.json"
 N_MARK = 6000          # target shared markers for IBS; a few thousand resolves duplicates cleanly
 
 
+def _accession_to_label(fasta):
+    """GenBank accession -> A01/D13 chromosome label, from the FASTA header 'chromosome A01,' field."""
+    import re
+    m = {}
+    op = gzip.open if str(fasta).endswith(".gz") else open
+    with op(fasta, "rt") as fh:
+        for line in fh:
+            if line.startswith(">"):
+                acc = line[1:].split()[0]
+                lab = re.search(r"chromosome ([AD]\d\d)", line)
+                if lab:
+                    m[acc] = lab.group(1)
+    return m
+
+
 def build_liftover(min_mapq=30, min_blk=2000):
     """CRI(query) -> NDM8(target) position map, from primary high-mapq collinear blocks only.
 
-    Returns per-CRI-chrom sorted arrays (qstart, tstart, strand, length-of-run) good enough to lift a
-    SNP by locating its block and walking the CIGAR. Only same-labelled chromosomes (A01->A01) and
-    forward primary alignments are kept, which is what a 1:1 homoeologous-genome correspondence is.
+    The two genomes' FASTA headers use GenBank accessions (CM017411.1 vs CM032202.1), while the .bim
+    files use A01..D13 labels; both headers name the chromosome ('chromosome A01,'), so blocks are
+    kept only when the query and target resolve to the SAME label (A01->A01), and stored under that
+    label so the .bim position lookups line up. Forward primary alignments only.
     """
+    cri_lab = _accession_to_label(ROOT / "data/reference/cotton/gh_cri_v1/genome.fna")
+    ndm8_lab = _accession_to_label(Path("/mnt/nvme/cotton_hbau/GCA_018997965.1_ASM1899796v1_genomic.fa"))
     blocks = {}
     op = gzip.open if str(PAF).endswith(".gz") else open
     with op(PAF, "rt") as fh:
@@ -44,21 +62,20 @@ def build_liftover(min_mapq=30, min_blk=2000):
             f = line.rstrip("\n").split("\t")
             if len(f) < 12:
                 continue
-            qn, ql, qs, qe, strand, tn, tl, ts, te = (f[0], int(f[1]), int(f[2]), int(f[3]),
-                                                      f[4], f[5], int(f[6]), int(f[7]), int(f[8]))
+            qn, qs, strand, tn, ts, qe = f[0], int(f[2]), f[4], f[5], int(f[7]), int(f[3])
             mapq = int(f[11])
             tags = {t.split(":")[0]: t for t in f[12:]}
             if mapq < min_mapq or (qe - qs) < min_blk:
                 continue
             if "tp" in tags and tags["tp"].split(":")[-1] != "P":     # primary only
                 continue
-            # both bims label chromosomes A01..D13; PAF names them by the same label here
-            if qn != tn or strand != "+":
+            lab = cri_lab.get(qn)
+            if lab is None or lab != ndm8_lab.get(tn) or strand != "+":
                 continue
             cg = tags.get("cg")
             if not cg:
                 continue
-            blocks.setdefault(qn, []).append((qs, ts, cg.split(":")[-1]))
+            blocks.setdefault(lab, []).append((qs, ts, cg.split(":")[-1]))
     return blocks
 
 
@@ -172,15 +189,15 @@ def main():
     max_ibs = R.max(1)
     dup = int((max_ibs > 0.90).sum())            # |r|>0.9 = same or near-identical line
     res = dict(prereg_blob="3b675e8ca696", markers=int(Xc.shape[1]),
-               n_cottongvd=int(Gc.shape[0]), n_hbau=int(Gh.shape[0]),
+               n_cottongvd=int(Xc.shape[0]), n_hbau=int(Xh.shape[0]),
                max_ibs_summary=dict(min=float(max_ibs.min()), median=float(np.median(max_ibs)),
                                     p95=float(np.percentile(max_ibs, 95)), max=float(max_ibs.max())),
                n_hbau_corr_gt_0_90=dup, metric="abs_pearson_r across shared markers",
-               duplicate_hbau_samples=[sh[i] for i in np.where(max_ibs > 0.99)[0]])
+               duplicate_hbau_samples=[sh[i] for i in np.where(max_ibs > 0.90)[0]])
     OUT.write_text(json.dumps(res, indent=2))
     print(f"\nmax cross-panel IBS  min {max_ibs.min():.3f} | median {np.median(max_ibs):.3f} | "
           f"p95 {np.percentile(max_ibs,95):.3f} | max {max_ibs.max():.3f}")
-    print(f"HBAU accessions with IBS > 0.99 to a CottonGVD accession (duplicates): {dup}/{Gh.shape[0]}")
+    print(f"HBAU lines with |r| > 0.90 to a CottonGVD line (duplicates): {dup}/{Xh.shape[0]}")
     print("VERDICT:", "PANELS OVERLAP -- drop the duplicate lines and note" if dup else
           "no duplicates detected -- panels are genetically distinct at this resolution")
     print(f"wrote {OUT}")

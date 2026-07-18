@@ -1,0 +1,15 @@
+{
+  "prereg_blob": "3b675e8ca696",
+  "markers": 1069,
+  "n_cottongvd": 1245,
+  "n_hbau": 419,
+  "max_ibs_summary": {
+    "min": 0.12638813491790266,
+    "median": 0.22221092139266185,
+    "p95": 0.4701645281455076,
+    "max": 0.699144264586772
+  },
+  "n_hbau_corr_gt_0_90": 0,
+  "metric": "abs_pearson_r across shared markers",
+  "duplicate_hbau_samples": []
+}
