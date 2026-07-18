@@ -1,0 +1,18 @@
+{
+  "pair": [
+    "Gh_A01G025100",
+    "Gh_D01G022200"
+  ],
+  "panel": "CottonGVD (discovery)",
+  "n": 1245,
+  "trait": "FibElo (INT)",
+  "n_snp_B": 10,
+  "n_snp_D": 4,
+  "coding": "REF-allele (Gh_CRI v1) dosage; standardized gene burden; identical convention in both panels",
+  "beta_interaction": 0.11700671416718304,
+  "se": 0.026650581612048457,
+  "t": 4.390400024676591,
+  "p": 1.2276774339770553e-05,
+  "DIRECTION_ANCHOR": "POSITIVE",
+  "note": "Frozen BEFORE the replication phenotype was examined. A replication is called direction-concordant only if its REF-coded burden-product interaction coefficient has this same sign."
+}
