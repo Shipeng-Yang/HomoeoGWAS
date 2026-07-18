@@ -114,22 +114,33 @@ def main():
 
     shared = {}     # (chrom, ndm8_pos) -> None, plus we keep CRI pos to fetch the CRI genotype
     rng = np.random.default_rng(7)
+    _AMBIG = {frozenset("AT"), frozenset("GC")}
     for sub in ("A", "D"):
-        cri_bim = np.loadtxt(CRI / f"{sub}/all.bim", dtype=str, usecols=(0, 3))
-        hb_bim = np.loadtxt(HBAU / f"{sub}_wgs.bim", dtype=str, usecols=(0, 3))
-        hb_set = {(c, int(p)) for c, p in hb_bim}
+        cri_bim = np.loadtxt(CRI / f"{sub}/all.bim", dtype=str, usecols=(0, 3, 4, 5))
+        hb_bim = np.loadtxt(HBAU / f"{sub}_wgs.bim", dtype=str, usecols=(0, 3, 4, 5))
+        # HBAU allele pair keyed by (chrom, NDM8 pos); a1 is the plink-counted allele in both panels
+        hb_al = {(c, int(p)): (a1, a2) for c, p, a1, a2 in hb_bim}
+        cri_al = {(c, int(p)): (a1, a2) for c, p, a1, a2 in cri_bim}
         for c in sorted(set(cri_bim[:, 0])):
             if c not in blocks:
                 continue
             qpos = np.sort(cri_bim[cri_bim[:, 0] == c, 1].astype(np.int64))
-            if qpos.size > 40000:      # subsample per chrom for speed
-                qpos = np.sort(rng.choice(qpos, 40000, replace=False))
+            if qpos.size > 120000:     # subsample per chrom for speed
+                qpos = np.sort(rng.choice(qpos, 120000, replace=False))
             lifted = _lift_positions(blocks[c], qpos)
             for cri_p, ndm8_p in lifted.items():
-                if (c, ndm8_p) in hb_set:
-                    shared[(sub, c, cri_p, ndm8_p)] = True
-    print(f"shared markers (lifted CRI position present in HBAU): {len(shared)}")
-    if len(shared) < 500:
+                if (c, ndm8_p) not in hb_al:
+                    continue
+                ca1, ca2 = cri_al[(c, cri_p)]
+                ha1, ha2 = hb_al[(c, ndm8_p)]
+                # proper allele harmonisation (NOT frequency-based): the marker enters only if it is
+                # the same biallelic SNP in both assemblies; flip HBAU dosage when a1 is swapped.
+                # Drop strand-ambiguous A/T and G/C SNPs, where allele identity cannot fix orientation.
+                if frozenset((ca1, ca2)) in _AMBIG or {ca1, ca2} != {ha1, ha2}:
+                    continue
+                shared[(sub, c, cri_p, ndm8_p)] = (ca1 != ha1)   # True -> flip HBAU (2 - x)
+    print(f"shared markers (same biallelic SNP, allele-harmonised): {len(shared)}")
+    if len(shared) < 150:
         raise SystemExit("too few shared markers to compute IBS reliably")
 
     # subsample shared markers, load genotypes in both panels, harmonise alleles, compute IBS
@@ -157,28 +168,23 @@ def main():
     XcA = _load(CRI, "A/all", csA, 2); XhA = _load(HBAU, "A_wgs", csA, 3)
     XcD = _load(CRI, "D/all", csD, 2); XhD = _load(HBAU, "D_wgs", csD, 3)
 
-    # align both panels to the same marker order (intersection of what each actually had)
-    def _match(cri, hb):
+    # carry the per-marker flip flag (from allele identity) alongside the genotypes
+    def _match_flip(cri, hb, keys_sub):
         ci = {k: j for j, k in enumerate(cri[1])}
         hi = {k: j for j, k in enumerate(hb[1])}
         common = [k for k in cri[1] if k in hi]
         Xc = cri[2][:, [ci[k] for k in common]]
         Xh = hb[2][:, [hi[k] for k in common]]
-        return Xc, Xh
-    XcAm, XhAm = _match(XcA, XhA); XcDm, XhDm = _match(XcD, XhD)
-    Xc = np.hstack([XcAm, XcDm]); Xh = np.hstack([XhAm, XhDm])
-    print(f"markers used for IBS: {Xc.shape[1]}  (CottonGVD {Xc.shape[0]} x HBAU {Xh.shape[0]})")
-
-    # IBS as fraction of allele-dosage agreement after harmonising each marker to matched allele freq
-    # (a REF/ALT swap between assemblies flips 0<->2; detect by whichever orientation maximises match)
-    sc, sh = XcA[0], XhA[0]
+        flip = np.array([keys_sub[k] for k in common], bool)   # k = (sub, chrom, cri_pos, ndm8_pos)
+        return Xc, Xh, flip
+    XcAm, XhAm, flA = _match_flip(XcA, XhA, shared); XcDm, XhDm, flD = _match_flip(XcD, XhD, shared)
+    Xc = np.hstack([XcAm, XcDm]); Xh = np.hstack([XhAm, XhDm]); flip = np.concatenate([flA, flD])
+    sh = XhA[0]
     Xc = np.where(np.isnan(Xc), np.nanmean(Xc, 0), Xc)
     Xh = np.where(np.isnan(Xh), np.nanmean(Xh, 0), Xh)
-    # per-marker, pick orientation of HBAU (as-is vs 2-x) that better matches CottonGVD allele freq
-    fc = Xc.mean(0) / 2
-    fh = Xh.mean(0) / 2
-    flip = np.abs((2 - Xh).mean(0) / 2 - fc) < np.abs(fh - fc)
-    Xh = np.where(flip[None, :], 2 - Xh, Xh)
+    Xh = np.where(flip[None, :], 2 - Xh, Xh)     # allele-identity flip, NOT frequency matching
+    print(f"markers used for IBS: {Xc.shape[1]} (allele-harmonised; {int(flip.sum())} flipped) "
+          f"(CottonGVD {Xc.shape[0]} x HBAU {Xh.shape[0]})")
 
     # a duplicate accession has near-perfect genotype correlation regardless of per-marker REF/ALT
     # orientation, so |Pearson r| across markers is the robust, flip-invariant duplicate signal
