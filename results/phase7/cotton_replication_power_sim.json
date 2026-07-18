@@ -1,0 +1,26 @@
+{
+  "prereg_blob": "3b675e8ca696",
+  "amendment": "24f820e",
+  "pair": [
+    "GhM_A01G0263",
+    "GhM_D01G0230"
+  ],
+  "n_phenotyped": 419,
+  "snps": [
+    11,
+    67
+  ],
+  "vc_split": {
+    "K_A": 0.3,
+    "K_D": 0.49999999999999994,
+    "e": 0.2
+  },
+  "alpha": 0.025,
+  "discovery_pve": 0.0153,
+  "note": "power on real HBAU genotypes; no interaction p read",
+  "power": {
+    "discovery effect (PVE 1.53%)": 0.7763333333333333,
+    "coefficient halved -> PVE/4": 0.22566666666666665,
+    "PVE/2 (for comparison w/ analytic)": 0.45166666666666666
+  }
+}
