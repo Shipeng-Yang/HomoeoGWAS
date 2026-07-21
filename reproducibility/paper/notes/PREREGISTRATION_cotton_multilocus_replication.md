@@ -102,3 +102,62 @@ but the previous one is cited in the report.
 5. The hebau panel has been used before (single-lead protocol), so it is **not** a pristine blinded
    panel. That is disclosed here; the defence is that these three loci specifically have never been
    examined in it.
+
+---
+
+# Amendment 1 — written before any hebau phenotype was read
+
+## The fault
+
+Candidates were selected on the `aggregate_perpair` table, whose p-value is **omniB** — an ACAT
+combination of (minor-allele burden product, gene-PC1 × PC1 product, low-rank kernel-Hadamard) —
+but the test specified above is the **burden-product GLS**. Selection statistic and test statistic
+were therefore not the same quantity. This is an error in the original protocol, not a property of
+the data.
+
+## What the component diagnosis showed (discovery side only, no hebau phenotype read)
+
+| locus | omniB | minor-burden | PC1×PC1 | kernel | driver |
+|-------|-------|--------------|---------|--------|--------|
+| L1 | 6.09e-6 | 1.69e-2 | 1.60e-2 | 2.03e-6 | kernel |
+| L2 | 2.10e-5 | 1.13e-5 | 1.85e-5 | 3.02e-3 | **burden** |
+| L3 | 1.55e-4 | 0.974 | 0.129 | 5.16e-5 | kernel (burden null) |
+| S1 | 1.37e-5 | 0.905 | 0.899 | 4.55e-6 | kernel (burden null) |
+| published FibLen lead | 8.98e-6 | 5.98e-6 | 6.00e-6 | 4.10e-3 | **burden** |
+
+Three of the four frozen loci carry no burden-product signal at all. This project has already
+ruled on that situation: a rapeseed hit driven solely by the kernel component was declared
+NOT_SUPPORTED and was not reported as a discovery. The same standard applies here, so L1, L3 and S1
+were never burden-product candidates and must not enter a burden-product replication.
+
+## Pre-test power (real hebau genotypes, real kinship, injected discovery effect)
+
+| locus | full effect | half effect (winner's-curse haircut) |
+|-------|-------------|--------------------------------------|
+| L1 | 0.440 | 0.275 |
+| L2 | 0.897 | 0.625 |
+| L3 | 0.056 | 0.052 |
+| S1 | 0.056 | 0.059 |
+
+Mean power over the three originally frozen independent loci at the halved effect is 0.317, below
+the 50% gate this protocol set in advance. The original three-locus design is therefore declared
+**INCONCLUSIVE BY DESIGN** and is not run.
+
+## Amended test
+
+**One locus, L2 (Gh_A06G029400 | Gh_D06G029100).** Everything else in the protocol is unchanged:
+same engine, same coding, `fiber_length_BLUE`, frozen direction (discovery beta = +0.1194, so the
+replication must be positive), one-sided P < 0.05, single test so no multiplicity adjustment.
+Pre-test power 0.897 at the discovery effect and 0.625 at half of it, which clears the 50% gate.
+
+This is a **single-locus** replication. It cannot support any "multi-locus" claim, and the report
+must say so. L1, L3, S1 and the previously examined FibElo lead are reported as excluded, with the
+reason, so that the reader sees the full candidate set rather than the surviving member.
+
+## What is NOT being done, deliberately
+
+Switching the test statistic to omniB would make all four loci "live" again and would align the
+test with the selection rule. It is not done, because omniB has no signed direction (the kernel
+component is unsigned), the pre-registered directional criterion could not then be applied, and
+choosing the statistic that rescues the most loci after seeing which loci are null is exactly the
+circularity this protocol exists to prevent.
