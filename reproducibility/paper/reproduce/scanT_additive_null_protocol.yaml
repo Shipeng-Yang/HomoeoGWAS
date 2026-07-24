@@ -1,0 +1,126 @@
+scan: Scan T wheat flank, curated 1:1:1 HCTriads, three kernels, REF burden, cap 150
+question: >
+  Can the burden-product interaction statistic reach the observed values under a genetic
+  architecture that is additive by construction, simulated on the real genotypes with their real
+  linkage disequilibrium and relatedness? This is the burden-product form of the mechanism in
+  de los Campos, Sorensen & Toro 2019 (G3) and Hemani et al. 2021 (Nature).
+frozen_before_running: 2026-07-22
+
+why_the_earlier_audit_is_insufficient:
+  established: >
+    Adding arbitrary multiples of the pair's own two SCALAR burdens to the phenotype leaves the
+    statistic unchanged to max |delta P| 2e-13, because the residualised product column q is
+    orthogonal in the V^-1 metric to span{1, b_X, b_Y}.
+  not_established: >
+    Within-gene additive architectures G_X alpha with alpha not proportional to the equal burden
+    weights; local haplotype effects; an untyped variant jointly tagged by the two burdens; long
+    range LD. All can make q' V^-1 y nonzero.
+
+observed:
+  family_nominal: 38304
+  family_eligible: 38295
+  eligibility_rule: s_min/s_max of the equilibrated raw design > sqrt(eps) = 1.4901161193847656e-08
+  chr5_AD: {genes: [TraesCS5A02G169500, TraesCS5B02G166300, TraesCS5D02G173900],
+            nsnp_selected: [8, 25, 4], abs_t: 5.153276, point_p: 3.206835e-07, maxT_p_adj: 0.0109}
+  chr1_BD: {genes: [TraesCS1A02G125400, TraesCS1B02G143800, TraesCS1D02G128400],
+            nsnp_selected: [20, 132, 30], abs_t: 4.748396, point_p: 2.418075e-06, maxT_p_adj: 0.0776}
+  fitted_null_variance_components: {A: 0.068596, B: 0.385993, D: 0.038821, e: 0.391691}
+  h2_narrow_sense: 0.5575          # (0.0686+0.3860+0.0388)/0.8851
+  null_max_abs_t_q95: 4.8421       # exact vector persisted as scanT_maxT_param_B9999_v2_nullmax.npz
+
+phenotype_generation:
+  form: y = Z_poly beta_poly + Z_sparse beta_sparse + e
+  interaction_free_because: >
+    y is a linear function of real SNP dosages plus independent noise, so E(y|X) contains no
+    product, dominance, haplotype or burden-nonlinear term, and causal variants are chosen without
+    reference to the phenotype.
+  scale: >
+    Generated directly on the analysed scale. Rank-INT of a latent additive phenotype is nonlinear
+    and would itself create interaction; that is tested separately in cell SCALE, not mixed into
+    the primary cells.
+  polygenic_background: 20000 cached real SNPs, Var(beta) proportional to H^-0.5, H = 2p(1-p)
+  background_rationale: >
+    A purely sparse architecture leaves REML with almost no genetic variance to estimate, which
+    would put the null at a different operating point than the observed scan -- the same defect
+    that invalidates y-shuffle. A real-SNP background keeps additivity provable, unlike a GRM draw.
+  subgenome_allocation_of_sparse_effects: {A: 42, B: 235, D: 23}   # 300 total, observed A/B/D ratio
+
+global_cells:
+  B_per_cell: 5000
+  h2_total: 0.5575
+  cells:
+    UNTYPED:  {sparse_from: membership==0, n_sparse: 300, h2_sparse: 0.15, effects: H^-0.5, primary: true}
+    TYPED:    {sparse_from: membership==1, n_sparse: 300, h2_sparse: 0.15, effects: H^-0.5}
+    RARE:     {sparse_from: membership==0, n_sparse: 300, h2_sparse: 0.15, effects: H^-1,
+               mac_quota: {mac_1_2: 120, mac_3_16: 90, maf_01_05: 60, maf_ge_05: 30}}
+    POLYONLY: {sparse_from: none, n_sparse: 0, h2_sparse: 0.0, effects: H^-0.5}
+    SCALE:    {sparse_from: membership==0, n_sparse: 300, h2_sparse: 0.15, effects: H^-0.5,
+               generated_on: raw_scale_then_rank_INT}
+  exact_GRM_control: >
+    Not re-run here. The parametric bootstrap already run (scanT_maxT_param_B9999_v2) IS that
+    control; its empirical rejection at the frozen cutoff is 0.05 by construction, so it validates
+    the cutoff rather than the architecture.
+
+conditional_cells:
+  unit: the named lead pair only, not a full scan
+  candidates: >
+    SNPs of the two TESTED copies (1B and 1D for chr1; 5A and 5D for chr5). Both leads are under
+    the 150-SNP cap, so no burden subsampling is involved. A candidate qualifies only if it is
+    polymorphic, is selected into exactly one burden (membership==1, so masking is exact), leaves
+    at least 2 SNPs in its gene after masking, and has max dosage r^2 >= 0.10 with at least one
+    retained SNP of that gene.
+  masking: >
+    Remove the candidate before standardisation, recompute the gene burden from the remaining
+    SNPs, re-standardise across the 827 accessions. Verified against the cached burden by
+    reconstructing the UNmasked burden to atol 1e-7 / rtol 1e-6 first.
+  rho_q: >
+    cor(q, (I - P_{W[1,bX,bY]}) W z) with q the residualised whitened product column. This is the
+    geometry that lets an omitted additive variant look like an interaction. Candidate selection
+    must never use the observed phenotype.
+  candidate_draws:
+    representative: 0.5/0.5 between the two copies, then uniform over qualifying candidates
+    high_susceptibility: same copy balance, uniform over the top decile of |rho_q| -- an
+      adversarial stress test, NOT an estimate of how often causal variants have this geometry
+  local_pve: [0.001, 0.005, observed_marginal]
+  observed_marginal_definition: >
+    the marginal additive PVE actually attributable to that gene region in the real phenotype,
+    so that at least one cell is anchored to data rather than to a chosen number
+  report_alongside: implied carrier phenotype shift in SD for the drawn candidate's MAC
+  B_per_cell: 10000
+
+controls_that_must_pass_first:
+  masked_design_null: local_pve = 0; the masked-design pair statistic must be nominal
+  correct_mean: refit including the causal genotype z in the mean model; rejection must return to 5%
+  true_interaction_positive: inject a real product effect; the pipeline must recover it
+  analytic_check: simulated noncentrality must track the analytic prediction proportional to beta q'Wz
+  rule: if any control fails, stop and fix the harness; do not interpret any architecture cell
+
+interpretation_frozen:
+  global_primary: UNTYPED cell empirical FWER at the frozen max|t| cutoff, nominal 0.05
+  calibrated: two-sided 90% exact binomial interval lies wholly within [0.04, 0.06]
+  inflated: one-sided 95% lower bound exceeds 0.06
+  grossly_inflated: one-sided 95% lower bound exceeds 0.10
+  deflated: one-sided 95% upper bound below 0.04
+  otherwise: inconclusive
+  scope_rule: >
+    Inflation confined to the RARE cell narrows the method's stated scope; inflation in UNTYPED or
+    TYPED breaks the type-I calibration claim itself.
+  locus_explained_away_requires_all_three:
+    - its masked-design null control is calibrated
+    - adding the causal SNP to the mean model restores nominal 5%
+    - in the representative local_pve = 0.001 cell, the one-sided 95% lower bound for
+      Pr(|t| >= observed) is at least 0.05
+  locus_not_reproduced: >
+    simultaneous upper bounds below 0.01 across all conditional cells for that locus. This licenses
+    "not reproduced by the prespecified additive models" and NOT "not phantom epistasis".
+  stress_only: >
+    if the threshold is met only for high-|rho_q| candidates or local_pve 0.005, report
+    "vulnerable under a stress architecture", not "explained away".
+  leads_judged_independently: >
+    chr5 and chr1 are judged separately and no inference transfers between them. If they disagree,
+    both outcomes are reported as they fall; a combined narrative is not permitted.
+  a_calibrated_global_FWER_does_not_license: >
+    "chr5 is not phantom epistasis". Global averaging can look calibrated while a selected locus
+    sits on an unusually dangerous LD configuration. Only the conditional cells speak to a locus.
+  a_conditional_simulation_cannot_prove: >
+    that the corresponding causal variant actually exists.

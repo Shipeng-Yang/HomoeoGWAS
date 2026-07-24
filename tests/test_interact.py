@@ -5,9 +5,13 @@ an injected interaction is detected in the correct subgenome-pair and isolated f
 others; a pure-noise null produces no Bonferroni hits. These guard the engine before the
 DL-weighting and multi-trait extensions are layered on.
 """
+import json
+
 import numpy as np
 import pytest
+from scipy import stats
 
+import homoeogwas.interact as I
 from homoeogwas.interact import (
     FrozenTraitSet,
     SubgenomeData,
@@ -384,12 +388,21 @@ def test_weighted_scan_prior_helps_true_pair():
     weights = {(f"g{i}", f"g{i}"): (5.0 if i == hit else 1.0) for i in range(G)}
 
     r = run_pair_scan(subdata, pairs, y, np.arange(N), transform="INT", perm_B=0,
-                      pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=weights)
+                      pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=weights,
+                      primary_weighting="weighted")
     assert r.weighted is not None
     # weighted ACAT is at least as significant as unweighted (true signal up-weighted)
     assert r.weighted["acat_weighted"] <= r.pair_acat + 1e-12
     # the up-weighted true pair is among the weighted Bonferroni hits
     assert any(h["pair"][0] == f"g{hit}" for h in r.weighted["sig"])
+    # exclusivity: the procedure that was NOT predeclared emits no rejections
+    assert r.sig is None and r.weighted["role"] == "primary"
+    r_unw = run_pair_scan(subdata, pairs, y, np.arange(N), transform="INT", perm_B=0,
+                          pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=weights)
+    # a suppressed procedure reports null, never an empty list that reads as "found nothing"
+    assert r_unw.weighted["sig"] is None and r_unw.weighted["bonferroni_n_sig"] is None
+    assert r_unw.weighted["role"] == "exploratory_no_rejections_emitted"
+    assert r_unw.inference_plan["primary_weighting"] == "unweighted"
 
 
 def test_weighted_null_no_type1_inflation():
@@ -401,8 +414,13 @@ def test_weighted_null_no_type1_inflation():
     weights = {(f"g{i}", f"g{i}"): float(rng.uniform(0.2, 5.0)) for i in range(G)}
     r = run_pair_scan(subdata, pairs, y, np.arange(N), transform="INT", perm_B=0,
                       pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=weights)
-    assert r.n_sig == 0
-    assert r.weighted["bonferroni_n_sig"] == 0
+    assert r.n_sig == 0                                  # unweighted is primary here
+    assert r.weighted["bonferroni_n_sig"] is None        # weighted is suppressed, not "zero hits"
+    rw = run_pair_scan(subdata, pairs, y, np.arange(N), transform="INT", perm_B=0,
+                       pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=weights,
+                       primary_weighting="weighted")
+    assert rw.weighted["bonferroni_n_sig"] == 0          # evaluated, and finds nothing under the null
+    assert rw.n_sig is None
 
 
 # ----------------------------------------------------------------------------- multi-trait (#4)
@@ -868,3 +886,694 @@ def test_omnib_clique_triad_is_acat_of_pairwise_omnib():
     # group p = ACAT of the 3 pairwise omniBs (only B-D carries signal) -> further diluted; assert
     # the injected group is the strongest.
     assert tuple(r.top[0]["pair"])[0] == f"g{hit}"
+
+
+# --- multiplicity / estimability regression suite (engine v2) -------------------------------------
+
+def _basis(n, k):
+    e = np.zeros(n)
+    e[k] = 1.0
+    return e
+
+
+def test_fwl_full_rank_reproduces_frozen_wheat_statistic():
+    # orthonormal construction with the wheat scan geometry (n=827, 3 nuisance columns, df=823):
+    # the frozen headline t must map to the frozen headline p through the new estimator.
+    n, t_target = 827, 4.748395874321968
+    Z = np.column_stack([_basis(n, k) for k in range(3)])
+    x = _basis(n, 3)
+    y = (t_target / np.sqrt(823)) * x + _basis(n, 4)
+    p, why, ok = I._coef_pval_fwl(Z, x, y)
+    assert why is None and ok
+    assert abs(p / 2.418077841738446e-06 - 1.0) < 1e-9
+    # and it agrees with a plain OLS t-test on the assembled design
+    X = np.column_stack([Z, x])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ beta
+    se = np.sqrt((resid @ resid) / 823 * np.linalg.inv(X.T @ X)[3, 3])
+    p_ref = float(2 * stats.t.sf(abs(beta[3] / se), 823))
+    assert abs(np.log10(p / p_ref)) < 1e-9
+
+
+def test_fwl_explicit_residual_survives_cancellation():
+    # on a near-perfect fit, rss as y'y - (U'y)'(U'y) cancels catastrophically and goes NEGATIVE;
+    # clamping that to zero turned a perfectly valid model into NaN. The explicit residual does not.
+    n, found = 400, 0
+    for seed in range(40):
+        rng = np.random.default_rng(seed)
+        zA = _std(rng.standard_normal(n))
+        zB = _std(rng.standard_normal(n))
+        X = np.column_stack([np.ones(n), zA, zB, zA * zB])
+        y = X @ np.array([1.0, 2.0, -1.5, 0.7]) + 1e-8 * rng.standard_normal(n)
+        d = np.sqrt(np.einsum("ij,ij->j", X, X))
+        U, _s, _Vt = np.linalg.svd(X / d, full_matrices=False)
+        Uy = U.T @ y
+        rss_subtractive = float(y @ y) - float(Uy @ Uy)
+        rss_direct = float((y - U @ Uy) @ (y - U @ Uy))
+        if rss_subtractive > 0:
+            continue
+        found += 1
+        assert rss_direct > 0
+        p, why, ok = I._coef_pval_fwl(X[:, :3], X[:, 3], y)
+        assert why is None and ok and np.isfinite(p)   # explicit residual keeps the model estimable
+    assert found > 0, "no cancellation case found; the construction stopped exercising the bug"
+
+
+def test_fwl_duplicate_nuisance_keeps_estimable_target():
+    # two identical nuisance columns: the full design is rank deficient but the target is not, so
+    # gating on the whole design's condition number would discard a valid test
+    rng = np.random.default_rng(1)
+    n = 400
+    z = _std(rng.standard_normal(n))
+    x = _std(rng.standard_normal(n))
+    y = rng.standard_normal(n) + 0.25 * x
+    Z = np.column_stack([np.ones(n), z, z])
+    p, why, ok = I._coef_pval_fwl(Z, x, y)
+    assert why is None and ok and np.isfinite(p)
+    Xc = np.column_stack([np.ones(n), z, x])
+    beta, *_ = np.linalg.lstsq(Xc, y, rcond=None)
+    resid = y - Xc @ beta
+    se = np.sqrt((resid @ resid) / (n - 3) * np.linalg.inv(Xc.T @ Xc)[2, 2])
+    p_ref = float(2 * stats.t.sf(abs(beta[2] / se), n - 3))
+    assert abs(np.log10(p / p_ref)) < 1e-9
+
+
+def test_fwl_target_inside_nuisance_span_is_not_estimable():
+    rng = np.random.default_rng(2)
+    n = 200
+    z = _std(rng.standard_normal(n))
+    Z = np.column_stack([np.ones(n), z])
+    p, why, ok = I._coef_pval_fwl(Z, 2.0 * z, rng.standard_normal(n))
+    assert np.isnan(p) and why == "target_nonestimable" and not ok
+
+
+def test_pairwise_reports_mask_and_never_returns_p_one_for_degenerate():
+    # gene 0 has an interaction column inside the span of [1, bX, bY]; gene 1 is ordinary
+    rng = np.random.default_rng(3)
+    n = 120
+    bx = np.column_stack([_std(rng.standard_normal(n)), _std(rng.standard_normal(n))])
+    by = bx.copy()
+    by[:, 1] = _std(rng.standard_normal(n))
+    bx[:, 0] = np.repeat([0.0, 1.0], n // 2)             # binary => bX*bY == bX when bY == bX
+    by[:, 0] = bx[:, 0]
+    y = rng.standard_normal(n)
+    pv, diag = pairwise_pvals(np.eye(n), y, bx, by, return_diag=True)
+    assert np.isnan(pv[0]) and not diag["estimable"][0]
+    assert diag["exclusions"][0] == "target_nonestimable"
+    assert np.isfinite(pv[1]) and diag["n_planned"] == 2
+
+
+def test_top_lists_never_contain_nonfinite_p():
+    pv = np.array([np.nan, 0.3, np.nan, 0.1])
+    est = np.isfinite(pv)
+    order = [int(i) for i in np.argsort(np.where(est, pv, np.inf)) if est[i]]
+    top = [float(pv[i]) for i in order[:5]]
+    assert top == [0.1, 0.3]
+
+
+def test_json_strict_round_trip_maps_nonfinite_to_null():
+    payload = dict(a=float("nan"), b=[np.float64("inf"), -np.inf, np.int64(3), np.bool_(True)],
+                   c=dict(d=(np.nan, 0.5)), e=np.array([1.0, np.nan]))
+    txt = json.dumps(I._json_safe(payload), allow_nan=False)
+    assert "NaN" not in txt and "Infinity" not in txt
+    back = json.loads(txt)
+    assert back["a"] is None and back["b"][:2] == [None, None]
+    assert back["b"][2] == 3 and back["b"][3] is True
+    assert back["c"]["d"] == [None, 0.5] and back["e"] == [1.0, None]
+
+
+def _fake_clique_scan(monkeypatch, pmap, **kw):
+    """Run run_clique_scan with the per-contrast p-values replaced by fixed vectors."""
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        key = (BX.shape[1], float(BX[0, 0]), float(BY[0, 0]))
+        pv = np.asarray(pmap[key], float)
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    rng = np.random.default_rng(0)
+    subs = kw.pop("subs", ["A", "B", "D"])
+    g = kw.pop("g", 10)
+    subdata = {s: _make_sub(rng, g=g) for s in subs}
+    groups = [(f"g{i}",) * len(subs) for i in range(g)]
+    return run_clique_scan(subdata, groups, rng.standard_normal(N), np.arange(N),
+                           cap=150, transform="INT", perm_B=0, grm_method="grm_from_X", **kw)
+
+
+def test_p_between_local_and_global_threshold_is_not_globally_rejected(monkeypatch):
+    # G=10, K=3 => global 0.05/30 = 1.667e-3, within-contrast 0.05/10 = 5e-3.
+    # p = 3e-3 sits strictly between: it must be exploratory-only, never a top-level hit.
+    g, k = 10, 3
+    base = np.full(g, 0.5)
+    ab = base.copy()
+    ab[2] = 3e-3
+    pv_by_call = [ab, base.copy(), base.copy()]
+    calls = {"i": 0}
+
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        pv = pv_by_call[calls["i"] % len(pv_by_call)]
+        calls["i"] += 1
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    rng = np.random.default_rng(0)
+    subdata = {s: _make_sub(rng, g=g) for s in ("A", "B", "D")}
+    groups = [(f"g{i}",) * 3 for i in range(g)]
+    r = run_clique_scan(subdata, groups, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X")
+    ab_res = r["pairwise"]["AB"]
+    assert ab_res["bonferroni_alpha"] == pytest.approx(0.05 / (g * k))
+    assert ab_res["n_sig"] == 0 and ab_res["sig"] == []
+    exp = ab_res["exploratory_within_contrast"]
+    assert exp["n_below_per_contrast_alpha"] == 1
+    assert exp["per_test_alpha"] == pytest.approx(0.05 / g)
+    # the exploratory block must NOT expose a second selectable rejection set
+    assert "sig" not in exp and "n_sig" not in exp
+    assert ab_res["min_p_adjusted_bonferroni"] == pytest.approx(3e-3 * g * k)
+    assert r["families"]["pairwise_all"]["n_tests"] == g * k
+
+
+def test_contrast_omnibus_is_corrected_across_k(monkeypatch):
+    g = 10
+    strong = np.full(g, 0.5)
+    strong[0] = 1e-4
+    calls = {"i": 0}
+    seq = [strong, np.full(g, 0.5), np.full(g, 0.5)]
+
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        pv = seq[calls["i"] % 3]
+        calls["i"] += 1
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    rng = np.random.default_rng(0)
+    subdata = {s: _make_sub(rng, g=g) for s in ("A", "B", "D")}
+    groups = [(f"g{i}",) * 3 for i in range(g)]
+    r = run_clique_scan(subdata, groups, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X")
+    for tag in ("AB", "AD", "BD"):
+        pw = r["pairwise"][tag]
+        assert pw["acat_adjusted_bonferroni"] == pytest.approx(min(pw["acat"] * 3, 1.0))
+        assert pw["acat_family_id"] == "contrast_omnibus"
+    assert r["families"]["contrast_omnibus"]["per_test_alpha"] == pytest.approx(0.05 / 3)
+
+
+def test_group_omnibus_is_reported_as_an_inference(monkeypatch):
+    g = 10
+    hit = np.full(g, 0.5)
+    hit[4] = 1e-6
+    calls = {"i": 0}
+
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        pv = hit if calls["i"] % 3 == 0 else np.full(g, 0.5)
+        calls["i"] += 1
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    rng = np.random.default_rng(0)
+    subdata = {s: _make_sub(rng, g=g) for s in ("A", "B", "D")}
+    groups = [(f"g{i}",) * 3 for i in range(g)]
+    r = run_clique_scan(subdata, groups, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X")
+    go = r["group_omnibus"]
+    assert go["bonferroni_alpha"] == pytest.approx(0.05 / g)
+    assert go["n_sig"] == 1 and tuple(go["sig"][0]["triad"])[0] == "g4"
+    assert go["min_p_adjusted_bonferroni"] == pytest.approx(min(go["min_p"] * g, 1.0))
+    assert r["inference_plan"]["primary_family"] == "group_omnibus"
+
+
+def test_k1_pair_scan_threshold_and_family_unchanged():
+    rng = np.random.default_rng(5)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    r = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=0, pair_subs=("A", "D"), grm_method="grm_from_X")
+    assert r.bonferroni_alpha == pytest.approx(0.05 / r.G)
+    assert r.n_planned == r.G and r.n_valid + r.n_unestimable == r.G
+    assert r.estimability["target_estimability_rtol"] == pytest.approx(1.4901161193847656e-08)
+
+
+def test_weight_rescaling_leaves_results_invariant():
+    rng = np.random.default_rng(6)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    y = rng.standard_normal(N)
+    wraw = {t: 0.5 + (i % 4) for i, t in enumerate(triads)}
+    out = []
+    for scale in (1.0, 100.0):
+        out.append(run_clique_scan(subdata, triads, y, np.arange(N), cap=150, transform="INT",
+                                   perm_B=0, grm_method="grm_from_X",
+                                   triad_weights={t: v * scale for t, v in wraw.items()}))
+    for tag in ("AB", "AD", "BD"):
+        a, b = out[0]["pairwise"][tag]["weighted"], out[1]["pairwise"][tag]["weighted"]
+        assert a["acat_weighted"] == pytest.approx(b["acat_weighted"], rel=1e-12)
+        assert a["n_rejected_familywise"] == b["n_rejected_familywise"]
+    assert out[0]["weighted"]["audit"]["weight_mean"] == pytest.approx(1.0)
+
+
+def test_invalid_weights_raise_instead_of_being_rewritten():
+    rng = np.random.default_rng(7)
+    subdata = {s: _make_sub(rng) for s in ("A", "B", "D")}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    bad = {t: 1.0 for t in triads}
+    bad[triads[0]] = -1.0
+    with pytest.raises(ValueError, match="non-negative"):
+        run_clique_scan(subdata, triads, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X", triad_weights=bad)
+
+
+def test_permutation_family_is_frozen_to_the_observed_mask(monkeypatch):
+    seen = {"masks": []}
+    orig = I.pairwise_pvals
+
+    def _spy(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        seen["masks"].append(None if fixed_mask is None else np.asarray(fixed_mask).copy())
+        return orig(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                    fixed_mask=fixed_mask, return_diag=return_diag)
+
+    monkeypatch.setattr(I, "pairwise_pvals", _spy)
+    rng = np.random.default_rng(8)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150, transform="INT",
+                  perm_B=3, n_jobs=1, pair_subs=("A", "D"), grm_method="grm_from_X")
+    # the observed scan and all three replicates use ONE raw-design mask
+    assert len(seen["masks"]) == 4
+    assert all(m is not None for m in seen["masks"])
+    assert all(np.array_equal(m, seen["masks"][0]) for m in seen["masks"])
+
+
+def test_multitrait_missing_component_is_not_folded_to_one(monkeypatch):
+    calls = {"i": 0}
+
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        pv = np.full(BX.shape[1], 0.5)
+        pv[0] = 0.02 if calls["i"] == 0 else np.nan     # trait 2 loses pair 0
+        calls["i"] += 1
+        if fixed_mask is not None:
+            pv = np.where(fixed_mask, pv, np.nan)
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    # pair 1 is genuinely non-estimable on the RAW design, so it never enters the family
+    orig_mask = I.pairwise_design_mask
+
+    def _mask(BX, BY, C=None, dominance_adjust=False):
+        m, e = orig_mask(BX, BY, C=C, dominance_adjust=dominance_adjust)
+        m = m.copy()
+        m[1] = False
+        e = dict(e)
+        e[1] = "target_nonestimable"
+        return m, e
+
+    monkeypatch.setattr(I, "pairwise_design_mask", _mask)
+    rng = np.random.default_rng(9)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    ts = FrozenTraitSet.from_list(["t1", "t2"])
+    with pytest.raises(ValueError, match="lost their statistic after whitening"):
+        run_multitrait_pair_scan(
+            subdata, pairs, {"t1": rng.standard_normal(N), "t2": rng.standard_normal(N)},
+            np.arange(N), trait_set=ts, cap=150, transform="INT", perm_B=0, pair_subs=("A", "D"),
+            grm_method="grm_from_X")
+
+
+def test_estimability_reasons_are_all_response_independent():
+    # the mask is only outcome-independent if every reason that can clear it is decided without y
+    assert set(I.DESIGN_EXCLUSION_REASONS) == {
+        "nonfinite_design", "zero_target", "target_nonestimable", "insufficient_df"}
+    # a failed decomposition means estimability was NOT DETERMINED, so it must not silently retire
+    # a hypothesis, and a response-dependent failure is an analysis error, not an exclusion
+    for bad in ("zero_residual_variance", "nonfinite_statistic", "svd_failed"):
+        assert bad not in I.DESIGN_EXCLUSION_REASONS
+
+
+def test_perfect_fit_underflows_to_zero_rather_than_failing():
+    # a p that underflows is a real tail probability, not a missing test: it must stay numeric
+    n = 60
+    Z = np.ones((n, 1))
+    x = _std(np.random.default_rng(21).standard_normal(n))
+    p, why, ok = I._coef_pval_fwl(Z, x, 3.0 * x + np.ones(n))
+    assert why is None and ok and p == 0.0 and not np.isnan(p)
+
+
+def test_scan_raises_rather_than_shrinking_the_family_on_a_response_failure(monkeypatch):
+    def _fake(Zw, xw, yw, *, target_rtol=I.TARGET_ESTIMABILITY_RTOL):
+        return float("nan"), "zero_residual_variance", True
+
+    monkeypatch.setattr(I, "_coef_pval_fwl", _fake)
+    rng = np.random.default_rng(22)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    with pytest.raises(ValueError, match="lost their statistic after whitening"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=0, pair_subs=("A", "D"), grm_method="grm_from_X")
+
+
+def test_degenerate_permutation_replicate_counts_as_maximally_extreme(monkeypatch):
+    # a replicate that loses a mask-true statistic must be kept and counted as extreme; deleting it
+    # would remove exactly the tail of the null and shrink the empirical p
+    rng = np.random.default_rng(23)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    orig = I.pairwise_pvals
+    state = {"n": 0}
+
+    def _spy(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        out = orig(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                   fixed_mask=fixed_mask, return_diag=return_diag)
+        if not return_diag:                       # permutation call (observed asks for diagnostics)
+            state["n"] += 1
+            if state["n"] <= 2:                   # break two replicates
+                out = out.copy()
+                out[0] = np.nan
+        return out
+
+    monkeypatch.setattr(I, "pairwise_pvals", _spy)
+    r = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=6, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X")
+    assert r.permutation["n_used"] == 6           # nothing deleted
+    assert r.permutation["n_degenerate"] == 2
+    assert r.permutation["status"] == "completed_with_degenerate_replicates"
+    # the two degenerate replicates enter the null at min-p = 0, so they always count as <= observed
+    assert r.minp_perm_emp >= 3 / 7
+
+
+def test_weight_normalisation_survives_overflow_prone_magnitudes():
+    big = [1e300, 2e300, 3e300]
+    w = I._normalize_weights(big, 3, "test weights")
+    assert np.all(np.isfinite(w)) and w.sum() == pytest.approx(3.0)
+    small = I._normalize_weights([1.0, 2.0, 3.0], 3, "test weights")
+    assert np.allclose(w, small, rtol=1e-12)
+    with pytest.raises(ValueError, match="all zero"):
+        I._normalize_weights([0.0, 0.0], 2, "test weights")
+
+
+def test_weighted_block_is_marked_exploratory_and_splits_family_ids():
+    rng = np.random.default_rng(24)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    r = run_clique_scan(subdata, triads, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X",
+                        triad_weights={t: 1.0 + (i % 3) for i, t in enumerate(triads)})
+    assert r["inference_plan"]["primary_weighting"] == "unweighted"
+    wb = r["pairwise"]["BD"]["weighted"]
+    assert wb["role"] == "exploratory_no_rejections_emitted"
+    assert wb["sig"] is None and wb["n_rejected_familywise"] is None
+    assert wb["acat_family_id"] == "contrast_omnibus"
+    assert wb["bonferroni_family_id"] == "pairwise_all"
+    assert "family_id" not in wb
+
+
+def test_multitrait_permutation_family_is_frozen(monkeypatch):
+    seen = []
+    orig = I.pairwise_pvals
+
+    def _spy(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        seen.append(None if fixed_mask is None else fixed_mask.copy())
+        return orig(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                    fixed_mask=fixed_mask, return_diag=return_diag)
+
+    monkeypatch.setattr(I, "pairwise_pvals", _spy)
+    rng = np.random.default_rng(25)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    ts = FrozenTraitSet.from_list(["t1", "t2"])
+    r = run_multitrait_pair_scan(
+        subdata, pairs, {"t1": rng.standard_normal(N), "t2": rng.standard_normal(N)},
+        np.arange(N), trait_set=ts, cap=150, transform="INT", perm_B=2, n_jobs=1,
+        pair_subs=("A", "D"), grm_method="grm_from_X")
+    # one raw-design mask is shared by both observed traits and all four permutation calls
+    assert len(seen) == 6 and all(m is not None for m in seen)
+    assert all(np.array_equal(m, seen[0]) for m in seen)
+    assert r["permutation"]["n_degenerate"] == 0
+    assert r["estimability"]["decided_on"] == "raw_design"
+
+
+def test_permutation_cutoff_is_an_exact_order_statistic():
+    # an interpolated quantile can disagree with the plus-one empirical p; the order statistic
+    # cannot. With B replicates the cutoff is the k-th smallest, k = floor(alpha*(B+1)).
+    rng = np.random.default_rng(31)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    r = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=39, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X")
+    B = r.permutation["n_used"]
+    k = int(np.floor(0.05 * (B + 1)))
+    assert k == 2 and B == 39
+    # the two criteria must agree by construction
+    reject_by_cutoff = r.min_p < r.minp_perm_threshold
+    reject_by_emp = r.minp_perm_emp <= 0.05
+    assert reject_by_cutoff == reject_by_emp
+
+
+def test_zero_estimable_pairs_raises_instead_of_reporting_the_smallest_p(monkeypatch):
+    # with no testable hypothesis, "mp <= nan" is all-false and the empirical p would come out at
+    # 1/(B+1) -- the most significant value possible
+    monkeypatch.setattr(I, "pairwise_design_mask",
+                        lambda BX, BY, C=None, dominance_adjust=False:
+                        (np.zeros(BX.shape[1], bool), {i: "target_nonestimable"
+                                                       for i in range(BX.shape[1])}))
+    rng = np.random.default_rng(32)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    with pytest.raises(ValueError, match="no estimable pair"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=0, pair_subs=("A", "D"), grm_method="grm_from_X")
+
+
+def test_design_mask_is_computed_on_the_raw_design():
+    # the mask must not move when the phenotype (and hence the fitted whitener) changes
+    rng = np.random.default_rng(33)
+    n, g = 200, 5
+    BX = np.column_stack([_std(rng.standard_normal(n)) for _ in range(g)])
+    BY = BX.copy()
+    BY[:, 2] = BX[:, 2]                                # duplicate -> product is still estimable
+    m1, e1 = I.pairwise_design_mask(BX, BY)
+    m2, e2 = I.pairwise_design_mask(BX, BY)
+    assert np.array_equal(m1, m2) and e1 == e2
+    # a target that IS in the nuisance span is excluded, with a design-only reason
+    BXc = BX.copy()
+    BYc = np.ones((n, g))                              # product == BX column => in span([1, bX])
+    mc, ec = I.pairwise_design_mask(BXc, BYc)
+    assert not mc.any()
+    assert set(ec.values()) <= set(I.DESIGN_EXCLUSION_REASONS)
+
+
+def test_non_degenerate_exception_is_not_laundered_into_null_evidence(monkeypatch):
+    # only a genuine numerical degeneracy may become the extreme tuple; a programming error must
+    # surface rather than silently count as a maximally extreme null replicate
+    rng = np.random.default_rng(34)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    orig = I.pairwise_pvals
+
+    def _boom(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        if not return_diag:
+            raise RuntimeError("injected bug")
+        return orig(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                    fixed_mask=fixed_mask, return_diag=return_diag)
+
+    monkeypatch.setattr(I, "pairwise_pvals", _boom)
+    with pytest.raises(RuntimeError, match="injected bug"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=2, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X")
+
+
+def test_weighted_primary_without_weights_is_rejected():
+    # suppressing the unweighted rejections while no weighted procedure can run would leave the
+    # scan with no primary analysis at all
+    rng = np.random.default_rng(41)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    with pytest.raises(ValueError, match="requires pair_weights"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=0, pair_subs=("A", "D"), grm_method="grm_from_X",
+                      primary_weighting="weighted")
+    subs3 = {s: _make_sub(rng) for s in ("A", "B", "D")}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    with pytest.raises(ValueError, match="requires triad_weights"):
+        run_clique_scan(subs3, triads, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X",
+                        primary_weighting="weighted")
+
+
+def test_weighted_primary_decides_the_group_omnibus_too():
+    # the declared primary family must actually be evaluated under the declared weighting
+    rng = np.random.default_rng(42)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    hit = 17
+    bB = block_burden_capped(subdata["B"].X, subdata["B"].gene_snp[f"g{hit}"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng)
+    y = rng.standard_normal(N) + 1.8 * (_std(bB) * _std(bD))
+    w = {t: (5.0 if i == hit else 1.0) for i, t in enumerate(triads)}
+    r = run_clique_scan(subdata, triads, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                        grm_method="grm_from_X", triad_weights=w, primary_weighting="weighted")
+    go = r["group_omnibus"]
+    assert go["weighting"] == "weighted"
+    assert go["n_sig"] >= 1 and all("weight" in h for h in go["sig"])
+    assert any(tuple(h["triad"])[0] == f"g{hit}" for h in go["sig"])
+
+
+def test_permutation_threshold_publishes_its_comparator():
+    rng = np.random.default_rng(43)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    r = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=39, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X")
+    assert r.minp_perm_threshold_comparator == "strict_less_than"
+    # Bonferroni is primary by default, so min-P emits no rejection decision
+    assert r.minp_perm_rejected is None
+    r2 = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                       transform="INT", perm_B=39, n_jobs=1, pair_subs=("A", "D"),
+                       grm_method="grm_from_X", primary_multiplicity="permutation_minp")
+    assert r2.sig is None and r2.n_sig is None       # the non-primary procedure emits nothing
+    assert r2.minp_perm_rejected == (r2.minp_perm_emp <= 0.05)
+    assert r2.minp_perm_rejected == (r2.min_p < r2.minp_perm_threshold)
+
+
+def test_weighted_primary_headline_uses_the_weighted_adjusted_p():
+    # the reported group-omnibus minimum must be the minimum of the PRIMARY score; ranking by raw p
+    # can headline a different group than the one the weighted rule actually rejects
+    rng = np.random.default_rng(44)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    hit = 11
+    bB = block_burden_capped(subdata["B"].X, subdata["B"].gene_snp[f"g{hit}"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng)
+    y = rng.standard_normal(N) + 1.6 * (_std(bB) * _std(bD))
+    w = {t: (20.0 if i == hit else 1.0) for i, t in enumerate(triads)}
+    r = run_clique_scan(subdata, triads, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                        grm_method="grm_from_X", triad_weights=w, primary_weighting="weighted")
+    go = r["group_omnibus"]
+    assert go["bonferroni_alpha"] is None                    # a single cutoff does not exist
+    assert go["per_test_alpha_rule"].startswith("0.05*w_i/G")
+    # the headline adjusted p is p*G/w, so an up-weighted group reports a SMALLER adjusted p than
+    # the unweighted rule would give it
+    top = go["top"][0]
+    assert top["p_adjusted_bonferroni"] <= min(top["p"] * r["G"], 1.0) + 1e-12
+    assert all(h["p_adjusted_bonferroni"] <= 1.0 for h in go["top"])
+    assert go["min_p_adjusted_bonferroni"] == pytest.approx(top["p_adjusted_bonferroni"])
+
+
+def test_pairwise_rejections_are_gated_on_the_primary_group_family(monkeypatch):
+    # a pairwise p below 0.05/(G*K) whose GROUP omnibus does not reject must not surface as a
+    # rejection: otherwise the group and pairwise families could be unioned at full alpha
+    g = 10
+    strong = np.full(g, 0.5)
+    strong[3] = 1e-9          # one contrast is extreme, but ACAT over 3 contrasts dilutes it
+    calls = {"i": 0}
+
+    def _fake(Wh, y, BX, BY, C=None, dominance_adjust=False, *, fixed_mask=None, return_diag=False):
+        pv = strong if calls["i"] % 3 == 0 else np.full(g, 0.5)
+        calls["i"] += 1
+        if return_diag:
+            return pv, dict(n_planned=pv.size, estimable=np.isfinite(pv), exclusions={}, failures={})
+        return pv
+
+    monkeypatch.setattr(I, "pairwise_pvals", _fake)
+    monkeypatch.setattr(I, "pairwise_design_mask",
+                        lambda BX, BY, C=None, dominance_adjust=False:
+                        (np.ones(BX.shape[1], bool), {}))
+    rng = np.random.default_rng(51)
+    subdata = {s: _make_sub(rng, g=g) for s in ("A", "B", "D")}
+    groups = [(f"g{i}",) * 3 for i in range(g)]
+    r = run_clique_scan(subdata, groups, rng.standard_normal(N), np.arange(N), cap=150,
+                        transform="INT", perm_B=0, grm_method="grm_from_X")
+    go, ab = r["group_omnibus"], r["pairwise"]["AB"]
+    gated_ids = {tuple(h["triad"]) for h in go["sig"]}
+    assert all(tuple(h["triad"]) in gated_ids for h in ab["sig"])
+    assert r["inference_plan"]["pairwise_role"] == "gated_follow_up_localization"
+    assert ab["acat_rejected_familywise"] is None
+
+
+def test_sensitivity_transform_emits_no_rejection_set():
+    # both transforms are scanned, but only the predeclared one may spend alpha; otherwise taking
+    # hits from either is an uncontrolled union over the same biological units
+    rng = np.random.default_rng(61)
+    subs = ["A", "B", "D"]
+    subdata = {s: _make_sub(rng) for s in subs}
+    triads = [(f"g{i}",) * 3 for i in range(G)]
+    hit = 17
+    bB = block_burden_capped(subdata["B"].X, subdata["B"].gene_snp[f"g{hit}"], 150, rng)
+    bD = block_burden_capped(subdata["D"].X, subdata["D"].gene_snp[f"g{hit}"], 150, rng)
+    y = rng.standard_normal(N) + 1.8 * (_std(bB) * _std(bD))
+    prim = run_clique_scan(subdata, triads, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                           grm_method="grm_from_X")
+    sens = run_clique_scan(subdata, triads, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                           grm_method="grm_from_X", inferential=False)
+    assert prim["group_omnibus"]["n_sig"] >= 1
+    assert sens["group_omnibus"]["n_sig"] is None and sens["group_omnibus"]["sig"] is None
+    assert sens["pairwise"]["BD"]["sig"] is None and sens["pairwise"]["BD"]["n_sig"] is None
+    assert sens["inference_plan"]["inferential"] is False
+    assert sens["inference_plan"]["primary_family"] is None
+    # descriptive statistics are unchanged: only the rejection layer is withheld
+    assert sens["pairwise"]["BD"]["min_p"] == prim["pairwise"]["BD"]["min_p"]
+    assert sens["group_omnibus"]["min_p"] == prim["group_omnibus"]["min_p"]
+
+
+def test_pair_sensitivity_run_withholds_rejections_only():
+    rng = np.random.default_rng(62)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    y = rng.standard_normal(N)
+    a = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                      pair_subs=("A", "D"), grm_method="grm_from_X")
+    b = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                      pair_subs=("A", "D"), grm_method="grm_from_X", inferential=False)
+    assert a.sig is not None and b.sig is None and b.n_sig is None
+    assert a.min_p == b.min_p and a.pair_acat == b.pair_acat
+
+
+def test_permutation_primary_requires_enough_replicates():
+    rng = np.random.default_rng(63)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    with pytest.raises(ValueError, match="perm_B >= 19"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=5, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X", primary_multiplicity="permutation_minp")
+    with pytest.raises(ValueError, match="weighted permutation min-P"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=39, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X", primary_multiplicity="permutation_minp",
+                      primary_weighting="weighted",
+                      pair_weights={(f"g{i}", f"g{i}"): 1.0 for i in range(G)})
+
+
+def test_sensitivity_run_is_never_aborted_by_inference_only_guards():
+    # a sensitivity run makes no claim, so guards that exist to protect a CLAIM must not fire on it
+    rng = np.random.default_rng(71)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    y = rng.standard_normal(N)
+    zero_w = {(f"g{i}", f"g{i}"): 0.0 for i in range(G)}
+    zero_w[(f"g0", f"g0")] = 1.0
+    # weighted primary with usable weights is fine either way; the point is that the
+    # inference-only guards are skipped when inferential=False
+    r = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                      pair_subs=("A", "D"), grm_method="grm_from_X", pair_weights=zero_w,
+                      primary_weighting="weighted", inferential=False)
+    assert r.sig is None and r.weighted["sig"] is None
+    # permutation-primary with too few replicates would raise for a claim, but not for sensitivity
+    r2 = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,
+                       pair_subs=("A", "D"), grm_method="grm_from_X",
+                       primary_multiplicity="permutation_minp", inferential=False)
+    assert r2.minp_perm_rejected is None and r2.sig is None

@@ -268,8 +268,118 @@ def whiten_multi(kernels: dict[str, np.ndarray], y: np.ndarray, X: np.ndarray = 
     return (Q * (1.0 / np.sqrt(w))) @ Q.T, cv
 
 
+TARGET_ESTIMABILITY_RTOL = float(np.sqrt(np.finfo(np.float64).eps))   # 1.4901161193847656e-08
+ESTIMABILITY_POLICY = dict(
+    method="frisch_waugh_lovell_target_residual_ratio",
+    nuisance_rank_rtol_formula="max(n, q_active) * float64_eps",
+    target_estimability_rtol=TARGET_ESTIMABILITY_RTOL)
+
+
+DESIGN_EXCLUSION_REASONS = ("nonfinite_design", "zero_target",
+                            "target_nonestimable", "insufficient_df")
+
+
+def _fwl_design(Zw: np.ndarray, xw: np.ndarray, *,
+                target_rtol: float = TARGET_ESTIMABILITY_RTOL) -> tuple:
+    """Design-only half of the FWL test: nuisance column space plus the residualised target.
+
+    Decided WITHOUT the response, so this is the part that defines which hypotheses exist."""
+    if not (np.all(np.isfinite(Zw)) and np.all(np.isfinite(xw))):
+        return None, 0, None, 0.0, "nonfinite_design"
+    xn = float(np.sqrt(xw @ xw))
+    if not (xn > 0):
+        return None, 0, None, 0.0, "zero_target"
+    rank_z, Qz = 0, None
+    if Zw.size:
+        dz = np.sqrt(np.einsum("ij,ij->j", Zw, Zw))
+        act = dz > 0
+        if act.any():
+            Zeq = Zw[:, act] / dz[act]
+            U, s, _ = np.linalg.svd(Zeq, full_matrices=False)   # a failure here is not
+            #   "unestimable" but "not determined": let it propagate rather than retire a hypothesis
+            if s[0] > 0:
+                rank_z = int(np.count_nonzero(
+                    s > s[0] * max(Zeq.shape) * np.finfo(np.float64).eps))
+            Qz = U[:, :rank_z]
+    xr = xw - Qz @ (Qz.T @ xw) if rank_z else xw
+    xrn = float(np.sqrt(xr @ xr))
+    if not np.isfinite(xrn) or xrn / xn <= target_rtol:
+        return Qz, rank_z, xr, xrn, "target_nonestimable"
+    if xw.shape[0] - rank_z - 1 < 1:
+        return Qz, rank_z, xr, xrn, "insufficient_df"
+    return Qz, rank_z, xr, xrn, None
+
+
+def pairwise_design_mask(BX: np.ndarray, BY: np.ndarray, C: np.ndarray = None,
+                         dominance_adjust: bool = False) -> tuple:
+    """Which pairs are testable, decided on the RAW (unwhitened) design.
+
+    The whitener is fitted to the phenotype, so deciding estimability after whitening would let the
+    tested FAMILY depend on y -- and a family that moves with the response cannot calibrate a
+    permutation null. Whether the product is estimable given the two main effects is a rank
+    property, invariant under the invertible whitening transform, so the raw design answers the same
+    question without that dependence."""
+    n, G = BX.shape
+    base = np.ones((n, 1)) if C is None else np.asarray(C, float).reshape(n, -1)
+    INT = BX * BY
+    BX2, BY2 = (BX * BX, BY * BY) if dominance_adjust else (None, None)
+    mask = np.zeros(G, bool)
+    excl = {}
+    for g in range(G):
+        cols = [base, BX[:, g].reshape(-1, 1), BY[:, g].reshape(-1, 1)]
+        if dominance_adjust:
+            cols += [BX2[:, g].reshape(-1, 1), BY2[:, g].reshape(-1, 1)]
+        why = _fwl_design(np.column_stack(cols), INT[:, g])[4]
+        mask[g] = why is None
+        if why is not None:
+            excl[g] = why
+    return mask, excl
+
+
+def _coef_pval_fwl(Zw: np.ndarray, xw: np.ndarray, yw: np.ndarray, *,
+                   target_rtol: float = TARGET_ESTIMABILITY_RTOL) -> tuple:
+    """Two-sided p for the coefficient of ``xw`` given nuisance block ``Zw`` (Frisch-Waugh-Lovell).
+
+    Estimability is a property of the TESTED column, not of the whole design: two duplicated
+    nuisance columns leave the interaction perfectly estimable, so gating on the condition number of
+    ``[Zw, xw]`` discards valid results. Here only ``xw``'s component orthogonal to the numerical
+    column space of ``Zw`` is required to survive, and ``df = n - rank(Zw) - 1`` follows the actual
+    nuisance rank. The two tolerances answer different questions: ``max(n, q) * eps`` is a
+    backward-error threshold for the dimension of that column space, while ``sqrt(eps)`` is a
+    coefficient-stability policy on the tested direction. RSS is the explicit residual norm, never
+    ``y'y - (U'y)'(U'y)`` -- on a good fit that subtraction cancels catastrophically and can return a
+    negative value, which a clamp then turns into a NaN model. A test that cannot be run returns NaN
+    with a reason, never ``p = 1.0``, which ACAT and genomic control would treat as a real
+    maximally-non-significant observation.
+
+    Returns ``(p, reason, design_ok)``. ``design_ok`` is False only for the reasons in
+    :data:`DESIGN_EXCLUSION_REASONS`, all of which are decided WITHOUT looking at ``yw`` -- that is
+    what makes the estimability mask outcome-independent and therefore reusable as a frozen
+    permutation family. A response-dependent failure keeps ``design_ok`` True so the caller can treat
+    it as an analysis error rather than silently retire the hypothesis."""
+    Qz, rank_z, xr, xrn, why = _fwl_design(Zw, xw, target_rtol=target_rtol)
+    if why is not None:
+        return float("nan"), why, False
+    n = yw.shape[0]
+    df = n - rank_z - 1
+    # everything below depends on yw, so a failure here is an analysis error on a design-valid
+    # hypothesis, NOT an unestimable hypothesis
+    yr = yw - Qz @ (Qz.T @ yw) if rank_z else yw
+    u = xr / xrn
+    beta_eq = float(u @ yr)
+    resid = yr - beta_eq * u
+    sigma_eq = float(np.sqrt(float(resid @ resid) / df))
+    if not np.isfinite(sigma_eq) or sigma_eq <= 0:
+        return float("nan"), "zero_residual_variance", True
+    t = beta_eq / sigma_eq
+    if not np.isfinite(t):
+        return float("nan"), "nonfinite_statistic", True
+    return float(2.0 * stats.t.sf(abs(t), df)), None, True
+
+
 def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray,
-                   C: np.ndarray = None, dominance_adjust: bool = False) -> np.ndarray:
+                   C: np.ndarray = None, dominance_adjust: bool = False, *,
+                   fixed_mask: np.ndarray = None, return_diag: bool = False):
     """Per-pair interaction p (whitened GLS t-test on the b_X*b_Y coefficient).
 
     ``C`` is the fixed-effect covariate block (n, p_c) that already includes the intercept column
@@ -284,9 +394,15 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
     otherwise leak into the interaction term under homoeolog collinearity; conditioning on the
     squared burdens removes that leak. The tested coefficient is then the product effect CONDITIONAL
     on the additive AND per-gene quadratic terms — not a generic dominance test. Costs 2 df and
-    increases rank-deficiency (more conservative ``p=1``) at extreme collinearity."""
+    makes the product harder to estimate at extreme collinearity.
+
+    ``fixed_mask`` restricts the scan to a pre-computed estimability mask so that a permutation
+    replicate tests exactly the family the observed scan tested; ``return_diag`` additionally returns
+    the mask and the per-unit exclusion reasons."""
     n, G = BX.shape
     yw = Wh @ y
+    if not np.all(np.isfinite(yw)):
+        raise ValueError("whitened response contains non-finite values")
     BXw = Wh @ BX
     BYw = Wh @ BY
     INTw = Wh @ (BX * BY)
@@ -297,31 +413,26 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
         Cw = (Wh @ np.ones(n)).reshape(-1, 1)
     else:
         Cw = Wh @ np.asarray(C, float).reshape(n, -1)
-    p_c = Cw.shape[1]
-    extra = 2 if dominance_adjust else 0
-    j_int = p_c + 2 + extra                  # interaction coef = last column of the design
-    p_full = p_c + 3 + extra                 # full column count when the design is full rank
-    pv = np.empty(G)
+    pv = np.full(G, np.nan)
+    design_ok = np.zeros(G, bool) if fixed_mask is None else np.asarray(fixed_mask, bool).copy()
+    excl, fail = {}, {}
     for g in range(G):
-        cols = [Cw, BXw[:, g], BYw[:, g]]
-        if dominance_adjust:
-            cols += [BX2w[:, g], BY2w[:, g]]
-        cols.append(INTw[:, g])              # interaction stays last so j_int is column -1
-        Xw = np.column_stack(cols)
-        beta, _res, rank, _sv = np.linalg.lstsq(Xw, yw, rcond=None)
-        df = n - rank                        # rank-aware df (== n-p_full when full rank)
-        if rank < p_full or df < 1:          # rank-deficient: interaction not estimable
-            pv[g] = 1.0                      # conservative
+        if fixed_mask is not None and not fixed_mask[g]:
             continue
-        resid = yw - Xw @ beta
-        s2 = float(resid @ resid) / df
-        se = np.sqrt(max(s2 * np.linalg.pinv(Xw.T @ Xw)[j_int, j_int], 1e-30))
-        pv[g] = 2.0 * stats.t.sf(abs(beta[j_int] / se), df)
+        cols = [Cw, BXw[:, g].reshape(-1, 1), BYw[:, g].reshape(-1, 1)]
+        if dominance_adjust:
+            cols += [BX2w[:, g].reshape(-1, 1), BY2w[:, g].reshape(-1, 1)]
+        pv[g], why, ok = _coef_pval_fwl(np.column_stack(cols), INTw[:, g], yw)
+        design_ok[g] = ok
+        if why is not None:
+            (fail if ok else excl)[g] = why
+    if return_diag:
+        return pv, dict(n_planned=int(G), estimable=design_ok, exclusions=excl, failures=fail)
     return pv
 
 
 def marginal_pvals(Wh: np.ndarray, y: np.ndarray, B: np.ndarray,
-                   C: np.ndarray = None) -> np.ndarray:
+                   C: np.ndarray = None, *, return_diag: bool = False):
     """Per-gene SINGLE-burden marginal p (whitened GLS t-test on b alone).
 
     Same whitener/covariates as :func:`pairwise_pvals`, but the design is
@@ -331,26 +442,23 @@ def marginal_pvals(Wh: np.ndarray, y: np.ndarray, B: np.ndarray,
     """
     n, G = B.shape
     yw = Wh @ y
+    if not np.all(np.isfinite(yw)):
+        raise ValueError("whitened response contains non-finite values")
     Bw = Wh @ B
     if C is None:
         Cw = (Wh @ np.ones(n)).reshape(-1, 1)
     else:
         Cw = Wh @ np.asarray(C, float).reshape(n, -1)
-    p_c = Cw.shape[1]
-    j = p_c                                   # index of the burden coef in [C, b]
-    p_full = p_c + 1
-    pv = np.empty(G)
+    pv = np.full(G, np.nan)
+    design_ok = np.zeros(G, bool)
+    excl, fail = {}, {}
     for g in range(G):
-        Xw = np.column_stack([Cw, Bw[:, g]])
-        beta, _res, rank, _sv = np.linalg.lstsq(Xw, yw, rcond=None)
-        df = yw.shape[0] - rank          # effective n (robust to a rectangular Wh)
-        if rank < p_full or df < 1:
-            pv[g] = 1.0
-            continue
-        resid = yw - Xw @ beta
-        s2 = float(resid @ resid) / df
-        se = np.sqrt(max(s2 * np.linalg.pinv(Xw.T @ Xw)[j, j], 1e-30))
-        pv[g] = 2.0 * stats.t.sf(abs(beta[j] / se), df)
+        pv[g], why, ok = _coef_pval_fwl(Cw, Bw[:, g], yw)
+        design_ok[g] = ok
+        if why is not None:
+            (fail if ok else excl)[g] = why
+    if return_diag:
+        return pv, dict(n_planned=int(G), estimable=design_ok, exclusions=excl, failures=fail)
     return pv
 
 
@@ -504,6 +612,44 @@ def _decile_bin(x: np.ndarray) -> np.ndarray:
     return np.clip(((r - 0.5) / n * 10).astype(int), 0, 9)
 
 
+def _normalize_weights(raw, G: int, label: str) -> np.ndarray:
+    """Scale y-independent prior weights to sum ``G``. Weighted Bonferroni spends alpha*w_i/G per
+    test, so FWER control needs sum(w) <= G; equality makes the procedure invariant to any rescaling
+    of the supplied weights."""
+    w = np.asarray(raw, float)
+    if not np.all(np.isfinite(w)) or np.any(w < 0):
+        raise ValueError(f"{label} must be finite and non-negative")
+    peak = float(w.max()) if w.size else 0.0
+    if not peak > 0:
+        raise ValueError(f"{label} are all zero")
+    ws = w / peak                                    # scale first: sum() alone can overflow to inf
+    tot = float(ws.sum())
+    if not (np.isfinite(tot) and tot > 0):
+        raise ValueError(f"{label} do not sum to a finite positive total")
+    return ws * (G / tot)
+
+
+def _tsv_p(v: float) -> str:
+    """Round-trippable p for a ranking dump; a test that was not run is NA, never a number."""
+    return repr(float(v)) if np.isfinite(v) else "NA"
+
+
+def _json_safe(obj):
+    """Recursively map non-finite floats to ``None``. Bare ``NaN``/``Infinity`` are not valid
+    RFC 8259 JSON and strict parsers reject them, so a non-estimable test must serialize as null."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return [_json_safe(v) for v in obj.tolist()]
+    if isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float):
+        return obj if np.isfinite(obj) else None
+    return obj
+
+
 def _write_ranking_tsv(path, header: list, rows: list) -> None:
     """Write the full genome-wide ranking (every callable unit), deterministically ordered."""
     import csv
@@ -590,7 +736,17 @@ class InteractResult:
     weighted: dict = None
     covariates: dict = None
     minp_perm_emp: float = float("nan")        # empirical p of the observed min pair-p (permutation FWER)
-    minp_perm_threshold: float = float("nan")  # 5th-percentile of permuted min-p = experiment-wide FWER alpha=0.05 cutoff
+    minp_perm_threshold: float = float("nan")  # k-th SMALLEST permuted min-p, k = floor(0.05*(B+1));
+    #   reject iff min_p is STRICTLY BELOW it -- equality at the k-th order statistic does not reject,
+    #   which matters when replicates tie at zero. `minp_perm_rejected` is the authoritative decision.
+    minp_perm_threshold_comparator: str = "strict_less_than"
+    minp_perm_rejected: bool = None
+    n_planned: int = None                      # hypotheses the design declared
+    n_valid: int = None                        # hypotheses actually estimable (design-determined)
+    n_unestimable: int = None
+    estimability: dict = None                  # policy, tolerances and the excluded unit ids
+    permutation: dict = None                   # requested/used/degenerate replicate counts
+    inference_plan: dict = None                # which procedure was predeclared to spend alpha
     # --- omniB + parametric-bootstrap production path (None on the legacy burden+permutation path,
     #     so a legacy result serializes byte-identically once these are dropped from the summary) ---
     statistic: str = "burden"                  # "omniB" (encoding-invariant primary) | "burden" (legacy)
@@ -707,6 +863,9 @@ def run_pair_scan(
     pair_weights: dict = None,          # {(gx,gy): w}  y-INDEPENDENT prior (DL/HEB), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q) array} fixed effects; None=legacy
     dominance_adjust: bool = False,     # add per-gene b^2 covariates to the interaction test
+    primary_weighting: str = "unweighted",   # which weighting spends alpha
+    primary_multiplicity: str = "bonferroni",  # bonferroni | permutation_minp
+    inferential: bool = True,           # False => sensitivity run, emits no rejection set
     full_dump_path: str = None,         # if set, write FULL per-pair ranking TSV (else top-N only)
     burden_dump_path: str = None,       # if set, write per-sample burdens for the top-K pairs
     top_k_burden: int = 5,              # number of top pairs to export burdens for
@@ -721,6 +880,19 @@ def run_pair_scan(
     (residualize on C, permute residuals), which reduces to y-shuffle when C is intercept-only."""
     from joblib import Parallel, delayed
 
+    if primary_weighting not in ("unweighted", "weighted"):
+        raise ValueError("primary_weighting must be 'unweighted' or 'weighted'")
+    if primary_multiplicity not in ("bonferroni", "permutation_minp"):
+        raise ValueError("primary_multiplicity must be 'bonferroni' or 'permutation_minp'")
+    if inferential and primary_multiplicity == "permutation_minp":
+        if primary_weighting == "weighted":
+            raise ValueError("weighted permutation min-P is not implemented; the permuted "
+                             "statistic would have to be the weighted one")
+        # below 19 replicates the smallest attainable plus-one p exceeds 0.05, so a declared 5%
+        # permutation-primary analysis could never reject
+        if not perm_B or perm_B < 19:
+            raise ValueError("primary_multiplicity='permutation_minp' needs perm_B >= 19 for a "
+                             f"5% test; got {perm_B}")
     rng = np.random.default_rng(seed)
     subs = list(subdata.keys())
     n_t = sample_idx.size
@@ -748,30 +920,75 @@ def run_pair_scan(
     BY = scols_safe(np.column_stack(by_cols))
     G = len(kept_pairs)
 
-    # y-independent prior weights aligned to kept pairs, normalized to mean 1 (missing -> 1)
+    # y-independent prior weights aligned to kept pairs, normalized to sum G (missing -> 1). Invalid
+    # weights raise instead of being silently rewritten to 1.0, which would fake a uniform prior.
     w = None
     if pair_weights:
-        w = np.array([float(pair_weights.get(kp, 1.0)) for kp in kept_pairs])
-        w = np.where((w > 0) & np.isfinite(w), w, 1.0)
-        w = w * (G / w.sum())
+        w = _normalize_weights([pair_weights.get(kp, 1.0) for kp in kept_pairs], G, "pair weights")
+    if primary_weighting == "weighted" and w is None:
+        raise ValueError("primary_weighting='weighted' requires pair_weights; otherwise the "
+                         "unweighted rejections are suppressed and no primary procedure runs")
 
     y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
     Wh, cv = whiten_multi(kernels, y, X=C, seed=42)
-    pv = pairwise_pvals(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust)
-    pv = np.where(np.isfinite(pv), pv, 1.0)
+    # estimability is decided on the RAW design so the tested family cannot move with y through the
+    # fitted whitener; the same mask is then used by the observed scan and every permutation
+    design_mask, design_excl = pairwise_design_mask(BX, BY, C=C, dominance_adjust=dominance_adjust)
+    pv, diag = pairwise_pvals(Wh, y, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                              fixed_mask=design_mask, return_diag=True)
+    n_late = int((design_mask & ~np.isfinite(pv)).sum())
+    if n_late:
+        raise ValueError(f"{n_late} pairs estimable on the raw design lost their statistic after "
+                         "whitening; the inferential family would be incomplete")
+    # non-estimable pairs stay NaN: acat/lambda_gc drop them, and folding them to 1.0 would enter
+    # them into those combinations as real maximally-non-significant observations. The mask is a
+    # property of the design, so the permutation family is frozen to exactly this set.
+    est = design_mask
+    if (inferential and primary_weighting == "weighted" and w is not None
+            and not (est & (w > 0)).any()):
+        raise ValueError("every estimable pair has weight zero: no hypothesis receives any alpha "
+                         "under weighted primary")
+    if not est.any():
+        raise ValueError("no estimable pair in this scan; an empirical p computed against an "
+                         "undefined observed statistic would report the smallest possible value")
+    if diag["failures"]:
+        raise ValueError(
+            f"{len(diag['failures'])} design-valid pairs produced no statistic "
+            f"({sorted(set(diag['failures'].values()))}); this is an analysis failure, not an "
+            "unestimable hypothesis, and silently retiring them would shrink the tested family")
+    n_valid = int(est.sum())
     p_acat_obs = acat(pv)
-    minp_obs = float(pv.min())
+    minp_obs = float(pv[est].min()) if n_valid else float("nan")
     lam_obs = lambda_gc(pv)
+    # the denominator is the PLANNED family: estimability is design-determined, but shrinking the
+    # denominator to the tests that happened to be runnable can only loosen the threshold, so the
+    # conservative count is authoritative and the exact one is reported alongside.
     bonf = 0.05 / G
-    order = np.argsort(pv)
-    sig = [dict(pair=kept_pairs[int(i)], p=float(pv[i])) for i in order if pv[i] < bonf]
-    top = [dict(pair=kept_pairs[int(i)], p=float(pv[i])) for i in order[:5]]
+    order = [int(i) for i in np.argsort(np.where(est, pv, np.inf)) if est[i]]
+    # only the predeclared procedure emits rejections: two alpha-level procedures over the same
+    # hypotheses do not control alpha if the reader may take whichever one rejects
+    bonf_is_primary = inferential and primary_multiplicity == "bonferroni"
+    sig = ([dict(pair=kept_pairs[i], p=float(pv[i]),
+                 p_adjusted_bonferroni=float(min(pv[i] * G, 1.0)))
+            for i in order if pv[i] < bonf]
+           if (bonf_is_primary and primary_weighting == "unweighted") else None)
+    top = [dict(pair=kept_pairs[i], p=float(pv[i])) for i in order[:5]]
+    estimability = dict(ESTIMABILITY_POLICY, decided_on="raw_design", n_planned=int(G),
+                        n_valid=n_valid, n_unestimable=int(G - n_valid), n_late_fail=n_late,
+                        per_test_alpha_valid=float(0.05 / n_valid) if n_valid else None,
+                        excluded=[dict(pair=kept_pairs[i], reason=r)
+                                  for i, r in sorted(design_excl.items())])
 
     # per-gene single-burden marginal p (the "invisible to single-locus" contrast) and gene
     # coordinates are computed once here when any dump is requested (reuse Wh/C from above).
     if full_dump_path or burden_dump_path:
-        pmx = marginal_pvals(Wh, y, BX, C=C)
-        pmy = marginal_pvals(Wh, y, BY, C=C)
+        pmx, dmx = marginal_pvals(Wh, y, BX, C=C, return_diag=True)
+        pmy, dmy = marginal_pvals(Wh, y, BY, C=C, return_diag=True)
+        if dmx["failures"] or dmy["failures"]:
+            raise ValueError(
+                "single-burden marginal test failed on a design-valid gene "
+                f"({sorted(set(dmx['failures'].values()) | set(dmy['failures'].values()))}); the "
+                "interaction-vs-marginal contrast would silently read NA")
         coords = [(_gene_coord(subdata[sx], subdata[sx].gene_snp[gx]),
                    _gene_coord(subdata[sy], subdata[sy].gene_snp[gy]))
                   for gx, gy in kept_pairs]
@@ -782,22 +999,26 @@ def run_pair_scan(
         # interaction-vs-marginal contrast without recomputation. gene_len stays NA (joined
         # downstream from annotation).
         nx, ny = np.asarray(nsnp_x), np.asarray(nsnp_y)
-        _, rank_of, tie_of = _rank_with_ties(pv, kept_pairs)
+        sort_key = np.where(est, pv, np.inf)              # unestimable rows stay, but sort last
+        _, rank_of, tie_of = _rank_with_ties(sort_key, kept_pairs)
         nl = _neglog10(pv)
         nlmx, nlmy = _neglog10(pmx), _neglog10(pmy)
         cbin = _decile_bin(nx + ny)
         rows = [[int(rank_of[i]), kept_pairs[i][0], kept_pairs[i][1], sx, sy,
-                 repr(float(pv[i])), repr(float(nl[i])), int(nx[i]), int(ny[i]), int(nx[i] + ny[i]),
-                 int(cbin[i]), int(tie_of[i]), int(pv[i] >= 1.0),
-                 int(pv[i] < bonf), "NA", "NA", "NA",
+                 _tsv_p(pv[i]), _tsv_p(nl[i]), int(nx[i]), int(ny[i]), int(nx[i] + ny[i]),
+                 int(cbin[i]), int(tie_of[i]), int(not est[i]),
+                 (int(est[i] and pv[i] < (bonf * w[i] if w is not None and
+                                          primary_weighting == "weighted" else bonf))
+                  if (inferential and bonf_is_primary) else "NA"),
+                 "NA", "NA", "NA",
                  coords[i][0][0], coords[i][0][1], coords[i][1][0], coords[i][1][1],
-                 repr(float(pmx[i])), repr(float(pmy[i])),
-                 repr(float(nlmx[i])), repr(float(nlmy[i]))]
-                for i in np.argsort(pv, kind="stable")]
+                 _tsv_p(pmx[i]), _tsv_p(pmy[i]),
+                 _tsv_p(nlmx[i]), _tsv_p(nlmy[i])]
+                for i in np.argsort(sort_key, kind="stable")]
         _write_ranking_tsv(full_dump_path,
                            ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y", "p_interaction",
                             "neglog10p", f"n_snp_{sx}", f"n_snp_{sy}", "n_snp_pair",
-                            "callable_snp_decile", "tie_group", "p_is_one", "bonferroni_sig",
+                            "callable_snp_decile", "tie_group", "p_unestimable", "primary_sig",
                             f"gene_len_{sx}", f"gene_len_{sy}", "gene_len_pair_sum",
                             "chrom_x", "pos_x", "chrom_y", "pos_y",
                             "p_marginal_x", "p_marginal_y",
@@ -824,17 +1045,23 @@ def run_pair_scan(
 
     weighted = None
     if w is not None:
-        wsig = [dict(pair=kept_pairs[int(i)], p=float(pv[i]), weight=float(w[i]),
-                     p_weighted=float(pv[i] / w[i]))
-                for i in order if pv[i] < bonf * w[i]]
+        wsig = ([dict(pair=kept_pairs[i], p=float(pv[i]), weight=float(w[i]),
+                      p_weighted=float(pv[i] / w[i]) if w[i] > 0 else float("inf"))
+                 for i in order if w[i] > 0 and pv[i] < bonf * w[i]]
+                if (bonf_is_primary and primary_weighting == "weighted") else None)
         n_cov = int(sum(kp in pair_weights for kp in kept_pairs))
         weighted = dict(
-            acat_weighted=float(acat_weighted(pv, w)), bonferroni_n_sig=len(wsig), sig=wsig,
+            role=("primary" if primary_weighting == "weighted" else
+                  "exploratory_no_rejections_emitted"),
+            acat_weighted=float(acat_weighted(pv, w)),
+            bonferroni_n_sig=(len(wsig) if wsig is not None else None), sig=wsig,
             audit=dict(n_pairs=int(G), n_covered=n_cov, n_missing_default1=int(G - n_cov),
                        weight_min=float(w.min()), weight_mean=float(w.mean()),
                        weight_max=float(w.max())),
-            note=("weighted Bonferroni controls pair-level FWER; weighted ACAT is a y-independent "
-                  "prior-weighted omnibus. Valid ONLY if weights were frozen before this scan and "
+            note=("weighted Bonferroni controls pair-level FWER only if this procedure was "
+                  "predeclared as THE primary one -- reporting it beside the unweighted rejections "
+                  "and taking either is a union of two alpha-level procedures. Weighted ACAT is a "
+                  "y-independent prior-weighted omnibus. Valid ONLY if weights were frozen and "
                   "are y-independent (DL zero-shot / HEB). Missing pairs default to weight 1; after "
                   "normalization (sum w = G) up-weighting prioritized pairs reallocates alpha from "
                   "the rest (their effective weight < 1)."))
@@ -854,36 +1081,77 @@ def run_pair_scan(
         ys = y[perm] if C is None else (fl_fit + fl_resid[perm])
         try:
             Whp, _ = whiten_multi(kernels, ys, X=C, seed=seed_i % 100000)
-            pp = pairwise_pvals(Whp, ys, BX, BY, C=C, dominance_adjust=dominance_adjust)
-            return acat(pp), lambda_gc(pp), float(np.min(pp))   # 3rd term = per-permutation min pair-p (FWER)
-        except Exception:  # noqa: BLE001
-            return None
+            pp = pairwise_pvals(Whp, ys, BX, BY, C=C, dominance_adjust=dominance_adjust,
+                                fixed_mask=est)
+            # the null family is frozen to the observed estimable set. A replicate in which a
+            # mask-true test yields no statistic is counted as MAXIMALLY extreme rather than
+            # dropped: those failures are degenerate fits (t -> inf), i.e. exactly the tail of the
+            # null, so deleting them would shrink the numerator of the empirical p and raise the
+            # min-p cutoff -- anticonservative in both directions.
+        except np.linalg.LinAlgError:
+            # the null model itself degenerated for this replicate: conservative extreme tuple.
+            # Any OTHER exception is a bug or a data error and must not be laundered into evidence.
+            return 0.0, float("nan"), 0.0, 1
+        if not np.isfinite(pp[est]).all():
+            return 0.0, float("nan"), 0.0, 1
+        return acat(pp), lambda_gc(pp), float(pp[est].min()), 0
 
     p_acat_emp = float("nan")
     lam_perm = float("nan")
     minp_perm_emp = float("nan")
     minp_perm_threshold = float("nan")
+    minp_perm_rejected = None
+    perm_status = dict(status="not_run", B_requested=int(perm_B or 0), n_used=0, n_degenerate=0,
+                       note="no resampling was run; empirical p fields are null, not 1.0")
     if perm_B and perm_B > 0:
         res = Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
-        res = [r for r in res if r is not None]
+        n_deg = int(sum(r[3] for r in res))
+        perm_status = dict(
+            status="completed" if n_deg == 0 else "completed_with_degenerate_replicates",
+            B_requested=int(perm_B), n_used=len(res), n_degenerate=n_deg,
+            note=None if n_deg == 0 else
+            f"{n_deg} replicate(s) had a design-valid test with no statistic and were counted as "
+            "maximally extreme (conservative); a large count means the null model is degenerate")
         if res:
             ap = np.array([r[0] for r in res])
             lam = np.array([r[1] for r in res])
             mp = np.array([r[2] for r in res])                  # permuted min pair-p distribution
-            p_acat_emp = float((1 + int((ap <= p_acat_obs).sum())) / (len(ap) + 1))
-            lam_perm = float(np.median(lam))
-            # experiment-wide FWER: empirical p of observed min-p, and the alpha=0.05 min-p cutoff
-            minp_perm_emp = float((1 + int((mp <= minp_obs).sum())) / (len(mp) + 1))
-            minp_perm_threshold = float(np.quantile(mp, 0.05))
+            if np.isfinite(p_acat_obs):
+                p_acat_emp = float((1 + int((ap <= p_acat_obs).sum())) / (len(ap) + 1))
+            lam_perm = float(np.nanmedian(lam)) if np.isfinite(lam).any() else float("nan")
+            # experiment-wide FWER from the SAME plus-one test as the cutoff, so the two can never
+            # disagree: reject iff (1 + #{null <= obs})/(B+1) <= alpha, i.e. iff obs is strictly
+            # below the k-th smallest null value with k = floor(alpha*(B+1)). An interpolated
+            # quantile is not a valid permutation cutoff and mishandles ties at zero.
+            if np.isfinite(minp_obs):
+                minp_perm_emp = float((1 + int((mp <= minp_obs).sum())) / (len(mp) + 1))
+            k = int(np.floor(0.05 * (len(mp) + 1)))
+            minp_perm_threshold = float(np.sort(mp)[k - 1]) if k >= 1 else float("nan")
+            # only the declared procedure emits a rejection decision: Bonferroni and permutation
+            # min-P each spend the full alpha over the same hypotheses
+            if (inferential and primary_multiplicity == "permutation_minp"
+                    and primary_weighting == "unweighted"):
+                minp_perm_rejected = bool(np.isfinite(minp_perm_emp) and minp_perm_emp <= 0.05)
 
     return InteractResult(
         trait="", transform=transform, n=int(n_t), G=int(G),
         pair_acat=float(p_acat_obs), pair_acat_emp=p_acat_emp, min_p=minp_obs,
         lambda_gc_obs=float(lam_obs), lambda_gc_perm_median=lam_perm,
-        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        bonferroni_alpha=float(bonf), n_sig=(len(sig) if sig is not None else None), sig=sig,
+        top=top,
         sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
         weighted=weighted, covariates=cov_meta,
-        minp_perm_emp=minp_perm_emp, minp_perm_threshold=minp_perm_threshold)
+        minp_perm_emp=minp_perm_emp, minp_perm_threshold=minp_perm_threshold,
+        minp_perm_rejected=minp_perm_rejected,
+        n_planned=int(G), n_valid=n_valid, n_unestimable=int(G - n_valid),
+        estimability=estimability, permutation=perm_status,
+        inference_plan=dict(
+            primary_weighting=primary_weighting, primary_multiplicity=primary_multiplicity,
+            inferential=bool(inferential),
+            note="rejection fields are emitted for the predeclared procedure only and are null "
+                 "elsewhere -- a suppressed procedure must not be readable as one that found "
+                 "nothing. Bonferroni and permutation min-P each spend the full alpha over the "
+                 "same hypotheses, so exactly one of them is inferential"))
 
 
 def _batch_nested_f(Yw: np.ndarray, Xred: np.ndarray, Xadd: np.ndarray) -> np.ndarray:
@@ -948,6 +1216,7 @@ def run_pair_scan_omnib(
     min_snp: int = 3,
     covariates: dict = None,
     tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
+    inferential: bool = True,           # False => sensitivity run, emits no rejection set
 ) -> InteractResult:
     """Encoding-invariant primary interaction scan (omniB) with kinship-preserving bootstrap.
 
@@ -1055,9 +1324,10 @@ def run_pair_scan_omnib(
         raise ValueError("no estimable pairs (every omniB component was non-estimable)")
     minp_obs = float(np.nanmin(p_obs))
     bonf = 0.05 / G
-    order = np.argsort(np.where(finite, p_obs, np.inf))
-    sig = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
-    top = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order[:5]]
+    order = [int(i) for i in np.argsort(np.where(finite, p_obs, np.inf)) if finite[i]]
+    sig = ([dict(pair=kept[i], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
+           if inferential else None)
+    top = [dict(pair=kept[i], p=float(p_obs[i])) for i in order[:5]]
     p_acat_obs = acat(p_obs)
 
     minp_boot_emp = minp_boot_threshold = None
@@ -1079,9 +1349,11 @@ def run_pair_scan_omnib(
         trait="", transform=transform, n=int(n_t), G=int(G),
         pair_acat=float(p_acat_obs), pair_acat_emp=float("nan"), min_p=minp_obs,
         lambda_gc_obs=float(lambda_gc(p_obs[finite])), lambda_gc_perm_median=float("nan"),
-        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        bonferroni_alpha=float(bonf), n_sig=(len(sig) if sig is not None else None), sig=sig,
+        top=top,
         sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
         weighted=None, covariates=cov_meta,
+        n_planned=int(G), n_valid=int(finite.sum()), n_unestimable=int((~finite).sum()),
         statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
@@ -1106,6 +1378,7 @@ def run_clique_scan_omnib(
     min_snp: int = 3,
     covariates: dict = None,
     tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
+    inferential: bool = True,           # False => sensitivity run, emits no rejection set
 ) -> InteractResult:
     """n-subgenome homoeolog-clique omniB scan (triad = n=3 special case; wheat/JA/8x).
 
@@ -1192,9 +1465,10 @@ def run_clique_scan_omnib(
         raise ValueError("no estimable pairs (every omniB component was non-estimable)")
     minp_obs = float(np.nanmin(p_obs))
     bonf = 0.05 / G
-    order = np.argsort(np.where(finite, p_obs, np.inf))
-    sig = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
-    top = [dict(pair=kept[int(i)], p=float(p_obs[i])) for i in order[:5]]
+    order = [int(i) for i in np.argsort(np.where(finite, p_obs, np.inf)) if finite[i]]
+    sig = ([dict(pair=kept[i], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
+           if inferential else None)
+    top = [dict(pair=kept[i], p=float(p_obs[i])) for i in order[:5]]
 
     minp_boot_emp = minp_boot_threshold = None
     tail_excess = None
@@ -1215,9 +1489,11 @@ def run_clique_scan_omnib(
         trait="", transform=transform, n=int(n_t), G=int(G),
         pair_acat=float(acat(p_obs)), pair_acat_emp=float("nan"), min_p=minp_obs,
         lambda_gc_obs=float(lambda_gc(p_obs[finite])), lambda_gc_perm_median=float("nan"),
-        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        bonferroni_alpha=float(bonf), n_sig=(len(sig) if sig is not None else None), sig=sig,
+        top=top,
         sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))},
         weighted=None, covariates=cov_meta,
+        n_planned=int(G), n_valid=int(finite.sum()), n_unestimable=int((~finite).sum()),
         statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
@@ -1240,6 +1516,9 @@ def run_clique_scan(
     triad_weights: dict = None,         # {group_tuple: w}  y-INDEPENDENT prior (HEB/DL), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q)} fixed effects; None=legacy
     dominance_adjust: bool = False,     # add per-gene b^2 covariates to every pairwise interaction
+    primary_weighting: str = "unweighted",   # which weighting spends alpha
+    primary_multiplicity: str = "bonferroni",  # only bonferroni is defined for the group omnibus
+    inferential: bool = True,           # False => sensitivity run, emits no rejection set
     full_dump_path: str = None,         # if set, write FULL per-group ranking TSV (else top-N only)
 ) -> dict:
     """Generic n-subgenome homoeolog-clique burden-product scan: full {K_s} whitening, all
@@ -1250,6 +1529,11 @@ def run_clique_scan(
     keys keep the ``triad_*`` names for backward compatibility (they are the group omnibus)."""
     from joblib import Parallel, delayed
 
+    if primary_weighting not in ("unweighted", "weighted"):
+        raise ValueError("primary_weighting must be 'unweighted' or 'weighted'")
+    if primary_multiplicity != "bonferroni":
+        raise ValueError("run_clique_scan supports primary_multiplicity='bonferroni' only")
+    bonf_is_primary = bool(inferential)
     rng = np.random.default_rng(seed)
     subs = list(subdata.keys())            # n subgenomes in config order
     n_t = sample_idx.size
@@ -1274,53 +1558,80 @@ def run_clique_scan(
             kept.append(tuple(group))
     G = len(kept)
     if G < 1:
-        return dict(G=0, note="no triads with all three homoeologs retained")
+        raise ValueError("no homoeolog group had every subgenome copy retained; there is no "
+                         "hypothesis to test and no primary family to report")
     Bd = {s: scols_safe(np.column_stack(cols[s])) for s in subs}
 
-    # y-independent per-triad prior weights (HEB/DL), normalized to mean 1 (missing -> 1)
+    # y-independent per-triad prior weights (HEB/DL), normalized to sum G (missing -> 1)
     w = None
     if triad_weights:
-        w = np.array([float(triad_weights.get(t, 1.0)) for t in kept])
-        w = np.where((w > 0) & np.isfinite(w), w, 1.0)
-        w = w * (G / w.sum())
+        w = _normalize_weights([triad_weights.get(t, 1.0) for t in kept], G, "triad weights")
+    if primary_weighting == "weighted" and w is None:
+        raise ValueError("primary_weighting='weighted' requires triad_weights; otherwise the "
+                         "unweighted rejections are suppressed and no primary procedure runs")
+    weights_checked = False
 
     y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
     Wh, cv = whiten_multi(kernels, y, X=C, seed=42)
 
     pairwise_defs = list(itertools.combinations(subs, 2))   # all C(n,2) within-group pairs
-    pw_p = {}
+    tags = [f"{sx}{sy}" for sx, sy in pairwise_defs]
+    pw_p, pw_est, pw_excl = {}, {}, {}
+    n_late_total = 0
     for sx, sy in pairwise_defs:
-        pw_p[f"{sx}{sy}"] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C, dominance_adjust=dominance_adjust)
-    triad_acat = np.array([acat([pw_p[f"{sx}{sy}"][i] for sx, sy in pairwise_defs])
-                           for i in range(G)])
+        tag = f"{sx}{sy}"
+        # RAW-design estimability: the whitener is fitted to y, so deciding membership after
+        # whitening would let the tested family move with the phenotype
+        pw_est[tag], pw_excl[tag] = pairwise_design_mask(Bd[sx], Bd[sy], C=C,
+                                                         dominance_adjust=dominance_adjust)
+        pw_p[tag] = pairwise_pvals(Wh, y, Bd[sx], Bd[sy], C=C,
+                                   dominance_adjust=dominance_adjust, fixed_mask=pw_est[tag])
+        late = int((pw_est[tag] & ~np.isfinite(pw_p[tag])).sum())
+        n_late_total += late
+        if late:
+            raise ValueError(f"contrast {tag}: {late} groups estimable on the raw design lost "
+                             "their statistic after whitening")
+    if not any(pw_est[t].any() for t in tags):
+        raise ValueError("no estimable group in any contrast")
+    if inferential and primary_weighting == "weighted" and not weights_checked:
+        any_est = np.logical_or.reduce([pw_est[t] for t in tags])
+        if not (any_est & (w > 0)).any():
+            raise ValueError("every estimable group has weight zero: no hypothesis receives any "
+                             "alpha under weighted primary")
+        weights_checked = True
+    triad_acat = np.array([acat([pw_p[t][i] for t in tags]) for i in range(G)])
     triad_omnibus = acat(triad_acat)
+    group_est = np.isfinite(triad_acat)                     # a group is testable if any contrast is
 
     if full_dump_path:
         # Full genome-wide per-triad ranking by ascending triad-ACAT (descriptive). gene_len is
         # emitted as NA (engine has no coordinates) and joined downstream from the GFF.
-        tags = [f"{sx}{sy}" for sx, sy in pairwise_defs]
         pmat = np.column_stack([pw_p[t] for t in tags])      # (G, C(n,2)) per-pairwise p
-        pmat = np.where(np.isfinite(pmat), pmat, 1.0)         # sanitize before ranking
-        # local finite copy of the per-group ACAT for ranking (persisted stats untouched)
-        acat_rank = np.where(np.isfinite(triad_acat), triad_acat, 1.0)
-        min_pair = pmat.min(1)
-        min_tag = np.array(tags)[pmat.argmin(1)]
+        pmat_key = np.where(np.isfinite(pmat), pmat, np.inf)  # private sort key; pmat itself is kept
+        # unestimable rows stay in the dump but sort last and print NA rather than a fabricated 1.0
+        sort_key = np.where(group_est, triad_acat, np.inf)
+        min_pair = np.where(np.isfinite(pmat_key).any(1), pmat_key.min(1), np.nan)
+        min_tag = np.where(np.isfinite(min_pair), np.array(tags)[pmat_key.argmin(1)], "NA")
         bonf_ac = 0.05 / G
-        _, rank_of, tie_of = _rank_with_ties(acat_rank, kept)
-        nl = _neglog10(acat_rank)
+        _, rank_of, tie_of = _rank_with_ties(sort_key, kept)
+        nl = _neglog10(triad_acat)
         ns = {s: np.asarray(nsnp[s]) for s in subs}
         ns_sum = sum(ns[s] for s in subs)
         cbin = _decile_bin(ns_sum)
         na_len = ["NA"] * len(subs)
         rows = []
-        for i in np.argsort(acat_rank, kind="stable"):
+        for i in np.argsort(sort_key, kind="stable"):
             row = [int(rank_of[i])]
             row += [kept[i][j] for j in range(len(subs))]                 # gene_<s>
-            row += [repr(float(pmat[i, j])) for j in range(len(tags))]    # p_<tag>
-            row += [repr(float(acat_rank[i])), repr(float(nl[i])),
-                    repr(float(min_pair[i])), str(min_tag[i])]
+            row += [_tsv_p(pmat[i, j]) for j in range(len(tags))]         # p_<tag>
+            row += [_tsv_p(triad_acat[i]), _tsv_p(nl[i]),
+                    _tsv_p(min_pair[i]), str(min_tag[i])]
             row += [int(ns[s][i]) for s in subs]                          # n_snp_<s>
-            row += [int(ns_sum[i]), int(cbin[i]), int(tie_of[i]), int(acat_rank[i] < bonf_ac)]
+            g_alpha = (bonf_ac * w[i] if (w is not None and primary_weighting == "weighted")
+                       else bonf_ac)
+            row += [int(ns_sum[i]), int(cbin[i]), int(tie_of[i]),
+                    (int(group_est[i] and triad_acat[i] < g_alpha)
+                     if (inferential and bonf_is_primary) else "NA")]
             row += na_len                                                 # gene_len_<s>
             rows.append(row)
         # n=3 keeps the legacy column name `n_snp_triad` for byte-compat with existing
@@ -1330,26 +1641,164 @@ def run_clique_scan(
                   + [f"p_{t}" for t in tags]
                   + ["p_acat", "neglog10p_acat", "min_pair_p", "min_pair_tag"]
                   + [f"n_snp_{s}" for s in subs]
-                  + [n_snp_total_col, "callable_snp_decile", "tie_group", "bonferroni_sig_acat"]
+                  + [n_snp_total_col, "callable_snp_decile", "tie_group", "primary_sig_acat"]
                   + [f"gene_len_{s}" for s in subs])
         _write_ranking_tsv(full_dump_path, header, rows)
 
+    # Multiplicity families. A group contributes K = C(s,2) pairwise tests, so a pairwise p that was
+    # selected across contrasts is a hypothesis of the whole G*K family; 0.05/G only controls the G
+    # tests inside ONE contrast, and the authoritative fields below therefore carry the G*K family.
+    # The per-group ACAT omnibus is one test per group (0.05/G) and each contrast also emits one
+    # omnibus ACAT over its G groups, which is a third family of size K.
+    n_contrasts = len(pairwise_defs)
+    bonf_pairwise_family = 0.05 / (G * n_contrasts)
+    bonf_group = 0.05 / G
+    bonf_contrast = 0.05 / n_contrasts
+    n_valid_pairwise = int(sum(int(pw_est[t].sum()) for t in tags))
+    families = dict(
+        pairwise_all=dict(hypothesis_unit="group_x_subgenome_contrast", alpha=0.05,
+                          method="bonferroni", contrasts=list(tags),
+                          n_contrasts=int(n_contrasts), n_groups=int(G),
+                          n_tests=int(G * n_contrasts), n_planned=int(G * n_contrasts),
+                          n_valid=n_valid_pairwise,
+                          n_unestimable=int(G * n_contrasts - n_valid_pairwise),
+                          per_test_alpha=(float(bonf_pairwise_family)
+                                          if primary_weighting == "unweighted" else None),
+                          per_test_alpha_rule=("0.05/(G*n_contrasts)"
+                                               if primary_weighting == "unweighted"
+                                               else "0.05*w_i/(G*n_contrasts)"),
+                          method_detail=("bonferroni" if primary_weighting == "unweighted"
+                                         else "weighted_bonferroni")),
+        group_omnibus=dict(hypothesis_unit="group", alpha=0.05, method="bonferroni",
+                           n_tests=int(G), n_planned=int(G), n_valid=int(group_est.sum()),
+                           n_unestimable=int((~group_est).sum()),
+                           per_test_alpha=(float(bonf_group) if primary_weighting == "unweighted"
+                                           else None),
+                           per_test_alpha_rule=("0.05/G" if primary_weighting == "unweighted"
+                                                else "0.05*w_i/G")),
+        contrast_omnibus=dict(hypothesis_unit="subgenome_contrast_omnibus", alpha=0.05,
+                              method="bonferroni", n_tests=int(n_contrasts),
+                              n_planned=int(n_contrasts), per_test_alpha=float(bonf_contrast)))
+    inference_plan = dict(
+        primary_family=("group_omnibus" if inferential else None),
+        inferential=bool(inferential), pairwise_role="gated_follow_up_localization",
+        gatekeeping=("a pairwise or contrast rejection is emitted ONLY for a group that already "
+                     "rejected in the primary group_omnibus family, so the two cannot be unioned "
+                     "into an uncontrolled claim; contrast-level ACAT emits no rejection decision"),
+        primary_weighting=primary_weighting,
+        weighted_role=("primary" if primary_weighting == "weighted" else
+                       "exploratory_no_rejections_emitted"),
+        note="a pairwise p selected across the contrasts of its group is a pairwise_all hypothesis; "
+             "judging it at the group_omnibus threshold does not control the family. The weighted "
+             "and unweighted procedures each spend the FULL alpha over the SAME hypotheses, so "
+             "taking discoveries from whichever one rejects is a union of two alpha-level "
+             "procedures and is NOT controlled at alpha; exactly one must be predeclared")
+
+    # group omnibus (the declared primary family) reported as an inference, not just as metadata
+    # under weighted primary the ranking score is the WEIGHTED adjusted p, whose minimum can sit at
+    # a different group than the smallest raw p
+    if primary_weighting == "weighted":
+        g_score = np.where(group_est & (w > 0), triad_acat * G / np.where(w > 0, w, 1.0), np.inf)
+    else:
+        g_score = np.where(group_est, triad_acat * G, np.inf)
+    g_order = [int(i) for i in np.argsort(g_score) if np.isfinite(g_score[i])]
+    # the primary family must actually be decided under whichever weighting was predeclared
+    if primary_weighting == "unweighted":
+        gated = {i for i in g_order if bonf_is_primary and triad_acat[i] < bonf_group}
+        g_rej = [dict(triad=kept[i], p=float(triad_acat[i]),
+                      p_adjusted_bonferroni=float(min(g_score[i], 1.0)))
+                 for i in g_order if i in gated]
+    else:
+        gated = {i for i in g_order
+                 if bonf_is_primary and w[i] > 0 and triad_acat[i] < bonf_group * w[i]}
+        g_rej = [dict(triad=kept[i], p=float(triad_acat[i]), weight=float(w[i]),
+                      p_adjusted_bonferroni=float(min(g_score[i], 1.0)))
+                 for i in g_order if i in gated]
+    # a group whose ACAT combined fewer than K contrasts is still a valid test, but the reader must
+    # be able to see that it is a partial omnibus
+    all_est = np.logical_and.reduce([pw_est[t] for t in tags])
+    group_omnibus = dict(
+        bonferroni_family_id="group_omnibus", weighting=primary_weighting,
+        bonferroni_alpha=(float(bonf_group) if primary_weighting == "unweighted" else None),
+        per_test_alpha_rule=("0.05/G" if primary_weighting == "unweighted"
+                             else "0.05*w_i/G (weights normalised to sum G)"),
+        n_planned=int(G), n_valid=int(group_est.sum()), n_unestimable=int((~group_est).sum()),
+        n_partial=int((group_est & ~all_est).sum()), k_expected=int(n_contrasts),
+        min_p=float(triad_acat[g_order[0]]) if g_order else float("nan"),
+        min_p_adjusted_bonferroni=(float(min(g_score[g_order[0]], 1.0)) if g_order
+                                   else float("nan")),
+        n_sig=(len(g_rej) if bonf_is_primary else None),
+        sig=(g_rej if bonf_is_primary else None),
+        top=[dict(triad=kept[i], p=float(triad_acat[i]),
+                  p_adjusted_bonferroni=float(min(g_score[i], 1.0))) for i in g_order[:5]])
+
+    # `gated` holds the groups that survived the primary family; a pairwise or contrast rejection
+    # is a FOLLOW-UP inside them, not an independent full-alpha family a reader could union with it
     pw_res = {}
-    for sx, sy in pairwise_defs:
-        tag = f"{sx}{sy}"
+    for tag in tags:
         pv = pw_p[tag]
-        bonf = 0.05 / G
-        order = np.argsort(pv)
+        est = pw_est[tag]
+        nv = int(est.sum())
+        order = [int(i) for i in np.argsort(np.where(est, pv, np.inf)) if est[i]]
+        p_adj = np.minimum(pv * G * n_contrasts, 1.0)
+        rej = ([dict(triad=kept[i], p=float(pv[i]), p_adjusted_bonferroni=float(p_adj[i]))
+                for i in order if i in gated and pv[i] < bonf_pairwise_family]
+               if (bonf_is_primary and primary_weighting == "unweighted") else None)
+        loc = [dict(triad=kept[i], p=float(pv[i])) for i in order if pv[i] < bonf_group]
+        ac = acat(pv)
         pw_res[tag] = dict(
-            G=int(G), acat=float(acat(pv)), min_p=float(pv.min()), lambda_gc_obs=float(lambda_gc(pv)),
-            bonferroni_alpha=float(bonf), n_sig=int((pv < bonf).sum()),
-            sig=[dict(triad=kept[int(i)], p=float(pv[i])) for i in order if pv[i] < bonf],
-            top=[dict(triad=kept[int(i)], p=float(pv[i])) for i in order[:5]])
+            G=int(G), acat=float(ac),
+            acat_adjusted_bonferroni=(float(min(ac * n_contrasts, 1.0)) if np.isfinite(ac)
+                                      else float("nan")),
+            acat_family_id="contrast_omnibus",
+            acat_rejected_familywise=None,      # gated: the primary family is group_omnibus
+            min_p=float(pv[order[0]]) if order else float("nan"),
+            lambda_gc_obs=float(lambda_gc(pv)),
+            n_planned=int(G), n_valid=nv, n_unestimable=int(G - nv),
+            n_nonestimable=int(G - nv),                      # deprecated alias of n_unestimable
+            unestimable=[dict(triad=kept[i], reason=r) for i, r in sorted(pw_excl[tag].items())],
+            bonferroni_family_id="pairwise_all",
+            min_p_adjusted_bonferroni=(float(p_adj[order[0]]) if order else float("nan")),
+            bonferroni_alpha=float(bonf_pairwise_family),
+            bonferroni_alpha_basis="0.05/(G*n_contrasts)",
+            n_sig=(len(rej) if rej is not None else None), sig=rej,
+            n_rejected_familywise=(len(rej) if rej is not None else None),
+            rejected_familywise=rej,
+            exploratory_within_contrast=dict(
+                role="exploratory_only", alpha=0.05, method="bonferroni", n_tests=int(G),
+                per_test_alpha=float(bonf_group), n_below_per_contrast_alpha=len(loc),
+                valid_for_cross_contrast_selection=False,
+                note=f"descriptive count of contrast-{tag} p-values below 0.05/G, retained so that "
+                     "results from engines through 1.0.2 remain traceable. NO identifier list is "
+                     "emitted: a second selectable rejection set beside the primary one would make "
+                     "the pair of procedures a union that is not controlled at alpha"),
+            top=[dict(triad=kept[i], p=float(pv[i])) for i in order[:5]])
         if w is not None:
-            wsig = [dict(triad=kept[int(i)], p=float(pv[i]), weight=float(w[i]))
-                    for i in order if pv[i] < bonf * w[i]]
-            pw_res[tag]["weighted"] = dict(acat_weighted=float(acat_weighted(pv, w)),
-                                           bonferroni_n_sig=len(wsig), sig=wsig)
+            # weighted Bonferroni over the whole pairwise family: sum_i alpha_i <= alpha requires the
+            # weights to be normalised across all G*K tests, not within one contrast
+            wsig = ([dict(triad=kept[i], p=float(pv[i]), weight=float(w[i]))
+                     for i in order
+                     if i in gated and w[i] > 0 and pv[i] < bonf_pairwise_family * w[i]]
+                    if (bonf_is_primary and primary_weighting == "weighted") else None)
+            wac = acat_weighted(pv, w)
+            pw_res[tag]["weighted"] = dict(
+                role=("primary" if primary_weighting == "weighted" else
+                      "exploratory_no_rejections_emitted"),
+                acat_weighted=float(wac),
+                acat_weighted_adjusted_bonferroni=(float(min(wac * n_contrasts, 1.0))
+                                                   if np.isfinite(wac) else float("nan")),
+                acat_rejected_familywise=None,  # gated: the primary family is group_omnibus
+                acat_family_id="contrast_omnibus", bonferroni_family_id="pairwise_all",
+                n_rejected_familywise=(len(wsig) if wsig is not None else None),
+                bonferroni_n_sig=(len(wsig) if wsig is not None else None), sig=wsig,
+                per_test_alpha_basis="0.05/(G*n_contrasts) * w_i",
+                note="controls FWER only if this weighted procedure was predeclared as THE primary "
+                     "one; reporting it alongside the unweighted rejections and taking either is a "
+                     "union of two alpha-level procedures")
+
+    n_ac_valid = int(sum(1 for t in tags if np.isfinite(pw_res[t]["acat"])))
+    families["contrast_omnibus"]["n_valid"] = n_ac_valid
+    families["contrast_omnibus"]["n_unestimable"] = int(n_contrasts - n_ac_valid)
 
     # Freedman-Lane permutation (reduces to y-shuffle when C is intercept-only)
     if C is None:
@@ -1365,24 +1814,53 @@ def run_clique_scan(
         ys = y[perm] if C is None else (fl_fit + fl_resid[perm])
         try:
             Whp, _ = whiten_multi(kernels, ys, X=C, seed=seed_i % 100000)
-            pp = {f"{sx}{sy}": pairwise_pvals(Whp, ys, Bd[sx], Bd[sy], C=C, dominance_adjust=dominance_adjust) for sx, sy in pairwise_defs}
-            tacat = np.array([acat([pp[f"{sx}{sy}"][i] for sx, sy in pairwise_defs]) for i in range(G)])
-            return acat(tacat), {f"{sx}{sy}": lambda_gc(pp[f"{sx}{sy}"]) for sx, sy in pairwise_defs}
-        except Exception:  # noqa: BLE001
-            return None
+            pp = {}
+            for sx, sy in pairwise_defs:
+                t = f"{sx}{sy}"
+                pp[t] = pairwise_pvals(Whp, ys, Bd[sx], Bd[sy], C=C,
+                                       dominance_adjust=dominance_adjust, fixed_mask=pw_est[t])
+                # a replicate whose mask-true test yields no statistic is counted as MAXIMALLY
+                # extreme, not dropped: those failures are degenerate fits (t -> inf), i.e. the very
+                # tail of the null, so deleting them would bias the calibration anticonservatively
+                if not np.isfinite(pp[t][pw_est[t]]).all():
+                    return 0.0, {t2: float("nan") for t2 in tags}, 1
+        except np.linalg.LinAlgError:
+            # the null model degenerated for this replicate; any OTHER exception is a bug or a data
+            # error and must not be laundered into null-tail evidence
+            return 0.0, {t2: float("nan") for t2 in tags}, 1
+        tacat = np.array([acat([pp[t][i] for t in tags]) for i in range(G)])
+        return acat(tacat), {t: lambda_gc(pp[t]) for t in tags}, 0
 
     triad_emp = float("nan")
     lam_perm = {}
+    perm_status = dict(status="not_run", B_requested=int(perm_B or 0), n_used=0, n_degenerate=0,
+                       note="no resampling was run; empirical p fields are null, not 1.0")
     if perm_B and perm_B > 0:
-        res = [r for r in Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
-               if r is not None]
+        res = Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
+        n_deg = int(sum(r[2] for r in res))
+        perm_status = dict(
+            status="completed" if n_deg == 0 else "completed_with_degenerate_replicates",
+            B_requested=int(perm_B), n_used=len(res), n_degenerate=n_deg,
+            note=None if n_deg == 0 else
+            f"{n_deg} replicate(s) had a design-valid test with no statistic and were counted as "
+            "maximally extreme (conservative); a large count means the null model is degenerate")
         if res:
             om = np.array([r[0] for r in res])
-            triad_emp = float((1 + int((om <= triad_omnibus).sum())) / (len(om) + 1))
-            lam_perm = {tag: float(np.median([r[1][tag] for r in res]))
-                        for tag in (f"{sx}{sy}" for sx, sy in pairwise_defs)}
+            if np.isfinite(triad_omnibus):
+                triad_emp = float((1 + int((om <= triad_omnibus).sum())) / (len(om) + 1))
+            lam_perm = {}
+            for t in tags:
+                lv = np.array([r[1][t] for r in res])
+                lam_perm[t] = float(np.nanmedian(lv)) if np.isfinite(lv).any() else float("nan")
 
-    out = dict(transform=transform, n=int(n_t), G=int(G),
+    estimability = dict(ESTIMABILITY_POLICY, decided_on="raw_design",
+                        n_planned=int(G * n_contrasts), n_valid=n_valid_pairwise,
+                        n_unestimable=int(G * n_contrasts - n_valid_pairwise),
+                        n_late_fail=n_late_total,
+                        by_contrast={t: int((~pw_est[t]).sum()) for t in tags})
+    out = dict(result_schema_version=2, transform=transform, n=int(n_t), G=int(G),
+               families=families, inference_plan=inference_plan, permutation=perm_status,
+               estimability=estimability, group_omnibus=group_omnibus,
                triad_acat_omnibus=float(triad_omnibus), triad_acat_omnibus_emp=triad_emp,
                pairwise=pw_res, lambda_gc_perm_median=lam_perm, covariates=cov_meta,
                sigma_hat={s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))})
@@ -1392,8 +1870,11 @@ def run_clique_scan(
             triad_acat_omnibus_weighted=float(acat_weighted(triad_acat, w)),
             audit=dict(n_triads=int(G), n_covered=n_cov, n_missing_default1=int(G - n_cov),
                        weight_min=float(w.min()), weight_mean=float(w.mean()), weight_max=float(w.max())),
+            role=("primary" if primary_weighting == "weighted" else
+                  "exploratory_no_rejections_emitted"),
             note=("per-triad y-independent prior (HEB/DL) frozen pre-association; weighted "
-                  "Bonferroni controls per-pairwise FWER, weighted ACAT is the prior-weighted omnibus."))
+                  "Bonferroni controls per-pairwise FWER only when predeclared as the single "
+                  "primary procedure, weighted ACAT is the prior-weighted omnibus."))
     return out
 
 
@@ -1507,6 +1988,7 @@ def run_multitrait_pair_scan(
     sample_idx: np.ndarray,
     *,
     trait_set: FrozenTraitSet,          # frozen, ordered; keys of y_by_trait MUST match
+    inferential: bool = True,           # False => sensitivity run, emits no rejection set
     cap: int = 150,
     transform: str = "INT",
     perm_B: int = 2000,
@@ -1572,51 +2054,82 @@ def run_multitrait_pair_scan(
                else np.asarray(y_by_trait[t], float)) for t in traits}
     P = np.empty((G, len(traits)))
     cv_by_trait = {}
+    # one RAW-design mask shared by every trait and every permutation: the whitener is refitted per
+    # trait, so a mask read off the whitened design would make the family depend on the phenotypes
+    design_mask, design_excl = pairwise_design_mask(BX, BY, dominance_adjust=dominance_adjust)
+    if not design_mask.any():
+        raise ValueError("no estimable pair in the multi-trait scan")
+    M = np.repeat(design_mask[:, None], len(traits), axis=1)
     for j, t in enumerate(traits):
         Wh, cv = whiten_multi(kernels, y_t[t], seed=42 + j)
-        pv = pairwise_pvals(Wh, y_t[t], BX, BY, dominance_adjust=dominance_adjust)
-        P[:, j] = np.where(np.isfinite(pv), pv, 1.0)
+        pv = pairwise_pvals(Wh, y_t[t], BX, BY, dominance_adjust=dominance_adjust,
+                            fixed_mask=design_mask)
+        late = int((design_mask & ~np.isfinite(pv)).sum())
+        if late:
+            raise ValueError(f"trait '{t}': {late} pairs estimable on the raw design lost their "
+                             "statistic after whitening")
+        P[:, j] = pv                                    # non-estimable stays NaN; ACAT drops it
         cv_by_trait[t] = {s: float(cv.get(s, 0.0)) for s in subs} | {"e": float(cv.get("e", 0.0))}
 
+    Pf = np.where(np.isfinite(P), P, np.inf)
+    has_any = np.isfinite(P).any(1)
     pleio_p = np.array([acat(P[i]) for i in range(G)])
-    audit_min_p = P.min(1)
-    audit_min_trait = [traits[int(j)] for j in P.argmin(1)]
+    audit_min_p = np.where(has_any, Pf.min(1), np.nan)
+    audit_min_trait = [traits[int(j)] if has_any[i] else None for i, j in enumerate(Pf.argmin(1))]
 
     pleio_omnibus = acat(pleio_p)
-    minp_obs = float(pleio_p.min())
+    finite_pleio = np.isfinite(pleio_p)
+    if not finite_pleio.any():
+        raise ValueError("no pair has a defined pleiotropy statistic; an empirical p computed "
+                         "against an undefined observed value would report the smallest possible p")
+    minp_obs = float(pleio_p[finite_pleio].min()) if finite_pleio.any() else float("nan")
     lam_obs = lambda_gc(pleio_p)
     bonf = 0.05 / G                                     # multiplicity over G pairs only
-    order = np.argsort(pleio_p)
-    sig = [dict(pair=kept_pairs[int(i)], pleio_p=float(pleio_p[i]),
-                per_trait_p={t: float(P[i, j]) for j, t in enumerate(traits)})
-           for i in order if pleio_p[i] < bonf]
+    order = np.argsort(np.where(finite_pleio, pleio_p, np.inf))
+    order_valid = [int(i) for i in order if finite_pleio[i]]
+    sig = ([dict(pair=kept_pairs[int(i)], pleio_p=float(pleio_p[i]),
+                 per_trait_p={t: float(P[i, j]) for j, t in enumerate(traits)})
+            for i in order_valid if pleio_p[i] < bonf] if inferential else None)
     top = [dict(pair=kept_pairs[int(i)], pleio_p=float(pleio_p[i]),
                 audit_min_trait_p=float(audit_min_p[i]), audit_min_trait_name=audit_min_trait[int(i)],
                 per_trait_p={t: float(P[i, j]) for j, t in enumerate(traits)})
-           for i in order[:5]]
+           for i in order_valid[:5]]
 
     # shared-permutation calibration (same row permutation across all traits)
     def _perm(seed_i):
         r = np.random.default_rng(seed_i)
         perm = r.permutation(n_t)
         cols = []
-        for t in traits:
+        for j, t in enumerate(traits):
             ys = y_t[t][perm]
+            # the trait x pair family is frozen to the observed design mask; a replicate that loses
+            # or gains a component would be testing a different family
             try:
                 Whp, _ = whiten_multi(kernels, ys, seed=seed_i % 100000)
-                pp = pairwise_pvals(Whp, ys, BX, BY, dominance_adjust=dominance_adjust)
-            except Exception:  # noqa: BLE001
-                return None
-            cols.append(np.where(np.isfinite(pp), pp, 1.0))
+                pp = pairwise_pvals(Whp, ys, BX, BY, dominance_adjust=dominance_adjust,
+                                    fixed_mask=M[:, j])
+            except np.linalg.LinAlgError:
+                # only a degenerate null model may become a conservative extreme replicate; any
+                # other exception is a bug or a data error and must propagate
+                return 0.0, 0.0, 1
+            if not np.isfinite(pp[M[:, j]]).all():
+                return 0.0, 0.0, 1                      # degenerate => maximally extreme, not dropped
+            cols.append(pp)
         Pp = np.column_stack(cols)
         pleio_perm = np.array([acat(Pp[i]) for i in range(G)])
-        return acat(pleio_perm), float(pleio_perm.min())
+        if not np.isfinite(pleio_perm).any():
+            return 0.0, 0.0, 1
+        return acat(pleio_perm), float(np.nanmin(pleio_perm)), 0
 
     pleio_emp = float("nan")
     minp_emp = float("nan")
+    perm_status = dict(status="not_run", B_requested=int(perm_B or 0), n_used=0, n_degenerate=0)
     if perm_B and perm_B > 0:
-        res = [r for r in Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
-               if r is not None]
+        res = Parallel(n_jobs=n_jobs)(delayed(_perm)(900000 + i) for i in range(perm_B))
+        n_deg = int(sum(r[2] for r in res))
+        perm_status = dict(
+            status="completed" if n_deg == 0 else "completed_with_degenerate_replicates",
+            B_requested=int(perm_B), n_used=len(res), n_degenerate=n_deg)
         if res:
             om = np.array([r[0] for r in res])
             mp = np.array([r[1] for r in res])
@@ -1627,8 +2140,18 @@ def run_multitrait_pair_scan(
         transform=transform, n=int(n_t), G=int(G), traits=list(traits),
         trait_set_digest=trait_set.digest, single_trait=bool(len(traits) == 1),
         pleio_acat_omnibus=float(pleio_omnibus), pleio_acat_omnibus_emp=pleio_emp,
+        n_planned=int(G), n_valid=int(finite_pleio.sum()),
+        n_unestimable=int((~finite_pleio).sum()),
+        n_partial=int((finite_pleio & ~M.all(1)).sum()), k_expected=len(traits),
+        permutation=perm_status,
+        estimability=dict(ESTIMABILITY_POLICY, decided_on="raw_design",
+                          n_planned=int(G), n_valid=int(design_mask.sum()),
+                          n_unestimable=int((~design_mask).sum()),
+                          excluded=[dict(pair=kept_pairs[i], reason=r)
+                                    for i, r in sorted(design_excl.items())]),
         min_p=minp_obs, min_p_emp=minp_emp, lambda_gc_obs=float(lam_obs),
-        bonferroni_alpha=float(bonf), n_sig=len(sig), sig=sig, top=top,
+        bonferroni_alpha=float(bonf), n_sig=(len(sig) if sig is not None else None), sig=sig,
+        top=top, inferential=bool(inferential),
         sigma_hat_by_trait=cv_by_trait,
         note=("DEGENERATE single-trait set: pleiotropy ACAT reduces to the single-trait scan. "
               if len(traits) == 1 else "")
@@ -1736,6 +2259,11 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     grm_method = grm_cfg.get("method", "compute_grm_maf")
     maf_min = float(grm_cfg.get("maf_min", 0.01))
     n_jobs = int(args.n_jobs)
+    primary_transform = str(ic.get("primary_transform", "INT")).upper()
+    if primary_transform not in ("INT", "RAW"):
+        print(f"ERROR: interact.primary_transform must be 'INT' or 'raw'; got "
+              f"'{primary_transform}'.")
+        return 2
 
     print(f"  multi_trait n_complete_case={len(valid)} traits={len(tlist)} digest={trait_set.digest} "
           f"pairs(raw)={len(pairs)} ({time.time()-t0:.1f}s)", flush=True)
@@ -1743,14 +2271,16 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     for transform in ("INT", "raw"):
         r = run_multitrait_pair_scan(subdata, pairs, y_by_trait, sample_idx, trait_set=trait_set,
                                      cap=cap, transform=transform,
-                                     perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
+                                     inferential=(transform.upper() == primary_transform),
+                                     perm_B=(perm_B if transform.upper() == primary_transform
+                                             else 0), n_jobs=n_jobs,
                                      pair_subs=(subs[0], subs[1]), grm_method=grm_method,
                                      maf_min=maf_min, dominance_adjust=dominance_adjust)
         results[transform] = r
         print(f"  [{transform}] G={r['G']} pleio_ACAT_omnibus={r['pleio_acat_omnibus']:.3g} "
               f"emp={r['pleio_acat_omnibus_emp']} minP={r['min_p']:.3g} λ_obs={r['lambda_gc_obs']:.3f} "
               f"nsig(α={r['bonferroni_alpha']:.1e})={r['n_sig']}", flush=True)
-        for h in r["sig"]:
+        for h in (r["sig"] or []):
             print(f"      HIT {h['pair']} pleio_p={h['pleio_p']:.3g}")
 
     from . import __version__
@@ -1764,6 +2294,9 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
         perm_B=perm_B,
         covariate_policy="none: subgenome-stratified GRMs only (no PCs/covariates)",
         trait_set=tlist, trait_set_digest=trait_set.digest, n_traits=len(tlist),
+        primary_transform=primary_transform,
+        transform_firewall=("both transforms are scanned but only the primary one emits "
+                            "rejections; the other is a sensitivity analysis"),
         n_complete_case=len(valid), complete_case_sha256=cc_hash, complete_case_sample_order=valid,
         per_trait_present=per_trait_present, n_pairs_raw=len(pairs),
         pairs_source=pairs_path, pairs_sha256=pairs_sha,
@@ -1776,7 +2309,7 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     payload = dict(tool="homoeogwas", command="interact", mode="pairwise", multi_trait=True,
                    subgenomes=subs, traits=tlist, provenance=provenance, results=results)
     fp = out_dir / f"interact_multitrait_{trait_set.digest}.json"
-    fp.write_text(json.dumps(payload, indent=2, default=float))
+    fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact (multi-trait) -> {fp} ({time.time()-t0:.1f}s)")
     return 0
 
@@ -1836,6 +2369,38 @@ def cmd_interact(args) -> int:
     # Primary = encoding-invariant omniB + kinship-preserving parametric bootstrap (the paper method);
     # the legacy REF-burden product + Freedman-Lane permutation stays available as explicit opt-in.
     statistic = str(ic.get("statistic", "omniB")).lower()
+    primary_weighting = str(ic.get("primary_weighting", "unweighted")).lower()
+    if primary_weighting not in ("unweighted", "weighted"):
+        print(f"ERROR: interact.primary_weighting must be 'unweighted' or 'weighted'; "
+              f"got '{primary_weighting}'.")
+        return 2
+    if primary_weighting == "weighted" and statistic == "omnib":
+        print("ERROR: primary_weighting='weighted' is not implemented for statistic=omniB; "
+              "use statistic=burden or primary_weighting=unweighted.")
+        return 2
+    if primary_weighting == "weighted" and ic.get("multi_trait"):
+        print("ERROR: primary_weighting='weighted' is not implemented for multi-trait scans; "
+              "the pleiotropy ACAT has no weighted counterpart yet.")
+        return 2
+    primary_transform = str(ic.get("primary_transform", "INT")).upper()
+    if primary_transform not in ("INT", "RAW"):
+        print(f"ERROR: interact.primary_transform must be 'INT' or 'raw'; got "
+              f"'{primary_transform}'.")
+        return 2
+    primary_multiplicity = str(ic.get("primary_multiplicity", "bonferroni")).lower()
+    if primary_multiplicity not in ("bonferroni", "permutation_minp"):
+        print(f"ERROR: interact.primary_multiplicity must be 'bonferroni' or "
+              f"'permutation_minp'; got '{primary_multiplicity}'.")
+        return 2
+    if primary_multiplicity == "permutation_minp" and (statistic == "omnib" or mode in GROUP_MODES
+                                                       or ic.get("multi_trait")):
+        print("ERROR: primary_multiplicity='permutation_minp' is only defined for the "
+              "single-trait two-subgenome burden pair scan.")
+        return 2
+    if primary_multiplicity == "permutation_minp" and primary_weighting == "weighted":
+        print("ERROR: weighted permutation min-P is not implemented; the permuted statistic would "
+              "have to be the weighted one. Use primary_multiplicity=bonferroni.")
+        return 2
     calib_method = str(calib.get("method", "bootstrap" if statistic == "omnib" else "permutation")).lower()
     if (statistic, calib_method) not in (("omnib", "bootstrap"), ("burden", "permutation")):
         print(f"ERROR: interact: only statistic=omniB + calibration.method=bootstrap (paper default) "
@@ -1887,6 +2452,7 @@ def cmd_interact(args) -> int:
             for transform in ("INT", "raw"):
                 r = run_clique_scan_omnib(
                     subdata, triads, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
+                    inferential=(transform.upper() == primary_transform),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
                     n_jobs=n_jobs, grm_method=grm_method, maf_min=maf_min, covariates=cov_arg)
                 r.trait = trait
@@ -1897,13 +2463,16 @@ def cmd_interact(args) -> int:
                       f"bootFWER(minP_emp={r.minp_boot_emp})"
                       + (f" tail(p<1e-3 obs={te['observed']} null={te['null_mean']:.1f} "
                          f"emp_p={te['empirical_p']:.3g})" if te else ""), flush=True)
-                for h in r.sig:
+                for h in (r.sig or []):
                     print(f"      HIT {h['pair']} p={h['p']:.3g}")
         else:
             for transform in ("INT", "raw"):
                 r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
                                     dominance_adjust=dominance_adjust,
-                                    perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
+                                    inferential=(transform.upper() == primary_transform),
+                                    primary_weighting=primary_weighting,
+                                    perm_B=(perm_B if transform.upper() == primary_transform
+                                            else 0), n_jobs=n_jobs,
                                     grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
                                     covariates=cov_arg, full_dump_path=_dump_path(transform))
                 results[transform] = r
@@ -1912,13 +2481,25 @@ def cmd_interact(args) -> int:
                       f"emp={r.get('triad_acat_omnibus_emp')}"
                       + (f" | weighted_omnibus={_g3(r['weighted']['triad_acat_omnibus_weighted'])}"
                          if r.get("weighted") else ""), flush=True)
+                go = r.get("group_omnibus")
+                if go:
+                    a = go.get("bonferroni_alpha")
+                    astr = f"{a:.1e}" if isinstance(a, float) else go.get("per_test_alpha_rule")
+                    print(f"    [primary: group omnibus] minP={_g3(go['min_p'])} "
+                          f"adjP={_g3(go['min_p_adjusted_bonferroni'])} "
+                          f"nsig(α={astr})={go['n_sig']} "
+                          f"valid={go['n_valid']}/{go['n_planned']}")
+                    for h in (go["sig"] or [])[:5]:
+                        print(f"        GROUP HIT {h['triad']} p={h['p']:.3g} "
+                              f"adjP={h['p_adjusted_bonferroni']:.3g}")
                 for tag, pw in r.get("pairwise", {}).items():
                     wstr = (f" | wACAT={pw['weighted']['acat_weighted']:.3g} "
-                            f"wnsig={pw['weighted']['bonferroni_n_sig']}" if pw.get("weighted") else "")
+                            f"wnsig={pw['weighted']['bonferroni_n_sig']}" if pw.get("weighted")
+                            else "")
                     print(f"    {tag}: ACAT={_g3(pw['acat'])} minP={_g3(pw['min_p'])} "
                           f"λ_obs={pw['lambda_gc_obs']:.3f} "
-                          f"nsig(α={pw['bonferroni_alpha']:.1e})={pw['n_sig']}{wstr}")
-                    for h in pw["sig"]:
+                          f"nsig(α={pw['bonferroni_alpha']:.1e})={pw['n_sig']}{wstr}")  # noqa: E501
+                    for h in (pw["sig"] or []):
                         print(f"        HIT {h['triad']} p={h['p']:.3g}")
         n_units = len(triads)
     else:
@@ -1933,6 +2514,7 @@ def cmd_interact(args) -> int:
                 # encoding-invariant primary: omniB + kinship-preserving parametric bootstrap
                 r = run_pair_scan_omnib(
                     subdata, pairs, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
+                    inferential=(transform.upper() == primary_transform),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
                     n_jobs=n_jobs, pair_subs=(subs[0], subs[1]), grm_method=grm_method,
                     maf_min=maf_min, covariates=cov_arg)
@@ -1945,14 +2527,18 @@ def cmd_interact(args) -> int:
                       f"{r.minp_boot_threshold if r.minp_boot_threshold is None else f'{r.minp_boot_threshold:.2g}'})"
                       + (f" tail(p<1e-3 obs={te['observed']} null={te['null_mean']:.1f} "
                          f"emp_p={te['empirical_p']:.3g})" if te else ""), flush=True)
-                for h in r.sig:
+                for h in (r.sig or []):
                     print(f"      HIT {h['pair']} p={h['p']:.3g}")
                 continue
             r = run_pair_scan(subdata, pairs, y_raw, sample_idx, cap=cap, transform=transform,
-                              perm_B=(perm_B if transform == "INT" else 0), n_jobs=n_jobs,
+                              inferential=(transform.upper() == primary_transform),
+                              perm_B=(perm_B if transform.upper() == primary_transform
+                                      else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
                               pair_weights=pair_weights, covariates=cov_arg,
                               dominance_adjust=dominance_adjust,
+                              primary_weighting=primary_weighting,
+                              primary_multiplicity=primary_multiplicity,
                               full_dump_path=_dump_path(transform),
                               burden_dump_path=_burden_path(transform))
             r.trait = trait
@@ -1961,12 +2547,12 @@ def cmd_interact(args) -> int:
                   f"minP={r.min_p:.3g} λ_obs={r.lambda_gc_obs:.3f} λ_perm={r.lambda_gc_perm_median} "
                   f"nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
                   f"permFWER(minP_emp={r.minp_perm_emp} thr05={r.minp_perm_threshold:.2g})", flush=True)
-            for h in r.sig:
+            for h in (r.sig or []):
                 print(f"      HIT {h['pair']} p={h['p']:.3g}")
             if r.weighted:
                 print(f"      [weighted] ACAT={r.weighted['acat_weighted']:.3g} "
                       f"nsig={r.weighted['bonferroni_n_sig']}", flush=True)
-                for h in r.weighted["sig"]:
+                for h in (r.weighted["sig"] or []):
                     print(f"        WHIT {h['pair']} p={h['p']:.3g} w={h['weight']:.2f}")
         n_units = len(pairs)
 
@@ -1992,6 +2578,15 @@ def cmd_interact(args) -> int:
                       weights_source=weights_path, weights_sha256=weights_sha,
                       weights_firewall="weights must be y-independent (DL/HEB) and frozen "
                                        "pre-association; not enforced by the tool",
+                      primary_weighting=primary_weighting,
+                      primary_multiplicity=primary_multiplicity,
+                      primary_transform=primary_transform,
+                      transform_firewall=("both transforms are scanned but only the primary one "
+                                          "emits rejections; the other is a sensitivity analysis "
+                                          "whose rejection fields are null"),
+                      weighting_firewall="rejection fields are emitted only for the predeclared "
+                                         "procedure; the weighted and unweighted Bonferroni tests "
+                                         "each spend the full alpha over the same hypotheses",
                       full_ranking=dump_on,
                       full_ranking_note=("full per-unit ranking TSV is descriptive (every callable "
                                          "unit); inference is the pre-registered enrichment, not "
@@ -2001,7 +2596,7 @@ def cmd_interact(args) -> int:
     payload = dict(tool="homoeogwas", command="interact", mode=mode, subgenomes=subs, trait=trait,
                    provenance=provenance, results=results)
     fp = out_dir / f"interact_{trait}.json"
-    fp.write_text(json.dumps(payload, indent=2, default=float))
+    fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")
     # best-effort: auto-generate the distinctive interaction figures into the run
     # dir (like `fit`). R is optional and this never fails the stats run; opt out

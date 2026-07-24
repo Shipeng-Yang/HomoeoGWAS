@@ -1,0 +1,75 @@
+scan: Scan T wheat flank, curated 1:1:1 HCTriads, three kernels, REF burden, cap 150
+question: >
+  Under a genome-wide additive-only null the burden-product test is calibrated for common and
+  polygenic architectures (FWER 0.035-0.042) but severely anticonservative for a sparse
+  rare-variant architecture (FWER 0.744, 95% CI 0.734-0.755, B=5000, causal set redrawn per
+  replicate). The falsely rejected pairs are 90% B-D and have few, rare SNPs. Does a MAF floor
+  restore calibration, and what does it do to the two named leads?
+status: NOT preregistration. The lead SNP spectra and the common-only attenuation were already
+  known when this was written; this is a prospectively frozen verification, with no threshold
+  shopping after the runs. The floor value is justified solely by the RARE calibration strata,
+  which are independent of the two leads' outcomes.
+frozen_before_running: 2026-07-23
+
+floor:
+  value: 0.01
+  basis: MAF, inclusive (>=), computed over the 827 analysed accessions before standardisation
+  why_this_value: >
+    It is the pre-existing boundary between the RARE experiment's MAC 3-16 stratum and its MAF
+    0.01-0.05 stratum, and it turns the method into a common-variation burden scan. It is NOT
+    claimed to be the smallest or optimal floor. MAC>=6/10 would cut arbitrarily through a defined
+    stratum and is not run as a confirmatory floor. No floor grid.
+  frequency_basis_disclosure: >
+    The 96 chr1-1B SNPs that are singletons over the 827 analysed set have MAF ~0.025 over the full
+    1051-sample bed used for standardisation. A floor on 827-MAF drops them; a floor on 1051-MAF
+    keeps them. Both are reported. The 827 basis is primary because the fitted GLS and the
+    one-carrier leverage live in the 827 inference set.
+
+rebuild:
+  self_consistent: floored observed scan vs floored parametric-bootstrap null; everything genotype
+    derived is recomputed under the floor (burdens, eligibility, family, K_A/K_B/K_D, whitener,
+    B=9999 maxT null). The unfloored cutoff 4.8421 and its adjusted P values are invalid here.
+  cap_selection: per-gene deterministic subsample seeded from the gene id, so a gene untouched by
+    the floor keeps its production selection and the comparison is not confounded by an rng shift.
+  held_fixed: samples, phenotype, curated triad list, gene body +-2 kb, cap 150, burden and
+    standardisation definitions, REML/test/SVD procedures, bootstrap definition, adjusted-P formula.
+
+decision_rules_frozen:
+  a_RARE_inflation_removed:
+    method: rerun the RARE additive-null through floored burdens/GRMs/family, reusing the SAME 5000
+      causal phenotypes and draws (causal still drawn from ALL MAC strata, including SNPs the floor
+      removes from burdens, so robustness to the hard architecture is tested, not the architecture
+      removed)
+    fixed_if: the one-sided 95% exact-binomial upper limit for FWER is <= 0.06 (a 1-point
+      noninferiority margin; conservative counts as fixed)
+  b_chr5_unchanged:
+    requires_all:
+      - chr5 A-D remains eligible
+      - interaction coefficient keeps its sign
+      - abs(|t|_floor - 5.1533) <= 0.25
+      - new maxT-adjusted P <= 0.05 (continued family-wise rejection; numerical equivalence to
+        0.0109 is NOT required because the family and null changed)
+  c_chr1_attenuates:
+    expected_branch: 1B keeps ~36 and 1D ~30 common SNPs, so chr1 stays testable
+    material_attenuation_if_both:
+      - abs_t_floor <= 3.80 (>= ~20% reduction from 4.7484)
+      - abs_t_floor is at least 0.5 below the new 95% maxT cutoff
+    if_dropped: if 1B falls below 3 SNPs or the SVD rule excludes it, report "excluded from the
+      filtered estimand", NOT an observed collapse
+    collapse_is_not: crossing 0.05 (it was already non-family-wise-significant at 0.0776); the
+      common-only p=1.2e-3 already implies a residual pointwise association may remain
+
+licensed_claims_if_clean:
+  - the unfiltered scan is anticonservative under rare-variant additive architecture; a uniform
+    MAF>=0.01 filter restores family-wise control for that simulated architecture
+  - chr1's headline magnitude depends on <1% frequency variants and is not robust under the
+    calibrated common-variant analysis; treated as exploratory and compatible with rare-variant
+    leverage, NOT confirmed epistasis
+  - chr5 remains family-wise significant after filtering: the floor-robust statistical lead, still
+    lacking biological or replication support
+forbidden_claims:
+  - attenuation of chr1 does NOT prove it is a false positive (a genuine rare effect would also be
+    filtered)
+  - survival of chr5 is statistical robustness only, NOT a validated biological interaction
+  - "the method is sound with a floor" without qualification: only the RARE architecture and the
+    parametric null are shown calibrated unless the other four cells are also rerun filtered

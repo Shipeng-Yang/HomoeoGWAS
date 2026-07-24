@@ -38,7 +38,7 @@ from .scan import (
     scan_snps_loco,
 )
 
-__version__ = "1.0.2"
+__version__ = "2.0.0"
 
 __all__ = [
     "GRMPart",

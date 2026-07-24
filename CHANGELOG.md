@@ -1,5 +1,78 @@
 # Changelog
 
+## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
+
+**Advisory.** Versions up to and including 1.0.2 applied the wrong significance threshold in
+`interact` group scans (`mode: triad|homoeolog|clique`, `statistic: burden`) whenever a group has
+three or more subgenomes. Each group contributes `K = C(s,2)` pairwise contrasts, but the engine
+emitted `bonferroni_alpha = 0.05/G` — the threshold for the `G` tests inside ONE contrast — for
+every contrast, together with an `n_sig`/`sig` list at that level. With `s = 3` the three contrasts
+each spent the full alpha, so the run-wide error rate was `1 - 0.95^3 = 14.3%` rather than 5%. A
+pairwise p selected across the contrasts of its group belongs to the `G*K` family and must be judged
+at `0.05/(G*K)`.
+
+Two-subgenome pair scans (`K = 1`) and every `statistic: omniB` scan are NOT affected: for those the
+reported threshold was already the correct one for the family being tested.
+
+Anyone who ran a triad/clique burden scan with 1.0.2 or earlier should re-check hits against
+`pairwise.<contrast>.bonferroni_alpha` in a 2.0.0 result, or simply multiply the reported p by
+`G*K`. Some hits will no longer be significant.
+
+### Breaking changes
+
+- `pairwise.<contrast>.bonferroni_alpha`, `n_sig` and `sig` now carry the full `G*K` family. The
+  previous per-contrast meaning moved to `exploratory_within_contrast`, which reports the threshold
+  and a descriptive count but deliberately emits no identifier list.
+- Non-estimable tests return `null` instead of `p = 1.0`. A placeholder of 1.0 entered ACAT and
+  genomic-control as a real, maximally non-significant observation; a missing test must not.
+  Consequently ACAT combinations, `lambda_gc`, rankings and minima can differ from 1.0.2.
+- JSON output is strict RFC 8259: non-finite values serialize as `null` and `allow_nan=False` is
+  enforced. Parsers that relied on bare `NaN` must be updated.
+- Exactly one procedure may spend alpha. New `primary_weighting` (`unweighted`|`weighted`),
+  `primary_multiplicity` (`bonferroni`|`permutation_minp`) and `primary_transform` (`INT`|`raw`)
+  select it; every non-primary procedure reports descriptive statistics with `null` rejection
+  fields. Previously the weighted and unweighted procedures, the Bonferroni and permutation
+  procedures, and both transforms each emitted a full-alpha rejection set, so taking discoveries
+  from whichever one rejected was an uncontrolled union.
+- Pairwise rejections are now gated on the group omnibus: a contrast is reported only for a group
+  that already rejected in the primary family. This is hierarchical gatekeeping and preserves
+  familywise control while keeping the localisation the pairwise tests are for.
+- Invalid prior weights raise instead of being silently rewritten to 1.0, which had faked a uniform
+  prior. Weights are normalised as `w * G / sum(w)` after scaling by the largest weight, so the
+  procedure is invariant to rescaling and cannot overflow.
+- A scan with no estimable unit, and a clique scan retaining no complete group, now raise instead of
+  returning a result whose empirical p would be computed against an undefined statistic.
+- `weighted.bonferroni_n_sig` is `null` unless the weighted procedure is primary.
+
+### Fixed
+
+- Estimability is decided on the RAW, unwhitened design. The whitener is fitted to the phenotype, so
+  deciding it after whitening let the tested family depend on `y`; the same mask is now frozen
+  across the observed scan and every permutation replicate.
+- The per-coefficient test uses Frisch–Waugh–Lovell residualisation of the tested column against the
+  nuisance block, with `df = n - rank(Z) - 1`. The previous gate rejected on the condition number of
+  the whole design, discarding tests that were perfectly estimable when only nuisance columns were
+  collinear.
+- The residual sum of squares is an explicit residual norm. Computing it as `y'y - (U'y)'(U'y)`
+  cancels catastrophically on a good fit and can go negative, which a clamp then turned into a NaN
+  model.
+- A permutation replicate whose design-valid test loses its statistic is counted as maximally
+  extreme rather than discarded. Those failures are degenerate fits, i.e. the tail of the null, so
+  dropping them shrank the empirical-p numerator and raised the min-p cutoff in the
+  anticonservative direction.
+- The permutation cutoff is the k-th order statistic with `k = floor(alpha*(B+1))`, rejected on
+  strict inequality, so it can no longer disagree with the `(1+#)/(B+1)` empirical p. An
+  interpolated 5th percentile is not a valid permutation cutoff and mishandled ties at zero.
+- New `contrast_omnibus` family: the K contrast-level ACAT p-values are Bonferroni-adjusted across K.
+- Results report `n_planned`, `n_valid`, `n_unestimable`, the estimability policy and its
+  tolerances, the excluded unit identifiers with reasons, and the number of degenerate permutation
+  replicates.
+- Only design-determined reasons can retire a hypothesis. A response-dependent failure is an
+  analysis error and raises; a failed decomposition means estimability was not determined, not that
+  the target was unestimable.
+- Multi-trait scans no longer fold missing components to `p = 1.0`, and share one raw-design mask
+  across every trait and every permutation.
+
 ## Unreleased
 
 - `homoeogwas design`: parametric sequencing-depth pre-flight calculator.
