@@ -28,7 +28,7 @@ genotype:
 - Subgenomes must be distinguishable — by homoeologous chromosome naming
   (`A1, A2, …, B1, …`) or an explicit `chrom_map` in the species config.
 
-### 2. Phenotype — one TSV
+### 2. Phenotype — one TSV or CSV
 
 ```yaml
 phenotype:
@@ -37,9 +37,9 @@ phenotype:
   trait: y               # column to analyse
 ```
 
-`pheno.tsv` is a tab-separated table with a sample-ID column and one column per
-trait. Sample IDs are matched to the genotype `.fam` IID; only the intersection
-is analysed (the run prints the matched/missing counts).
+The phenotype is a tab- or comma-separated table with a sample-ID column and
+one column per trait. Sample IDs are always read as strings and matched to the
+genotype `.fam` IID; only the intersection is analysed.
 
 ### 3. Config — one YAML
 

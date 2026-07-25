@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .species_config import SpeciesConfig, load_species_config
+from .species_config import SpeciesConfig, load_species_config, validate_species_config
 
 # ---------------------------------------------------------------------------
 # Plan structures
@@ -276,9 +276,19 @@ def execute_plan(
 
         sg_dir.mkdir(parents=True, exist_ok=True)
         log_file = sg_dir / "split_log.txt"
-        # Refuse to overwrite an existing run unless --force
-        if (sg_dir / "all.bed").exists() and not force:
+        bed_components = [sg_dir / f"all{ext}" for ext in (".bed", ".bim", ".fam")]
+        # Refuse to overwrite a complete run unless --force. A lone .bed is not
+        # a complete PLINK dataset and must never be mistaken for success.
+        if all(path.exists() for path in bed_components) and not force:
             sg_summary["status"] = "SKIPPED_EXISTING"
+            summary["subgenomes"].append(sg_summary)
+            continue
+        partial = [str(path) for path in bed_components if path.exists()]
+        if partial and not force:
+            sg_summary["status"] = "ERROR"
+            sg_summary["error"] = (
+                "partial existing PLINK output; expected .bed/.bim/.fam together, "
+                f"found {partial}. Repair/remove this subgenome directory or rerun --force.")
             summary["subgenomes"].append(sg_summary)
             continue
 
@@ -292,14 +302,19 @@ def execute_plan(
                 _run_cmd(sg.plink2_export_vcf_cmd, log_file=log_file)
                 # plink2's export-bgz writes to <prefix>.vcf.gz already; ensure index
                 _run_cmd(["bcftools", "index", "-t", "-f", str(sg.out_vcf)], log_file=log_file)
+            missing_outputs = [str(path) for path in bed_components if not path.exists()]
+            if missing_outputs:
+                raise RuntimeError(
+                    f"plink2 completed but required outputs are missing: {missing_outputs}")
             sg_summary["status"] = "OK"
             # Tidy: remove subset.vcf once pgen exists (it's an intermediate)
             if (sg.subset_vcf).exists():
                 sg.subset_vcf.unlink()
                 (sg_dir / "all.subset.vcf.gz.tbi").unlink(missing_ok=True)
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
             sg_summary["status"] = "ERROR"
-            sg_summary["error"] = exc.stderr[-500:] if exc.stderr else str(exc)
+            stderr = getattr(exc, "stderr", None)
+            sg_summary["error"] = stderr[-500:] if stderr else str(exc)
 
         summary["subgenomes"].append(sg_summary)
 
@@ -319,10 +334,18 @@ def execute_plan(
 def cmd_split(args: argparse.Namespace) -> int:
     """Handler for ``homoeogwas split --species-yaml <yaml>``."""
     yaml_path = Path(args.species_yaml).resolve()
-    cfg = load_species_config(yaml_path, validate=not args.skip_validate,
-                              project_root=Path(args.project_root) if args.project_root else None)
-    # default out_dir is data/processed/<species_id>
     project_root = Path(args.project_root) if args.project_root else yaml_path.parents[2]
+    # Load first, apply the user-level VCF override, then validate the resolved
+    # biological inputs. This lets agents accept `vcf + species_yaml` without
+    # asking a breeder to edit YAML solely to change the panel path.
+    cfg = load_species_config(yaml_path, validate=False)
+    if args.vcf:
+        cfg.geno.vcf = Path(args.vcf)
+        cfg.geno.bed_root = None
+    if not args.skip_validate:
+        cfg.__dict__["_validation_report"] = validate_species_config(
+            cfg, project_root=project_root)
+    # default out_dir is data/processed/<species_id>
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
@@ -374,6 +397,8 @@ def add_split_subparser(sub):
     )
     sp.add_argument("--species-yaml", required=True,
                     help="path to configs/species/<species>.yaml")
+    sp.add_argument("--vcf", default=None,
+                    help="override geno.vcf from the species YAML")
     sp.add_argument("-o", "--out-dir", default=None,
                     help="override default data/processed/<species_id>/")
     sp.add_argument("--threads", type=int, default=8)

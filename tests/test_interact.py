@@ -82,7 +82,8 @@ def test_gene_pc_scores_invariant_to_ref_alt_flip():
     idx = np.arange(14)
     s0 = gene_pc_scores(X, idx, 150, rng, n_pc=3)
     flip = rng.random(14) < 0.5
-    Xf = X.copy(); Xf[:, flip] = 2 - Xf[:, flip]
+    Xf = X.copy()
+    Xf[:, flip] = 2 - Xf[:, flip]
     s1 = gene_pc_scores(Xf, idx, 150, rng, n_pc=3)
     assert np.allclose(s0, s1, atol=1e-9)
     # the burden is NOT invariant under a partial flip (the estimand the reviewer flagged)
@@ -98,7 +99,8 @@ def test_pc_and_kernel_interaction_invariant_burden_not():
     n = 300
     X, D = _ld_block(rng, n, 12), _ld_block(rng, n, 10)
     ix, iD = np.arange(12), np.arange(10)
-    bx = _std(block_burden_capped(X, ix, 150, rng)); bd = _std(block_burden_capped(D, iD, 150, rng))
+    bx = _std(block_burden_capped(X, ix, 150, rng))
+    bd = _std(block_burden_capped(D, iD, 150, rng))
     y = rng.standard_normal(n) + 1.2 * _std(bx * bd)
     Wh = np.eye(n)
 
@@ -113,7 +115,9 @@ def test_pc_and_kernel_interaction_invariant_burden_not():
 
     b0 = three(X, D)
     fx, fd = rng.random(12) < 0.5, rng.random(10) < 0.5
-    Xf, Df = X.copy(), D.copy(); Xf[:, fx] = 2 - Xf[:, fx]; Df[:, fd] = 2 - Df[:, fd]
+    Xf, Df = X.copy(), D.copy()
+    Xf[:, fx] = 2 - Xf[:, fx]
+    Df[:, fd] = 2 - Df[:, fd]
     b1 = three(Xf, Df)
     assert abs(b1[1] - b0[1]) < 1e-9 and abs(b1[2] - b0[2]) < 1e-9   # PC & kernel invariant
     assert abs(b1[0] - b0[0]) > 1e-6                                 # burden-product moves
@@ -164,9 +168,11 @@ def test_minor_allele_burden_strictly_invariant():
     b0 = block_burden_capped(X, idx, 150, rng, minor=True)
     for f in (0.25, 0.5, 1.0):
         fl = rng.random(14) < f
-        Xf = X.copy(); Xf[:, fl] = 2 - Xf[:, fl]
+        Xf = X.copy()
+        Xf[:, fl] = 2 - Xf[:, fl]
         assert np.allclose(b0, block_burden_capped(Xf, idx, 150, rng, minor=True), atol=1e-12)
-    Xh = X.copy(); Xh[:, :7] = 2 - Xh[:, :7]
+    Xh = X.copy()
+    Xh[:, :7] = 2 - Xh[:, :7]
     assert not np.allclose(block_burden_capped(X, idx, 150, rng),
                            block_burden_capped(Xh, idx, 150, rng), atol=1e-6)
 
@@ -803,6 +809,39 @@ def test_omnib_pair_scan_detects_and_isolates_interaction():
     # it clears the small-sample Bonferroni bar.
     assert tuple(r.top[0]["pair"])[0] == f"g{hit}"
     assert r.min_p < 1e-2
+
+
+def test_omnib_min_snp_gate_honours_configured_threshold():
+    rng = np.random.default_rng(111)
+    n = 50
+    subdata = {
+        s: SubgenomeData(
+            X=rng.integers(0, 3, size=(n, 2)).astype(float),
+            gene_snp={"g": np.array([0, 1])},
+            samples=[f"s{i}" for i in range(n)],
+            chunk=None)
+        for s in ("A", "D")
+    }
+    y = rng.normal(size=n)
+    result = run_pair_scan_omnib(
+        subdata, [("g", "g")], y, np.arange(n), bootstrap_B=0, n_jobs=1,
+        pair_subs=("A", "D"), grm_method="grm_from_X", min_snp=2)
+    assert result.G == 1
+    with pytest.raises(ValueError, match="no homoeolog pairs retained"):
+        run_pair_scan_omnib(
+            subdata, [("g", "g")], y, np.arange(n), bootstrap_B=0, n_jobs=1,
+            pair_subs=("A", "D"), grm_method="grm_from_X", min_snp=3)
+
+
+def test_interact_schema_refuses_four_way_cli_config():
+    cfg = {
+        "interact": {
+            "mode": "clique",
+            "subgenomes": ["A", "B", "C", "D"],
+        }
+    }
+    with pytest.raises(SystemExit, match="2-/3-subgenome subsets"):
+        I.validate_interact_config(cfg)
 
 
 def test_omnib_strictly_invariant_to_ref_alt_recoding():
@@ -1565,7 +1604,7 @@ def test_sensitivity_run_is_never_aborted_by_inference_only_guards():
     pairs = [(f"g{i}", f"g{i}") for i in range(G)]
     y = rng.standard_normal(N)
     zero_w = {(f"g{i}", f"g{i}"): 0.0 for i in range(G)}
-    zero_w[(f"g0", f"g0")] = 1.0
+    zero_w[("g0", "g0")] = 1.0
     # weighted primary with usable weights is fine either way; the point is that the
     # inference-only guards are skipped when inferential=False
     r = run_pair_scan(subdata, pairs, y, np.arange(N), cap=150, transform="INT", perm_B=0,

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy import stats
 
 
@@ -758,13 +759,64 @@ class InteractResult:
     tail_excess: dict = None                   # aggregate tail-excess: observed vs bootstrap null (per threshold)
 
 
-def _load_subgenome(plink_prefix: str, npz_path: str) -> SubgenomeData:
+def _validate_snp_mapping(
+        plink_prefix: str, npz_path: str, expected_subgenome: str | None = None) -> None:
+    """Verify that a SNP-to-gene NPZ belongs to the exact PLINK BIM in use."""
+    from .io import plink_bim_sha256
+
+    z = np.load(npz_path, allow_pickle=True)
+    required = {"gene_ids", "snp_idx", "bim_sha256", "n_variants"}
+    missing = sorted(required - set(z.files))
+    if missing:
+        raise ValueError(
+            f"{npz_path} is an unverified/legacy snp_to_gene NPZ (missing {missing}); "
+            "rerun `homoeogwas prep-snps` with the BED used for this interaction")
+    expected = str(np.asarray(z["bim_sha256"]).item())
+    observed = plink_bim_sha256(plink_prefix)
+    if expected != observed:
+        raise ValueError(
+            f"snp_to_gene/BIM fingerprint mismatch for {plink_prefix}: the NPZ was "
+            "built from a different BIM or variant order; rerun `homoeogwas prep-snps`")
+    n_variants = int(np.asarray(z["n_variants"]).item())
+    if n_variants < 1:
+        raise ValueError(f"{npz_path} records invalid n_variants={n_variants}")
+    gene_ids = [str(value) for value in z["gene_ids"].tolist()]
+    indices = z["snp_idx"]
+    if len(gene_ids) != len(indices):
+        raise ValueError(
+            f"{npz_path} gene_ids/snp_idx length mismatch: "
+            f"{len(gene_ids)} != {len(indices)}")
+    if len(set(gene_ids)) != len(gene_ids):
+        raise ValueError(f"{npz_path} contains duplicate gene IDs")
+    if expected_subgenome is not None and "subgenome" in z.files:
+        recorded = str(np.asarray(z["subgenome"]).item())
+        if recorded != expected_subgenome:
+            raise ValueError(
+                f"{npz_path} records subgenome {recorded!r}, expected "
+                f"{expected_subgenome!r}")
+    for i, raw in enumerate(indices):
+        idx = np.asarray(raw, dtype=np.int64)
+        if idx.ndim != 1 or np.any(idx < 0) or np.any(idx >= n_variants):
+            raise ValueError(
+                f"{npz_path} contains out-of-range SNP indices for gene row {i}; "
+                f"valid BED-column range is [0, {n_variants})")
+
+
+def _load_subgenome(
+        plink_prefix: str, npz_path: str, *, verify_mapping: bool = True) -> SubgenomeData:
     from .io import load_bed_hardcall
+
+    if verify_mapping:
+        _validate_snp_mapping(plink_prefix, npz_path)
 
     bed = load_bed_hardcall(plink_prefix)
     X = np.asarray(bed.dosage, dtype=np.float64)
     samples = [str(s) for s in np.asarray(bed.samples)]
     z = np.load(npz_path, allow_pickle=True)
+    n_variants = int(np.asarray(z["n_variants"]).item())
+    if X.shape[1] != n_variants:
+        raise ValueError(
+            f"snp_to_gene records {n_variants} variants but BED has {X.shape[1]}")
     gene_ids = z["gene_ids"].tolist()
     snp_idx = z["snp_idx"]
     gene_snp = {g: np.asarray(snp_idx[i], int) for i, g in enumerate(gene_ids)}
@@ -860,6 +912,7 @@ def run_pair_scan(
     pair_subs: tuple = None,            # (sx, sy) for 2-col pair tuples
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
+    min_snp: int = 1,
     pair_weights: dict = None,          # {(gx,gy): w}  y-INDEPENDENT prior (DL/HEB), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q) array} fixed effects; None=legacy
     dominance_adjust: bool = False,     # add per-gene b^2 covariates to the interaction test
@@ -910,15 +963,20 @@ def run_pair_scan(
     nsnp_x, nsnp_y = [], []                          # callable SNP count per gene (= len snp_idx)
     for p in pairs:
         gx, gy = p
-        if gx in subdata[sx].gene_snp and gy in subdata[sy].gene_snp:
+        if (gx in subdata[sx].gene_snp and gy in subdata[sy].gene_snp
+                and np.asarray(subdata[sx].gene_snp[gx]).size >= min_snp
+                and np.asarray(subdata[sy].gene_snp[gy]).size >= min_snp):
             bx_cols.append(block_burden_capped(subdata[sx].X, subdata[sx].gene_snp[gx], cap, rng)[sample_idx])
             by_cols.append(block_burden_capped(subdata[sy].X, subdata[sy].gene_snp[gy], cap, rng)[sample_idx])
             kept_pairs.append((gx, gy))
             nsnp_x.append(int(np.asarray(subdata[sx].gene_snp[gx]).size))
             nsnp_y.append(int(np.asarray(subdata[sy].gene_snp[gy]).size))
+    G = len(kept_pairs)
+    if G < 1:
+        raise ValueError(
+            f"no homoeolog pairs retained with >= {min_snp} SNPs in both copies")
     BX = scols_safe(np.column_stack(bx_cols))
     BY = scols_safe(np.column_stack(by_cols))
-    G = len(kept_pairs)
 
     # y-independent prior weights aligned to kept pairs, normalized to sum G (missing -> 1). Invalid
     # weights raise instead of being silently rewritten to 1.0, which would fake a uniform prior.
@@ -1282,7 +1340,9 @@ def run_pair_scan_omnib(
         kept.append((gx, gy))
     G = len(kept)
     if G < 1:
-        raise ValueError("no homoeolog pairs retained (none present in both subgenomes)")
+        raise ValueError(
+            "no homoeolog pairs retained: each copy must be present with "
+            f">= {min_snp} SNPs passing burden MAF >= {burden_maf}")
 
     # observed + bootstrap null phenotypes as columns, whitened by the SAME fitted-null W. The
     # bootstrap draws y* = C.beta_hat + V_hat^{1/2} z from that same fitted null (kinship exact); they
@@ -1513,6 +1573,7 @@ def run_clique_scan(
     seed: int = 7,
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
+    min_snp: int = 1,
     triad_weights: dict = None,         # {group_tuple: w}  y-INDEPENDENT prior (HEB/DL), frozen
     covariates: dict = None,            # {n_pcs:int, extra:(n_t,q)} fixed effects; None=legacy
     dominance_adjust: bool = False,     # add per-gene b^2 covariates to every pairwise interaction
@@ -1550,7 +1611,9 @@ def run_clique_scan(
     kept = []
     for group in triads:
         gmap = dict(zip(subs, group, strict=True))   # subgenome -> gene id for this group
-        if all(gmap[s] in subdata[s].gene_snp for s in subs):
+        if all(gmap[s] in subdata[s].gene_snp
+               and np.asarray(subdata[s].gene_snp[gmap[s]]).size >= min_snp
+               for s in subs):
             for s in subs:
                 cols[s].append(block_burden_capped(subdata[s].X, subdata[s].gene_snp[gmap[s]],
                                                     cap, rng)[sample_idx])
@@ -1558,8 +1621,9 @@ def run_clique_scan(
             kept.append(tuple(group))
     G = len(kept)
     if G < 1:
-        raise ValueError("no homoeolog group had every subgenome copy retained; there is no "
-                         "hypothesis to test and no primary family to report")
+        raise ValueError(
+            "no homoeolog group had every subgenome copy retained with "
+            f">= {min_snp} SNPs; there is no hypothesis to test")
     Bd = {s: scols_safe(np.column_stack(cols[s])) for s in subs}
 
     # y-independent per-triad prior weights (HEB/DL), normalized to sum G (missing -> 1)
@@ -1997,6 +2061,7 @@ def run_multitrait_pair_scan(
     pair_subs: tuple = None,
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
+    min_snp: int = 1,
     dominance_adjust: bool = False,     # add per-gene b^2 covariates to every pairwise interaction
 ) -> dict:
     """Multi-trait (pleiotropy) pairwise scan: ACAT-across-traits.
@@ -2036,7 +2101,9 @@ def run_multitrait_pair_scan(
     kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
     bx_cols, by_cols, kept_pairs = [], [], []
     for gx, gy in pairs:
-        if gx in subdata[sx].gene_snp and gy in subdata[sy].gene_snp:
+        if (gx in subdata[sx].gene_snp and gy in subdata[sy].gene_snp
+                and np.asarray(subdata[sx].gene_snp[gx]).size >= min_snp
+                and np.asarray(subdata[sy].gene_snp[gy]).size >= min_snp):
             bx_cols.append(block_burden_capped(subdata[sx].X, subdata[sx].gene_snp[gx], cap, rng)[sample_idx])
             by_cols.append(block_burden_capped(subdata[sy].X, subdata[sy].gene_snp[gy], cap, rng)[sample_idx])
             kept_pairs.append((gx, gy))
@@ -2187,6 +2254,152 @@ def _load_pair_weights(path: str, subs: list[str]) -> dict:
             for r in df[cols + ["weight"]].itertuples(index=False, name=None)}
 
 
+def validate_interact_config(cfg: dict) -> None:
+    """Validate the interaction schema without opening large genotype matrices."""
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("interact"), dict):
+        raise SystemExit("ERR: interaction config needs a top-level `interact` mapping")
+    ic = cfg["interact"]
+    subs = ic.get("subgenomes")
+    if not isinstance(subs, list) or not subs:
+        raise SystemExit("ERR: interact.subgenomes must be a non-empty list")
+    if len(set(subs)) != len(subs):
+        raise SystemExit(f"ERR: interact.subgenomes has duplicates: {subs}")
+    mode = str(ic.get("mode", "pairwise")).lower()
+    expected_n = {"pairwise": 2, "triad": 3}
+    if mode not in expected_n:
+        raise SystemExit(
+            "ERR: interact.mode must be pairwise (2 subgenomes) or triad "
+            "(3 subgenomes); for 4+ run separate 2-/3-subgenome subsets")
+    if len(subs) != expected_n[mode]:
+        raise SystemExit(
+            f"ERR: interact mode={mode} needs exactly {expected_n[mode]} "
+            f"subgenomes; got {subs}")
+    for key in ("genotype", "snp_to_gene"):
+        mapping = ic.get(key)
+        if not isinstance(mapping, dict):
+            raise SystemExit(f"ERR: interact.{key} must map subgenome to path")
+        missing = [s for s in subs if not mapping.get(s)]
+        if missing:
+            raise SystemExit(
+                f"ERR: interact.{key} missing paths for subgenomes {missing}")
+    for key in ("phenotype", "sample_col"):
+        if not ic.get(key):
+            raise SystemExit(f"ERR: interact.{key} is required")
+    if not ic.get("trait") and not ic.get("multi_trait"):
+        raise SystemExit("ERR: interact needs `trait` or a non-empty `multi_trait` list")
+    if ic.get("trait") and ic.get("multi_trait"):
+        raise SystemExit("ERR: set only one of interact.trait and interact.multi_trait")
+    if ic.get("multi_trait") is not None:
+        traits = ic["multi_trait"]
+        if not isinstance(traits, list) or not traits or len(set(traits)) != len(traits):
+            raise SystemExit(
+                "ERR: interact.multi_trait must be a non-empty list of unique trait names")
+        if mode != "pairwise":
+            raise SystemExit("ERR: interact.multi_trait is supported only in pairwise mode")
+    table_key = "pairs" if mode == "pairwise" else "triads"
+    if not ic.get(table_key):
+        raise SystemExit(f"ERR: interact mode={mode} requires interact.{table_key}")
+    burden = ic.get("burden", {})
+    if not isinstance(burden, dict):
+        raise SystemExit("ERR: interact.burden must be a mapping")
+    min_snp = burden.get("min_snp", 2)
+    if not isinstance(min_snp, int) or min_snp < 1:
+        raise SystemExit(
+            f"ERR: interact.burden.min_snp must be an integer >= 1, got {min_snp!r}")
+    cap = burden.get("cap", 150)
+    if not isinstance(cap, int) or cap < 1:
+        raise SystemExit(
+            f"ERR: interact.burden.cap must be an integer >= 1, got {cap!r}")
+    burden_maf = burden.get("maf_min", 0.01)
+    if not isinstance(burden_maf, (int, float)) or not 0 <= float(burden_maf) <= 0.5:
+        raise SystemExit(
+            "ERR: interact.burden.maf_min must be a number in [0, 0.5], "
+            f"got {burden_maf!r}")
+
+
+def preflight_interact(cfg: dict) -> list[str]:
+    """Check interaction paths, mapping provenance, table columns, and samples."""
+    from bed_reader import open_bed
+
+    from .io import plink_path, read_delimited
+
+    ic = cfg["interact"]
+    subs = list(ic["subgenomes"])
+    mode = str(ic.get("mode", "pairwise")).lower()
+    problems: list[str] = []
+    sample_orders: dict[str, list[str]] = {}
+    for s in subs:
+        prefix = ic["genotype"][s]
+        missing = [
+            str(plink_path(prefix, ext))
+            for ext in (".bed", ".bim", ".fam")
+            if not plink_path(prefix, ext).exists()
+        ]
+        if missing:
+            problems.append(
+                f"genotype {s} is missing PLINK files: {missing}")
+            continue
+        npz_path = Path(ic["snp_to_gene"][s])
+        if not npz_path.exists():
+            problems.append(f"snp_to_gene {s} missing: {npz_path}")
+            continue
+        try:
+            _validate_snp_mapping(prefix, str(npz_path), expected_subgenome=s)
+            with open_bed(str(plink_path(prefix, ".bed"))) as bed:
+                sample_orders[s] = [str(v) for v in np.asarray(bed.iid)]
+                n_variants = int(bed.sid_count)
+            if len(set(sample_orders[s])) != len(sample_orders[s]):
+                problems.append(f"genotype {s} has duplicate IID values")
+            z = np.load(npz_path, allow_pickle=True)
+            if int(np.asarray(z["n_variants"]).item()) != n_variants:
+                problems.append(
+                    f"snp_to_gene {s} records {int(np.asarray(z['n_variants']).item())} "
+                    f"variants but BED has {n_variants}")
+        except Exception as exc:  # noqa: BLE001 - aggregate actionable preflight errors
+            problems.append(f"snp_to_gene {s} invalid: {exc}")
+    if sample_orders:
+        first = next((s for s in subs if s in sample_orders), None)
+        if first:
+            for s in subs:
+                if s in sample_orders and sample_orders[s] != sample_orders[first]:
+                    problems.append(
+                        f"sample order mismatch between genotype {first} and {s}")
+
+    table_key = "pairs" if mode == "pairwise" else "triads"
+    table = Path(ic[table_key])
+    if not table.exists():
+        problems.append(f"{table_key} table missing: {table}")
+    else:
+        try:
+            _load_pairs(str(table), subs)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"{table_key} table invalid: {exc}")
+
+    phenotype = Path(ic["phenotype"])
+    if not phenotype.exists():
+        problems.append(f"phenotype missing: {phenotype}")
+    else:
+        sample_col = ic["sample_col"]
+        traits = ([ic["trait"]] if ic.get("trait") else list(ic["multi_trait"]))
+        try:
+            ph = read_delimited(
+                phenotype, dtype={sample_col: "string"})
+            missing_cols = [c for c in [sample_col, *traits] if c not in ph.columns]
+            if missing_cols:
+                problems.append(
+                    f"phenotype missing columns {missing_cols}; has {list(ph.columns)}")
+            elif sample_orders:
+                ids = set(ph[sample_col].dropna().astype(str))
+                first = next((s for s in subs if s in sample_orders), None)
+                overlap = len(ids.intersection(sample_orders[first])) if first else 0
+                if overlap < 10:
+                    problems.append(
+                        f"only {overlap} samples overlap genotype and phenotype; need >= 10")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"phenotype invalid: {exc}")
+    return problems
+
+
 def _build_cov_arg(cov_cfg, valid: list):
     """Parse the ``interact.covariates`` config into the ``covariates`` dict {n_pcs, extra} that the
     scan functions accept. Returns ``(None, "none")`` when absent.
@@ -2207,8 +2420,18 @@ def _build_cov_arg(cov_cfg, valid: list):
     extra = None
     label = f"n_pcs={n_pcs}"
     if cov_cfg.get("file"):
-        import pandas as pd
-        cf = pd.read_csv(cov_cfg["file"], sep="\t").set_index(cov_cfg.get("sample_col", "sample"))
+        from .io import read_delimited
+
+        cov_sample_col = cov_cfg.get("sample_col", "sample")
+        cf = read_delimited(
+            cov_cfg["file"], dtype={cov_sample_col: "string"})
+        cf = cf.loc[cf[cov_sample_col].notna()].copy()
+        cf[cov_sample_col] = cf[cov_sample_col].astype(str)
+        if cf[cov_sample_col].duplicated().any():
+            dup = cf.loc[cf[cov_sample_col].duplicated(), cov_sample_col].tolist()[:3]
+            raise ValueError(
+                f"covariate file has duplicate sample IDs (e.g. {dup})")
+        cf = cf.set_index(cov_sample_col)
         cols = cov_cfg.get("columns") or [c for c in cf.columns]
         missing_s = [s for s in valid if s not in cf.index]
         if missing_s:
@@ -2253,6 +2476,7 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     pairs = _load_pairs(ic["pairs"], subs)
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
+    min_snp = int(burden.get("min_snp", 2))
     dominance_adjust = bool(burden.get("dominance_adjust", False))
     perm_B = int(ic.get("calibration", {}).get("perm_B", 2000))
     grm_cfg = ic.get("grm", {})
@@ -2275,7 +2499,8 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                                      perm_B=(perm_B if transform.upper() == primary_transform
                                              else 0), n_jobs=n_jobs,
                                      pair_subs=(subs[0], subs[1]), grm_method=grm_method,
-                                     maf_min=maf_min, dominance_adjust=dominance_adjust)
+                                     maf_min=maf_min, min_snp=min_snp,
+                                     dominance_adjust=dominance_adjust)
         results[transform] = r
         print(f"  [{transform}] G={r['G']} pleio_ACAT_omnibus={r['pleio_acat_omnibus']:.3g} "
               f"emp={r['pleio_acat_omnibus_emp']} minP={r['min_p']:.3g} λ_obs={r['lambda_gc_obs']:.3f} "
@@ -2290,7 +2515,8 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                  if Path(pairs_path).exists() else None)
     provenance = dict(
         version=__version__, mode="pairwise", multi_trait=True, transform="INT(primary)+raw(sens)",
-        grm_method=grm_method, maf_min=maf_min, burden_cap=cap, dominance_adjust=dominance_adjust,
+        grm_method=grm_method, maf_min=maf_min, burden_cap=cap,
+        burden_min_snp=min_snp, dominance_adjust=dominance_adjust,
         perm_B=perm_B,
         covariate_policy="none: subgenome-stratified GRMs only (no PCs/covariates)",
         trait_set=tlist, trait_set_digest=trait_set.digest, n_traits=len(tlist),
@@ -2315,41 +2541,53 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
 
 
 def cmd_interact(args) -> int:
-    import pandas as pd
     import yaml
 
     t0 = time.time()
     with open(args.config) as fh:
         cfg = yaml.safe_load(fh)
+    validate_interact_config(cfg)
+    problems = preflight_interact(cfg)
+    if problems:
+        print(f"ERROR: interaction input preflight found {len(problems)} problem(s):")
+        for problem in problems:
+            print(f"  - {problem}")
+        return 1
     ic = cfg["interact"]
     subs = list(ic["subgenomes"])
-    mode = ic.get("mode", "pairwise")
-    GROUP_MODES = ("triad", "homoeolog", "clique")     # generic n-subgenome clique scan
-    if mode == "pairwise" and len(subs) != 2:
-        print(f"ERROR: interact mode=pairwise needs exactly 2 subgenomes; got {subs}. "
-              f"For 3+ subgenomes use mode=homoeolog (any n) or mode=triad (exactly 3).")
-        return 1
-    if mode == "triad" and len(subs) != 3:
-        print(f"ERROR: interact mode=triad needs exactly 3 subgenomes; got {subs}. "
-              f"For other ploidies use mode=homoeolog (any n>=2).")
-        return 1
-    if mode in ("homoeolog", "clique") and len(subs) < 2:
-        print(f"ERROR: interact mode={mode} needs at least 2 subgenomes; got {subs}.")
-        return 1
+    mode = str(ic.get("mode", "pairwise")).lower()
+    group_modes = ("triad",)
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     trait_label = ic.get("trait") if ic.get("multi_trait") is None else f"multi:{ic['multi_trait']}"
     print(f"=== homoeogwas interact (mode={mode}) — subgenomes={subs} trait={trait_label} ===",
           flush=True)
-    subdata = {s: _load_subgenome(ic["genotype"][s], ic["snp_to_gene"][s]) for s in subs}
+    # preflight_interact has already verified every mapping fingerprint; avoid
+    # hashing very large BIMs a second time while loading dosage matrices.
+    subdata = {
+        s: _load_subgenome(
+            ic["genotype"][s], ic["snp_to_gene"][s], verify_mapping=False)
+        for s in subs
+    }
     samples = subdata[subs[0]].samples
     for s in subs[1:]:
         if subdata[s].samples != samples:
             print(f"ERROR: interact: sample order mismatch between {subs[0]} and {s}")
             return 1
 
-    ph = pd.read_csv(ic["phenotype"], sep="\t").set_index(ic.get("sample_col", "sample"))
+    from .io import read_delimited
+
+    sample_col = ic.get("sample_col", "sample")
+    traits = ([ic["trait"]] if ic.get("trait") else list(ic["multi_trait"]))
+    ph_raw = read_delimited(
+        ic["phenotype"], dtype={sample_col: "string"})
+    ph_raw = ph_raw.loc[ph_raw[sample_col].notna()].copy()
+    ph_raw[sample_col] = ph_raw[sample_col].astype(str)
+    for trait_name in traits:
+        ph_raw[trait_name] = pd.to_numeric(ph_raw[trait_name], errors="coerce")
+    # Repeated-site phenotype rows are averaged exactly as in the fit path.
+    ph = ph_raw.groupby(sample_col, sort=False)[traits].mean()
 
     if ic.get("multi_trait") is not None:
         if mode != "pairwise":
@@ -2359,11 +2597,17 @@ def cmd_interact(args) -> int:
 
     trait = ic["trait"]
     valid = [s for s in samples if s in ph.index and pd.notna(ph.loc[s, trait])]
+    if len(valid) < 10:
+        print(f"ERROR: interact: only {len(valid)} samples overlap genotype and "
+              "non-missing phenotype for {trait!r}; need >= 10")
+        return 1
     sample_idx = np.array([samples.index(s) for s in valid])
     y_raw = np.array([float(ph.loc[s, trait]) for s in valid])
 
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
+    min_snp = int(burden.get("min_snp", 2))
+    burden_maf = float(burden.get("maf_min", 0.01))
     dominance_adjust = bool(burden.get("dominance_adjust", False))
     calib = ic.get("calibration", {})
     # Primary = encoding-invariant omniB + kinship-preserving parametric bootstrap (the paper method);
@@ -2392,7 +2636,7 @@ def cmd_interact(args) -> int:
         print(f"ERROR: interact.primary_multiplicity must be 'bonferroni' or "
               f"'permutation_minp'; got '{primary_multiplicity}'.")
         return 2
-    if primary_multiplicity == "permutation_minp" and (statistic == "omnib" or mode in GROUP_MODES
+    if primary_multiplicity == "permutation_minp" and (statistic == "omnib" or mode in group_modes
                                                        or ic.get("multi_trait")):
         print("ERROR: primary_multiplicity='permutation_minp' is only defined for the "
               "single-trait two-subgenome burden pair scan.")
@@ -2431,7 +2675,7 @@ def cmd_interact(args) -> int:
         return (str(out_dir / f"interact_{trait}_topburdens_{transform}.tsv")
                 if dump_on else None)
 
-    if mode in GROUP_MODES:
+    if mode in group_modes:
         # gene_<S> columns -> n-tuple per homoeolog group; key `groups` (generic) or legacy `triads`
         group_file = ic.get("groups") or ic.get("triads")
         if not group_file:
@@ -2454,7 +2698,8 @@ def cmd_interact(args) -> int:
                     subdata, triads, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
                     inferential=(transform.upper() == primary_transform),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
-                    n_jobs=n_jobs, grm_method=grm_method, maf_min=maf_min, covariates=cov_arg)
+                    n_jobs=n_jobs, grm_method=grm_method, maf_min=maf_min,
+                    burden_maf=burden_maf, min_snp=min_snp, covariates=cov_arg)
                 r.trait = trait
                 results[transform] = r.__dict__
                 te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
@@ -2473,7 +2718,8 @@ def cmd_interact(args) -> int:
                                     primary_weighting=primary_weighting,
                                     perm_B=(perm_B if transform.upper() == primary_transform
                                             else 0), n_jobs=n_jobs,
-                                    grm_method=grm_method, maf_min=maf_min, triad_weights=triad_weights,
+                                    grm_method=grm_method, maf_min=maf_min,
+                                    min_snp=min_snp, triad_weights=triad_weights,
                                     covariates=cov_arg, full_dump_path=_dump_path(transform))
                 results[transform] = r
                 print(f"  [{transform}] G={r.get('G')} "
@@ -2517,7 +2763,8 @@ def cmd_interact(args) -> int:
                     inferential=(transform.upper() == primary_transform),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
                     n_jobs=n_jobs, pair_subs=(subs[0], subs[1]), grm_method=grm_method,
-                    maf_min=maf_min, covariates=cov_arg)
+                    maf_min=maf_min, burden_maf=burden_maf,
+                    min_snp=min_snp, covariates=cov_arg)
                 r.trait = trait
                 results[transform] = r.__dict__
                 te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
@@ -2535,6 +2782,7 @@ def cmd_interact(args) -> int:
                               perm_B=(perm_B if transform.upper() == primary_transform
                                       else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
+                              min_snp=min_snp,
                               pair_weights=pair_weights, covariates=cov_arg,
                               dominance_adjust=dominance_adjust,
                               primary_weighting=primary_weighting,
@@ -2563,7 +2811,8 @@ def cmd_interact(args) -> int:
         import hashlib
         weights_sha = hashlib.sha256(Path(weights_path).read_bytes()).hexdigest()[:16]
     provenance = dict(version=__version__, mode=mode, grm_method=grm_method, maf_min=maf_min,
-                      burden_cap=cap, dominance_adjust=dominance_adjust,
+                      burden_cap=cap, burden_min_snp=min_snp,
+                      burden_maf_min=burden_maf, dominance_adjust=dominance_adjust,
                       perm_B=perm_B, n_samples=len(valid), n_units_raw=n_units,
                       psd_floor=1e-6 if grm_method == "grm_from_X" else None,
                       covariate_policy=(cov_label if cov_arg else

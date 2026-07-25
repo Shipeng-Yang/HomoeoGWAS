@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .io import plink_bim_sha256
+
 # ----------------------------------------------------------------------
 # shared: subgenome map + GFF + bim
 # ----------------------------------------------------------------------
@@ -208,7 +210,17 @@ def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
         for j, gid in enumerate(kept):
             snp_idx[j] = np.asarray(gene_snp[gid], dtype=np.int64)
         npz_path = out / f"snp_to_gene_{sub}.npz"
-        np.savez(npz_path, gene_ids=gene_ids, snp_idx=snp_idx)
+        # Bind the row-index mapping to the exact BIM that defined it. Without
+        # this fingerprint, reusing an NPZ with a reordered BED silently maps
+        # genes to the wrong variants while all array shapes still look valid.
+        np.savez(
+            npz_path,
+            gene_ids=gene_ids,
+            snp_idx=snp_idx,
+            bim_sha256=np.asarray(plink_bim_sha256(prefix)),
+            n_variants=np.asarray(int(bim_chrom.size), dtype=np.int64),
+            subgenome=np.asarray(str(sub)),
+        )
         # readable gene table = the FULL gene universe (all genes), with the
         # callable SNP count and an explicit ``callable`` flag (n_snp>=min_snp).
         rows_tsv = [{"gene_id": gid, "subgenome": sub,

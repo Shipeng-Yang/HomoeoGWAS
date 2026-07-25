@@ -1,6 +1,8 @@
 # Algorithm
 
-This page summarizes the statistical model and the design choices. The frozen claim hierarchy is in the project charter (under `reproducibility/paper/notes/`); revision history is in the project charter §9.
+This page summarizes the statistical model and the design choices. Manuscript
+analysis records and the frozen claim hierarchy are maintained in the separate
+[HomoeoGWAS reproducibility repository](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility).
 
 ## 1. Subgenome-partitioned LMM (main claim)
 

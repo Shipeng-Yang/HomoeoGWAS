@@ -28,7 +28,7 @@ def _write_bed(prefix: Path, dosage, samples, chrom, pos):
     from bed_reader import to_bed
     prefix.parent.mkdir(parents=True, exist_ok=True)
     m = dosage.shape[1]
-    to_bed(str(prefix.with_suffix(".bed")), dosage,
+    to_bed(str(prefix) + ".bed", dosage,
            properties={
                "fid": ["0"] * len(samples),
                "iid": list(samples),
@@ -118,6 +118,13 @@ def test_version_flag():
     assert e.value.code == 0
 
 
+def test_public_json_writer_replaces_nonfinite_values_with_null():
+    from homoeogwas.jsonutil import dumps_strict
+
+    payload = json.loads(dumps_strict({"nan": np.nan, "inf": np.inf}))
+    assert payload == {"nan": None, "inf": None}
+
+
 # ---------------------------------------------------------------------
 # config loading / validation
 # ---------------------------------------------------------------------
@@ -172,6 +179,17 @@ def test_validate_rejects_bad_config(tmp_path):
         cli.validate_config(bad3)
 
 
+def test_fit_kernel_auto_uses_pairwise_mean_for_four_subgenomes(tmp_path):
+    subs = ["A", "B", "C", "D"]
+    geno_dir, pheno = _make_panel(tmp_path, subs, n=30, m=40)
+    cfg = cli.load_config(
+        _write_config(tmp_path, geno_dir, pheno, subs, hadamard=True))
+    analysis, _, _ = cli.join_samples(cfg)
+    kernels, info = cli.build_kernels(cfg, analysis)
+    assert "hom" in kernels
+    assert info["homoeolog_kernel"]["mode"] == "pairwise_mean"
+
+
 # ---------------------------------------------------------------------
 # dry-run
 # ---------------------------------------------------------------------
@@ -191,6 +209,31 @@ def test_dry_run_reports_missing_path(tmp_path):
     (geno_dir / "C" / "all.bed").unlink()              # break a path
     rc = cli.main(["fit", "--config", str(cfg_path), "--dry-run"])
     assert rc == 1                                     # preflight problem
+
+
+def test_csv_integer_like_ids_and_dotted_plink_prefix_join(tmp_path):
+    n, m = 24, 20
+    rng = np.random.default_rng(123)
+    samples = [str(i) for i in range(n)]
+    prefix = tmp_path / "panel.v1"
+    _write_bed(
+        prefix, rng.integers(0, 3, size=(n, m)).astype(np.float32),
+        samples, ["1A"] * m, np.arange(1, m + 1))
+    phenotype = tmp_path / "phenotype.csv"
+    pd.DataFrame({"sample": list(range(n)), "trait": rng.normal(size=n)}).to_csv(
+        phenotype, index=False)
+    cfg = {
+        "panel": {"subgenomes": ["A"]},
+        "phenotype": {
+            "path": str(phenotype), "sample_col": "sample", "trait": "trait"},
+        "genotype": {
+            "scan_bed_prefix_template": str(prefix),
+            "grm": {"source": "bed", "bed_prefix_template": str(prefix)}},
+    }
+    assert cli.preflight(cfg) == []
+    joined, y, _ = cli.join_samples(cfg)
+    assert joined.tolist() == samples
+    assert y.shape == (n,)
 
 
 # ---------------------------------------------------------------------

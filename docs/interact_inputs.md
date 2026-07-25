@@ -39,6 +39,11 @@ So the only "extra" file beyond a standard GWAS setup is either a protein FASTA
 **not** need the genome FASTA itself for `prep-snps`/`interact`, only to make the
 proteins for the DIAMOND path.
 
+`prep-snps` binds every `snp_to_gene_<S>.npz` to the exact source `.bim`
+using a SHA-256 fingerprint. `interact` refuses a legacy/unverified NPZ or a
+mapping built from a different BIM/variant order; rerun `prep-snps` with the
+analysis BED to repair it.
+
 ## Ploidy — pick the mode for your crop
 
 | ploidy / genome | subgenomes | `interact --mode` | example |
@@ -197,8 +202,10 @@ gffread -y proteins_tx.faa -g genome.fa genes.gff
 #    stop/gap characters, which DIAMOND rejects.
 ```
 
-A ready-made splitter that does steps 2–3 (longest isoform per gene, subset to
-`genes_<S>.tsv`, clean `.`/`*`) is in the repo's reproducibility scripts. Then:
+A ready-made
+[protein splitter](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility/blob/main/scripts/preprocess/proteins_per_subgenome.py)
+that does steps 2–3 (longest isoform per gene, subset to `genes_<S>.tsv`, clean
+`.`/`*`) is maintained in the separate reproducibility repository. Then:
 
 If you have per-subgenome protein FASTAs (headers = gene ids matching
 `genes_<S>.tsv`):

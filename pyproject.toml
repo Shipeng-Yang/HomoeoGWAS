@@ -8,7 +8,8 @@ version = "2.0.0"
 description = "Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Shipeng Yang", email = "qhyysp@gmail.com" },
 ]
@@ -29,7 +30,6 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -64,7 +64,7 @@ dev = [
     "openpyxl>=3.1",          # xlsx parsing for OLD panel S1/S2/S3
 ]
 docs = [
-    "mkdocs>=1.5",
+    "mkdocs>=1.5,<2",
     "mkdocs-material>=9.5",
 ]
 # agent-facing MCP server so any MCP client (Claude/Cursor/Cline/…) can drive
@@ -78,6 +78,7 @@ Homepage = "https://github.com/Shipeng-Yang/HomoeoGWAS"
 Documentation = "https://shipeng-yang.github.io/HomoeoGWAS"
 Repository = "https://github.com/Shipeng-Yang/HomoeoGWAS"
 Issues = "https://github.com/Shipeng-Yang/HomoeoGWAS/issues"
+Reproducibility = "https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility"
 
 [project.scripts]
 homoeogwas = "homoeogwas.cli:main"
@@ -92,6 +93,9 @@ include = ["homoeogwas*"]
 
 [tool.setuptools.package-data]
 homoeogwas = ["r/*.R"]
+
+[tool.setuptools.data-files]
+"share/homoeogwas" = ["AGENTS.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

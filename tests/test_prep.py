@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ def _write_bed(prefix, n_samples, chrom, pos):
     m = len(pos)
     dosage = rng.integers(0, 3, size=(n_samples, m)).astype(np.float32)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    to_bed(str(prefix.with_suffix(".bed")), dosage,
+    to_bed(str(prefix) + ".bed", dosage,
            properties={
                "fid": ["0"] * n_samples,
                "iid": [f"s{i}" for i in range(n_samples)],
@@ -60,6 +61,8 @@ def test_prep_snps_assigns_0based_bim_indices(tmp_path):
     gene_snp = {g: list(z["snp_idx"][i]) for i, g in enumerate(z["gene_ids"])}
     # gA1 gets SNP row 0 (pos 150); gA2 gets SNP row 2 (pos 350); 205/900 dropped
     assert gene_snp == {"gA1": [0], "gA2": [2]}
+    assert len(str(z["bim_sha256"].item())) == 64
+    assert int(z["n_variants"].item()) == 4
     assert summ["subgenomes"]["A"]["n_snp_in_genes"] == 2
     assert (out / "genes_A.tsv").exists()
 
@@ -86,6 +89,52 @@ def test_npz_roundtrips_through_interact_loader(tmp_path):
     assert list(sd.gene_snp["gA2"]) == [2]
     # indices must address real dosage columns
     assert sd.X.shape[1] == 4 and sd.X[:, 2].shape[0] == sd.X.shape[0]
+
+
+def test_interact_loader_rejects_npz_from_different_bim(tmp_path):
+    gff, sgmap, bed_by_sub = _fixture(tmp_path)
+    out = tmp_path / "prep"
+    sg = prep.load_subgenome_map(str(sgmap))
+    prep.build_snp_to_gene(str(gff), bed_by_sub, sg, out_dir=str(out))
+    bim = Path(bed_by_sub["A"] + ".bim")
+    fields = bim.read_text().splitlines()[0].split()
+    fields[1] = "changed_variant_id"
+    lines = bim.read_text().splitlines()
+    lines[0] = "\t".join(fields)
+    bim.write_text("\n".join(lines) + "\n")
+    from homoeogwas.interact import _load_subgenome
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        _load_subgenome(bed_by_sub["A"], str(out / "snp_to_gene_A.npz"))
+
+
+def test_interaction_config_and_preflight_accept_csv_and_verified_npz(tmp_path):
+    gff, sgmap, bed_by_sub = _fixture(tmp_path)
+    out = tmp_path / "prep"
+    sg = prep.load_subgenome_map(str(sgmap))
+    prep.build_snp_to_gene(str(gff), bed_by_sub, sg, out_dir=str(out))
+    pairs = tmp_path / "pairs.tsv"
+    pd.DataFrame({"gene_A": ["gA1"], "gene_B": ["gB1"]}).to_csv(
+        pairs, sep="\t", index=False)
+    phenotype = tmp_path / "phenotype.csv"
+    pd.DataFrame({
+        "sample": [f"s{i}" for i in range(12)],
+        "trait": np.arange(12, dtype=float),
+    }).to_csv(phenotype, index=False)
+    cfg = {
+        "interact": {
+            "mode": "pairwise", "subgenomes": ["A", "B"],
+            "genotype": {s: bed_by_sub[s] for s in ("A", "B")},
+            "snp_to_gene": {
+                s: str(out / f"snp_to_gene_{s}.npz") for s in ("A", "B")},
+            "pairs": str(pairs), "phenotype": str(phenotype),
+            "sample_col": "sample", "trait": "trait",
+            "burden": {"cap": 150, "min_snp": 1},
+        },
+        "outputs": {"out_dir": str(tmp_path / "interact")},
+    }
+    from homoeogwas.interact import preflight_interact, validate_interact_config
+    validate_interact_config(cfg)
+    assert preflight_interact(cfg) == []
 
 
 def _genes_universe(tmp_path):
@@ -235,7 +284,7 @@ def test_uncallable_true_homoeolog_dropped_not_substituted(tmp_path):
     # the SNP-rich paralog gD1p must NEVER be substituted in.
     assert "gD1p" not in set(df.get("gene_D", []))
     # only the clean, fully-callable og3 survives
-    assert set(zip(df["gene_A"], df["gene_D"])) == {("gA3", "gD3")}
+    assert set(zip(df["gene_A"], df["gene_D"], strict=True)) == {("gA3", "gD3")}
     audit = df.attrs["audit"].set_index("group")
     assert audit.loc["og1", "status"] == "ambiguous_1tomany"
     assert audit.loc["og2", "status"] == "dropped_callability"

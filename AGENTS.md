@@ -129,10 +129,10 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
 
 ## 5. Gotcha rules (mandatory)
 
-1. **Sample IDs are strings.** If phenotype sample ids are integer-like, the
-   genotype↔phenotype join silently returns 0 overlap (pandas reads them as
-   int). Coerce ids to strings on both sides (e.g. prefix them) before running,
-   or stop and tell the user.
+1. **Sample IDs are strings.** Read the phenotype sample column as strings and
+   stringify `.fam` IIDs before joining; the built-in fit/interact readers do
+   this automatically. If leading zeros were already lost upstream, stop and
+   repair the source identifiers before running.
 2. **GFF and `.bim` chromosome names must match exactly** (for `prep-snps`). If
    they differ (e.g. an NCBI accession in the GFF vs `1A` in the `.bim`), rename
    one side first; stop and say so.
@@ -143,6 +143,9 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
    `pairwise`/`triad` subsets and aggregate (e.g. ACAT).
 6. **Validate before expensive runs.** Record every generated config under
    `<out_dir>/configs/`.
+7. **Bind interaction mappings to their BED.** Current `prep-snps` NPZs record
+   the source BIM SHA-256 and variant count. Refuse legacy/unverified NPZs or a
+   BIM fingerprint mismatch; rerun `prep-snps` with the analysis BED.
 
 ---
 
@@ -150,7 +153,8 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
 
 ```bash
 # split a VCF into per-subgenome BEDs
-homoeogwas split --species-yaml {species_yaml} -o {outdir} --threads {threads}
+homoeogwas split --species-yaml {species_yaml} --vcf {vcf} \
+  -o {outdir} --threads {threads}
 
 # GWAS
 homoeogwas validate -c {outdir}/configs/fit.generated.yaml

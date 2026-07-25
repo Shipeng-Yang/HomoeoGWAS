@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -14,7 +15,7 @@ HAVE_MCP = importlib.util.find_spec("mcp") is not None
 def _touch_bed(prefix):
     for ext in (".bed", ".bim", ".fam"):
         (prefix.parent).mkdir(parents=True, exist_ok=True)
-        (prefix.with_suffix(ext)).write_text("x")
+        Path(str(prefix) + ext).write_text("x")
 
 
 def test_infer_interaction_mode():
@@ -81,6 +82,18 @@ def test_materialize_bed_layout_symlinks_and_reports_missing(tmp_path):
     assert missing == ["B"]                      # missing flagged, not guessed
 
 
+def test_materialize_bed_layout_refreshes_stale_symlinks(tmp_path):
+    first = tmp_path / "first" / "panel"
+    second = tmp_path / "second" / "panel"
+    _touch_bed(first)
+    _touch_bed(second)
+    work = tmp_path / "work"
+    workflow._materialize_bed_layout({"A": str(first)}, ["A"], work)
+    workflow._materialize_bed_layout({"A": str(second)}, ["A"], work)
+    link = work / "geno" / "A" / "all.bed"
+    assert link.resolve() == Path(str(second) + ".bed").resolve()
+
+
 def test_run_gwas_dry_run_generates_config(tmp_path):
     pheno = tmp_path / "p.tsv"
     pd.DataFrame({"IID": ["s1", "s2"], "yield": [1.0, 2.0]}).to_csv(
@@ -104,7 +117,7 @@ def test_run_gwas_dry_run_generates_config(tmp_path):
     assert loaded["phenotype"]["trait"] == "yield"
 
 
-def test_run_gwas_blocks_integer_sample_ids(tmp_path):
+def test_run_gwas_stringifies_integer_sample_ids(tmp_path):
     pheno = tmp_path / "p.tsv"
     pd.DataFrame({"IID": [1, 2, 3], "yield": [1.0, 2.0, 3.0]}).to_csv(
         pheno, sep="\t", index=False)
@@ -115,13 +128,37 @@ def test_run_gwas_blocks_integer_sample_ids(tmp_path):
         subgenomes=["A", "B"],
         bed_prefixes={"A": str(tmp_path / "sub_A"), "B": str(tmp_path / "sub_B")},
         out_dir=str(tmp_path / "out"), dry_run=True)
-    assert res["ok"] is False and res.get("blocked") == "integer_sample_ids"
+    assert res["ok"] is True
+    assert any("read the sample column as strings" in warning
+               for warning in res["warnings"])
     # missing PLINK files also block, not guess
     res2 = workflow.run_gwas(
         phenotype=str(pheno), sample_col="IID", trait="yield",
         subgenomes=["A"], bed_prefixes={"A": str(tmp_path / "nope")},
-        out_dir=str(tmp_path / "o2"), allow_integer_ids=True, dry_run=True)
+        out_dir=str(tmp_path / "o2"), dry_run=True)
     assert res2["ok"] is False and "missing" in res2["reason"]
+
+
+def test_run_gwas_stops_after_failed_validation(tmp_path, monkeypatch):
+    pheno = tmp_path / "p.tsv"
+    pd.DataFrame({"IID": ["s1", "s2"], "yield": [1.0, 2.0]}).to_csv(
+        pheno, sep="\t", index=False)
+    for s in ("A", "B"):
+        _touch_bed(tmp_path / f"sub_{s}")
+    calls = []
+
+    def fake_run(args, *, dry_run=False):
+        calls.append(list(args))
+        return {"command": ["homoeogwas", *args], "returncode": 1}
+
+    monkeypatch.setattr(workflow, "run_cli", fake_run)
+    res = workflow.run_gwas(
+        phenotype=str(pheno), sample_col="IID", trait="yield",
+        subgenomes=["A", "B"],
+        bed_prefixes={"A": str(tmp_path / "sub_A"), "B": str(tmp_path / "sub_B")},
+        out_dir=str(tmp_path / "out"))
+    assert res["ok"] is False
+    assert len(calls) == 1 and calls[0][0] == "validate"
 
 
 def test_run_interaction_dry_run(tmp_path):
@@ -132,6 +169,7 @@ def test_run_interaction_dry_run(tmp_path):
         out_dir=str(tmp_path), triads="tr.tsv", dry_run=True)
     assert res["mode"] == "triad"
     assert "interact.generated.triad" in res["config"]
+    assert [step["command"][3] for step in res["steps"]] == ["validate", "interact"]
 
 
 def test_get_guidance_returns_spec():

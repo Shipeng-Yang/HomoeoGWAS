@@ -28,6 +28,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .io import plink_path
+from .jsonutil import dumps_strict
+
 # ----------------------------------------------------------------------
 # theme + palette
 # ----------------------------------------------------------------------
@@ -602,7 +605,7 @@ def _compute_ld_to_lead(genotype_prefix: str | Path,
     from bed_reader import open_bed
 
     prefix = Path(genotype_prefix)
-    bed_path = prefix.with_suffix(".bed")
+    bed_path = plink_path(prefix, ".bed")
     if not bed_path.exists():
         raise FileNotFoundError(f"no bed for LD: {bed_path}")
     want = {str(s) for s in snp_ids}
@@ -1150,7 +1153,7 @@ def plot_from_results(results_dir: Path,
 
     if update_summary:
         summary.setdefault("outputs", {})["plots"] = paths
-        summary_path.write_text(json.dumps(summary, indent=2))
+        summary_path.write_text(dumps_strict(summary, indent=2))
     return paths
 
 
@@ -1298,7 +1301,7 @@ def plot_loci_from_results(results_dir: Path,
         gp = genotype
         if gp is None and genotype_template and sg:
             cand = genotype_template.format(subgenome=sg)
-            if Path(cand).with_suffix(".bed").exists():
+            if plink_path(cand, ".bed").exists():
                 gp = cand
         paths += plot_locus(
             win, out_dir=out_dir, prefix=run_prefix,

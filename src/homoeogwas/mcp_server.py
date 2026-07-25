@@ -43,17 +43,18 @@ def build_server():
     @mcp.tool()
     def validate_inputs(phenotype: str, sample_col: str, trait: str) -> dict:
         """Check phenotype inputs before a run: confirms the trait/sample columns
-        exist and flags the integer-sample-id pitfall (which silently breaks the
-        genotype↔phenotype join). Returns advice, not a stack trace."""
+        exist and reports whether sample IDs look integer-like. The analysis
+        reader preserves that column as strings before joining to BED IIDs."""
         return _safe(workflow.check_phenotype_inputs, phenotype=phenotype,
                      sample_col=sample_col, trait=trait)
 
     @mcp.tool()
-    def split_genotype(species_yaml: str, out_dir: str, threads: int = 8,
+    def split_genotype(species_yaml: str, out_dir: str, vcf: str | None = None,
+                       threads: int = 8,
                        dry_run: bool = False) -> dict:
         """Split one VCF into per-subgenome PLINK BEDs using a species YAML."""
         return _safe(workflow.split_genotype, species_yaml=species_yaml,
-                     out_dir=out_dir, threads=threads, dry_run=dry_run)
+                     out_dir=out_dir, vcf=vcf, threads=threads, dry_run=dry_run)
 
     @mcp.tool()
     def run_gwas(phenotype: str, sample_col: str, trait: str,
@@ -85,8 +86,9 @@ def build_server():
                 "--out-dir", out_dir]
         for s, p in bed_prefixes.items():
             args += ["--bed", f"{s}={p}"]
-        return {"ok": True, "step": _safe(workflow.run_cli, args=args,
-                                          dry_run=dry_run), "out_dir": out_dir}
+        step = _safe(workflow.run_cli, args=args, dry_run=dry_run)
+        return {"ok": step.get("returncode") in (None, 0), "step": step,
+                "out_dir": out_dir}
 
     @mcp.tool()
     def prep_homoeologs(subgenomes: list[str], genes_template: str, out: str,
@@ -119,8 +121,9 @@ def build_server():
                 args += ["--diamond", diamond]
         else:
             return {"ok": False, "reason": "provide from_table or proteins"}
-        return {"ok": True, "mode": mode, "out": out,
-                "step": _safe(workflow.run_cli, args=args, dry_run=dry_run)}
+        step = _safe(workflow.run_cli, args=args, dry_run=dry_run)
+        return {"ok": step.get("returncode") in (None, 0), "mode": mode,
+                "out": out, "step": step}
 
     @mcp.tool()
     def run_interaction(phenotype: str, sample_col: str, trait: str,

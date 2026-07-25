@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -40,9 +41,10 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
                            trait: str | None = None) -> dict:
     """Validate a phenotype file before a run: the sample/trait columns exist and
     the integer-sample-id pitfall (which silently breaks the genotype join)."""
-    import pandas as pd
+    from .io import read_delimited
     try:
-        df = pd.read_csv(phenotype, sep=None, engine="python", nrows=200)
+        df = read_delimited(
+            phenotype, nrows=200, dtype={sample_col: "string"})
     except Exception as e:   # noqa: BLE001 - report any read failure as structured
         return {"ok": False, "reason": f"cannot read phenotype {phenotype!r}: {e}"}
     need = [c for c in (sample_col, trait) if c is not None]
@@ -56,9 +58,9 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
                 f"rows in sample column {sample_col!r}"}
     integer_like = bool(len(col) and col.astype(str).str.fullmatch(r"-?\d+").all())
     return {"ok": True, "integer_like": integer_like,
-            "advice": ("sample ids look integer-like — coerce both phenotype and "
-                       ".fam ids to strings (e.g. prefix them) or the GRM∩pheno "
-                       "join returns 0 overlap" if integer_like else
+            "advice": ("sample ids look integer-like — HomoeoGWAS will preserve "
+                       "the phenotype sample column as strings before joining to "
+                       ".fam IIDs" if integer_like else
                        "sample ids are non-numeric strings (fine)")}
 
 
@@ -94,6 +96,9 @@ def _materialize_bed_layout(bed_prefixes: Mapping[str, str],
     geno = work_dir / "geno"
     missing: list[str] = []
     for s in subgenomes:
+        if s not in bed_prefixes:
+            missing.append(s)
+            continue
         src = Path(str(bed_prefixes[s]))
         if not all(Path(str(src) + ext).exists()
                    for ext in (".bed", ".bim", ".fam")):
@@ -103,8 +108,16 @@ def _materialize_bed_layout(bed_prefixes: Mapping[str, str],
         d.mkdir(parents=True, exist_ok=True)
         for ext in (".bed", ".bim", ".fam"):
             dst = d / ("all" + ext)
-            if not dst.exists():
-                dst.symlink_to(Path(str(src) + ext).resolve())
+            target = Path(str(src) + ext).resolve()
+            if dst.is_symlink():
+                if dst.resolve(strict=False) == target:
+                    continue
+                dst.unlink()
+            elif dst.exists():
+                raise FileExistsError(
+                    f"workflow-managed path {dst} exists and is not a symlink; "
+                    "use a new out_dir or move that file")
+            dst.symlink_to(target)
     return str(geno / "{subgenome}" / "all"), missing
 
 
@@ -230,7 +243,11 @@ def summarize_fit(out_dir: str, trait: str, top_n: int = 10) -> dict:
 def get_guidance(goal: str = "gwas") -> dict:
     """Return the canonical workflow spec (AGENTS.md) + a short routing hint."""
     root = Path(__file__).resolve().parents[2]
-    agents = root / "AGENTS.md"
+    candidates = [
+        root / "AGENTS.md",  # editable checkout
+        Path(sysconfig.get_path("data")) / "share" / "homoeogwas" / "AGENTS.md",
+    ]
+    agents = next((path for path in candidates if path.exists()), None)
     hints = {
         "gwas": "VCF→split→fit→plot, or BED→fit→plot. Inputs: bed_prefixes or "
                 "vcf+species_yaml, phenotype, sample_col, trait, subgenomes.",
@@ -242,7 +259,7 @@ def get_guidance(goal: str = "gwas") -> dict:
                         "never 4-way interaction.",
     }
     return {"goal": goal, "hint": hints.get(goal, hints["gwas"]),
-            "spec": agents.read_text() if agents.exists() else None}
+            "spec": agents.read_text() if agents is not None else None}
 
 
 def run_gwas(*, phenotype: str, sample_col: str, trait: str,
@@ -256,7 +273,8 @@ def run_gwas(*, phenotype: str, sample_col: str, trait: str,
     Blocks *before* any expensive run on the common breeder errors — a bad
     phenotype, a missing column, integer-like sample ids, or absent PLINK files —
     returning ``{ok: False, reason, advice}`` instead of a stack trace or a
-    doomed GWAS. Set ``allow_integer_ids`` only if you have already coerced ids.
+    doomed GWAS. ``allow_integer_ids`` is retained as a no-op compatibility
+    argument; IDs are now always read as strings.
     """
     out = Path(out_dir)
     warnings = []
@@ -266,11 +284,14 @@ def run_gwas(*, phenotype: str, sample_col: str, trait: str,
     chk = check_phenotype_inputs(phenotype, sample_col, trait)
     if not chk["ok"]:
         return {"ok": False, "reason": chk["reason"]}
-    if chk["integer_like"] and not allow_integer_ids:
-        return {"ok": False, "blocked": "integer_sample_ids",
-                "reason": "phenotype sample ids are integer-like, which silently "
-                "breaks the genotype↔phenotype join", "advice": chk["advice"]}
-    tmpl, missing = _materialize_bed_layout(bed_prefixes, subgenomes, out)
+    if chk["integer_like"]:
+        warnings.append(
+            "phenotype sample ids are integer-like; HomoeoGWAS will read the "
+            "sample column as strings before joining to BED IIDs")
+    try:
+        tmpl, missing = _materialize_bed_layout(bed_prefixes, subgenomes, out)
+    except (FileExistsError, OSError) as exc:
+        return {"ok": False, "reason": str(exc)}
     if missing:
         return {"ok": False, "reason": f"missing .bed/.bim/.fam for subgenomes "
                 f"{missing} under the given prefixes"}
@@ -280,13 +301,19 @@ def run_gwas(*, phenotype: str, sample_col: str, trait: str,
                            loco=loco)
     cfg_path = write_config(cfg, out / "configs" / "fit.generated.yaml")
     # the workflow owns out_dir (it wrote the config there), so fit overwrites it
-    steps = [run_cli(["validate", "-c", cfg_path], dry_run=dry_run),
-             run_cli(["fit", "-c", cfg_path, "--force"], dry_run=dry_run)]
-    if run_plots:
+    steps = [run_cli(["validate", "-c", cfg_path], dry_run=dry_run)]
+    if dry_run or steps[-1].get("returncode") == 0:
+        steps.append(run_cli(["fit", "-c", cfg_path, "--force"], dry_run=dry_run))
+    if run_plots and (dry_run or (len(steps) >= 2 and steps[-1].get("returncode") == 0)):
         steps.append(run_cli(["plot", out_dir], dry_run=dry_run))
-    result = {"ok": True, "config": cfg_path, "out_dir": out_dir,
+    failed = next((s for s in steps if s.get("returncode") not in (None, 0)), None)
+    result = {"ok": failed is None, "config": cfg_path, "out_dir": out_dir,
               "steps": steps, "warnings": warnings, "dry_run": dry_run}
-    if not dry_run and steps[1].get("returncode") == 0:
+    if failed is not None:
+        result["reason"] = (
+            f"command failed with exit code {failed['returncode']}: "
+            f"{' '.join(map(str, failed['command']))}")
+    if not dry_run and len(steps) >= 2 and steps[1].get("returncode") == 0:
         result["summary"] = summarize_fit(out_dir, trait)
     return result
 
@@ -297,9 +324,9 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
                     pairs: str | None = None, triads: str | None = None,
                     perm_b: int = 200, n_jobs: int = 8,
                     dry_run: bool = False) -> dict:
-    """Generate an interact config (mode inferred from ploidy), precheck inputs,
-    then run. (``homoeogwas validate`` is fit-schema only, so the interaction
-    path instead verifies its inputs exist before the long run.)"""
+    """Generate an interact config (mode inferred from ploidy), validate it,
+    then run. Validation checks schema, PLINK triplets, phenotype overlap, and
+    the SNP-to-gene/BIM provenance binding before the long computation."""
     out = Path(out_dir)
     try:
         mode = infer_interaction_mode(subgenomes)
@@ -308,8 +335,17 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
     chk = check_phenotype_inputs(phenotype, sample_col, trait)
     if not chk["ok"] and not dry_run:
         return {"ok": False, "reason": chk["reason"]}
+    missing_maps = {
+        name: [s for s in subgenomes if s not in mapping]
+        for name, mapping in (
+            ("bed_prefixes", bed_prefixes), ("snp_to_gene", snp_to_gene))
+    }
+    missing_maps = {name: values for name, values in missing_maps.items() if values}
+    if missing_maps:
+        return {"ok": False, "reason": f"missing subgenome mappings: {missing_maps}"}
     table = triads if mode == "triad" else pairs
-    needed = ([str(bed_prefixes[s]) + ".bed" for s in subgenomes]
+    needed = ([str(bed_prefixes[s]) + ext
+               for s in subgenomes for ext in (".bed", ".bim", ".fam")]
               + [str(snp_to_gene[s]) for s in subgenomes]
               + ([table] if table else []))
     absent = [p for p in needed if not Path(p).exists()]
@@ -321,18 +357,32 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
                                 out_dir=out_dir, pairs=pairs, triads=triads,
                                 perm_b=perm_b)
     cfg_path = write_config(cfg, out / "configs" / f"interact.generated.{mode}.yaml")
-    steps = [run_cli(["interact", "-c", cfg_path, "--n-jobs", str(n_jobs)],
-                     dry_run=dry_run)]
-    return {"ok": True, "config": cfg_path, "mode": mode, "out_dir": out_dir,
-            "steps": steps, "dry_run": dry_run}
+    steps = [run_cli(["validate", "-c", cfg_path], dry_run=dry_run)]
+    if dry_run or steps[-1].get("returncode") == 0:
+        steps.append(
+            run_cli(["interact", "-c", cfg_path, "--n-jobs", str(n_jobs)],
+                    dry_run=dry_run))
+    failed = next((s for s in steps if s.get("returncode") not in (None, 0)), None)
+    result = {"ok": failed is None, "config": cfg_path, "mode": mode,
+              "out_dir": out_dir, "steps": steps, "dry_run": dry_run}
+    if failed is not None:
+        result["reason"] = (
+            f"command failed with exit code {failed['returncode']}: "
+            f"{' '.join(map(str, failed['command']))}")
+    return result
 
 
-def split_genotype(*, species_yaml: str, out_dir: str, threads: int = 8,
+def split_genotype(*, species_yaml: str, out_dir: str, vcf: str | None = None,
+                   threads: int = 8,
                    dry_run: bool = False) -> dict:
     """Split a VCF into per-subgenome BEDs via ``homoeogwas split``."""
-    step = run_cli(["split", "--species-yaml", species_yaml, "-o", out_dir,
-                    "--threads", str(threads)], dry_run=dry_run)
-    return {"out_dir": out_dir, "step": step, "dry_run": dry_run}
+    args = ["split", "--species-yaml", species_yaml, "-o", out_dir,
+            "--threads", str(threads)]
+    if vcf:
+        args += ["--vcf", vcf]
+    step = run_cli(args, dry_run=dry_run)
+    return {"ok": step.get("returncode") in (None, 0), "out_dir": out_dir,
+            "step": step, "dry_run": dry_run}
 
 
 def make_plots(*, results_dir: str, formats: str = "png,pdf,svg",

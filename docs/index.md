@@ -9,4 +9,3 @@ A GWAS framework for **allopolyploid crops** built around three architectural pi
 → **[Getting Started](getting_started.md)** for install + first run
 → **[Algorithm](algorithm.md)** for the model
 → **[API Reference](api.md)** for module-level docs
-→ **[Project Charter](00_charter.md)** for the frozen claim hierarchy

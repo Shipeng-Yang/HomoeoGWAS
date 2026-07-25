@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
 WORKDIR /opt/homoeogwas
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE AGENTS.md ./
 COPY src ./src
 RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" ".[gpu]"
 

@@ -18,7 +18,6 @@ Pipeline (generalised to J subgenomes, e.g. A/C, A/B/D):
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -28,8 +27,9 @@ import pandas as pd
 
 from . import __version__
 from .grm import GRMPart, compute_grm, compute_loco_grm_parts, loco_grm_from_parts
-from .io import load_bed_hardcall
-from .kernel import hadamard_kernel, normalize_kernel
+from .io import load_bed_hardcall, plink_path, read_delimited
+from .jsonutil import dump_strict, dumps_strict
+from .kernel import build_homoeolog_kernel, normalize_kernel
 from .lmm import fit_multi_reml
 from .scan import (
     LOCOContext,
@@ -131,6 +131,11 @@ def validate_config(cfg: dict) -> None:
     if norm not in ("trace", "frobenius"):
         raise SystemExit(f"ERR: kernels.normalize must be trace|frobenius, "
                          f"got {norm!r}")
+    hom_mode = _get(cfg, "kernels.homoeolog_mode", "auto")
+    if hom_mode not in ("auto", "hadamard", "pairwise_mean", "none"):
+        raise SystemExit(
+            "ERR: kernels.homoeolog_mode must be "
+            f"auto|hadamard|pairwise_mean|none, got {hom_mode!r}")
     backend = _get(cfg, "scan.backend", "auto")
     if backend not in ("auto", "cpu", "gpu"):
         raise SystemExit(f"ERR: scan.backend must be auto|cpu|gpu, got {backend!r}")
@@ -206,7 +211,7 @@ def preflight(cfg: dict) -> list[str]:
     if not pheno.exists():
         problems.append(f"phenotype.path missing: {pheno}")
     for sg in subg:
-        bed = _scan_bed_prefix(cfg, sg).with_suffix(".bed")
+        bed = plink_path(_scan_bed_prefix(cfg, sg), ".bed")
         if not bed.exists():
             problems.append(f"scan BED missing for subgenome {sg}: {bed}")
     if _get(cfg, "genotype.grm.source", "bed") == "npz":
@@ -215,7 +220,7 @@ def preflight(cfg: dict) -> list[str]:
             problems.append(f"genotype.grm.npz_path missing: {npz}")
     else:
         for sg in subg:
-            bed = _grm_bed_prefix(cfg, sg).with_suffix(".bed")
+            bed = plink_path(_grm_bed_prefix(cfg, sg), ".bed")
             if not bed.exists():
                 problems.append(f"GRM BED missing for subgenome {sg}: {bed}")
     return problems
@@ -249,7 +254,7 @@ def _grm_source_samples(cfg: dict, subg: list[str]) -> dict[str, np.ndarray]:
     else:
         from bed_reader import open_bed
         for sg in subg:
-            with open_bed(str(_grm_bed_prefix(cfg, sg).with_suffix(".bed"))) as bed:
+            with open_bed(str(plink_path(_grm_bed_prefix(cfg, sg), ".bed"))) as bed:
                 out[sg] = _check_unique(np.asarray(bed.iid, dtype=object),
                                         f"BED {sg}")
     return out
@@ -264,13 +269,19 @@ def join_samples(cfg: dict):
     subg = _get(cfg, "panel.subgenomes")
     sample_col = _get(cfg, "phenotype.sample_col", "sample")
     trait = _get(cfg, "phenotype.trait")
-    pheno = pd.read_csv(_get(cfg, "phenotype.path"), sep="\t")
+    pheno = read_delimited(
+        _get(cfg, "phenotype.path"), dtype={sample_col: "string"})
     if sample_col not in pheno.columns:
         raise SystemExit(f"ERR: phenotype.sample_col {sample_col!r} not in "
                          f"{_get(cfg, 'phenotype.path')}")
     if trait not in pheno.columns:
         raise SystemExit(f"ERR: trait {trait!r} not in phenotype; have "
                          f"{[c for c in pheno.columns if c != sample_col]}")
+    # Sample identifiers are identifiers, never numbers. Reading this column as
+    # pandas StringDtype preserves leading zeros and makes the BED↔phenotype join
+    # deterministic even for integer-looking IDs.
+    pheno = pheno.loc[pheno[sample_col].notna()].copy()
+    pheno[sample_col] = pheno[sample_col].astype(str)
     # average duplicate-sample rows (Horvath has repeated-site entries)
     ph = pheno.groupby(sample_col)[trait].mean()
     ph = ph[ph.notna()]
@@ -356,9 +367,16 @@ def build_kernels(cfg: dict, analysis_samples: np.ndarray):
     kernels = {sg: normalize_kernel(raw[sg], mode=norm) for sg in subg}
     if _get(cfg, "kernels.include_hadamard", False):
         had_name = _get(cfg, "kernels.hadamard_name", "hom")
-        K_hom = hadamard_kernel({sg: raw[sg] for sg in subg})
-        kernels[had_name] = normalize_kernel(K_hom, mode=norm)
-        grm_info["hadamard"] = had_name
+        hom_mode = _get(cfg, "kernels.homoeolog_mode", "auto")
+        K_hom, hom_mode_used = build_homoeolog_kernel(
+            {sg: raw[sg] for sg in subg}, mode=hom_mode)
+        if K_hom is not None:
+            kernels[had_name] = normalize_kernel(K_hom, mode=norm)
+        grm_info["homoeolog_kernel"] = {
+            "name": had_name, "mode": hom_mode_used,
+        }
+        if hom_mode_used == "hadamard":  # backward-compatible provenance key
+            grm_info["hadamard"] = had_name
     grm_info["kernel_names"] = list(kernels.keys())
     return kernels, grm_info
 
@@ -445,8 +463,14 @@ def build_loco_kernels(
         sg: normalize_kernel(raw_global[sg], mode=norm) for sg in subg
     }
     if include_hadamard:
-        K_hom_global = hadamard_kernel({sg: raw_global[sg] for sg in subg})
-        global_kernels[had_name] = normalize_kernel(K_hom_global, mode=norm)
+        hom_mode = _get(cfg, "kernels.homoeolog_mode", "auto")
+        K_hom_global, hom_mode_used = build_homoeolog_kernel(
+            {sg: raw_global[sg] for sg in subg}, mode=hom_mode)
+        if K_hom_global is not None:
+            global_kernels[had_name] = normalize_kernel(K_hom_global, mode=norm)
+        grm_info["homoeolog_kernel"] = {
+            "name": had_name, "mode": hom_mode_used,
+        }
 
     # per-chrom LOCO kernels
     kernels_by_chrom: dict[str, dict[str, np.ndarray]] = {}
@@ -466,8 +490,13 @@ def build_loco_kernels(
         kernels_c = {sg: normalize_kernel(raw_loco[sg], mode=norm)
                      for sg in subg}
         if include_hadamard:
-            K_hom_c = hadamard_kernel({sg: raw_loco[sg] for sg in subg})
-            kernels_c[had_name] = normalize_kernel(K_hom_c, mode=norm)
+            K_hom_c, hom_mode_c = build_homoeolog_kernel(
+                {sg: raw_loco[sg] for sg in subg}, mode=hom_mode)
+            if hom_mode_c != hom_mode_used:
+                raise SystemExit(
+                    "ERR: LOCO homoeolog-kernel mode changed across chromosomes")
+            if K_hom_c is not None:
+                kernels_c[had_name] = normalize_kernel(K_hom_c, mode=norm)
         kernels_by_chrom[c] = kernels_c
         grm_info["loco"][c] = {
             "subgenome": sub_c,
@@ -497,7 +526,7 @@ def _count_markers(cfg: dict, subg: list[str]) -> int:
     from bed_reader import open_bed
     total = 0
     for sg in subg:
-        with open_bed(str(_scan_bed_prefix(cfg, sg).with_suffix(".bed"))) as bed:
+        with open_bed(str(plink_path(_scan_bed_prefix(cfg, sg), ".bed"))) as bed:
             total += int(bed.sid_count)
     return total
 
@@ -679,18 +708,6 @@ def scan_summary(scan_out: dict, subg: list[str], *,
 
 
 # fit command
-
-
-def _json_default(o):
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return float(o)
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    if isinstance(o, np.bool_):
-        return bool(o)
-    raise TypeError(f"not JSON serializable: {type(o)}")
 
 
 def cmd_fit(args) -> int:
@@ -887,7 +904,7 @@ def cmd_fit(args) -> int:
     }
     summary_path = out_dir / f"summary_{prefix}.json"
     with open(summary_path, "w") as fh:
-        json.dump(summary, fh, indent=2, default=_json_default)
+        dump_strict(summary, fh, indent=2)
     print(f"\nwrote {summary_path}")
     n_pass = sum(c["passed"] for c in acceptance)
     print(f"acceptance: {n_pass}/{len(acceptance)} checks passed  "
@@ -1454,7 +1471,7 @@ def cmd_rplot(args) -> int:
             gp = args.genotype
             if gp is None and gtmpl and sg:
                 cand = gtmpl.format(subgenome=sg)
-                if Path(cand).with_suffix(".bed").exists():
+                if plink_path(cand, ".bed").exists():
                     gp = cand
             r2 = {}
             if gp:
@@ -1486,6 +1503,19 @@ def cmd_rplot(args) -> int:
 def cmd_validate(args) -> int:
     """Load + validate a config and run path preflight; report, don't compute."""
     cfg = load_config(args.config)
+    if "interact" in cfg:
+        from .interact import preflight_interact, validate_interact_config
+
+        validate_interact_config(cfg)
+        print(f"[validate] interaction schema OK: {args.config}")
+        problems = preflight_interact(cfg)
+        if not problems:
+            print("[validate] interaction input preflight: OK")
+            return 0
+        print(f"[validate] interaction input preflight: {len(problems)} problem(s):")
+        for problem in problems:
+            print(f"  - {problem}")
+        return 1
     validate_config(cfg)
     print(f"[validate] schema OK: {args.config}")
     if cfg.get("_panel_manifest_resolved"):
@@ -1532,8 +1562,6 @@ def cmd_predict(args) -> int:
     reports prediction accuracy (mean r^2) per tier, the paired-bootstrap gain of the subgenome-
     stratified tiers over the pooled baseline, and top-10% selection enrichment -- the breeding
     question 'does modelling subgenomes separately (and their homoeolog interaction) predict better?'"""
-    import json
-
     from .gp import run_cv_gblup
 
     t0 = time.time()
@@ -1582,7 +1610,7 @@ def cmd_predict(args) -> int:
               f"top10%-enrichment = {ts.mean_top10_enrichment:.2f}{gain}", flush=True)
 
     out = out_dir / f"predict_{trait}.json"
-    out.write_text(json.dumps(res.to_dict(), indent=2, default=float))
+    out.write_text(dumps_strict(res.to_dict(), indent=2))
     print(f"\nhomoeogwas predict -> {out} ({time.time()-t0:.1f}s)", flush=True)
     return 0
 

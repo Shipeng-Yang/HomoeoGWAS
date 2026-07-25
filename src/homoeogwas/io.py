@@ -11,10 +11,55 @@ Conventions:
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+
+def plink_path(prefix: str | Path, extension: str) -> Path:
+    """Return a PLINK component path without treating dots in the prefix as suffixes.
+
+    ``Path.with_suffix(".bed")`` turns a valid prefix such as ``panel.v1`` into
+    ``panel.bed``.  PLINK prefixes are opaque strings, so extensions must be
+    appended instead.  Passing an already-complete component path is accepted.
+    """
+    if extension not in {".bed", ".bim", ".fam"}:
+        raise ValueError(f"unsupported PLINK extension {extension!r}")
+    text = str(prefix)
+    return Path(text if text.endswith(extension) else text + extension)
+
+
+def read_delimited(path: str | Path, **kwargs):
+    """Read a TSV or CSV, preserving caller-supplied pandas options.
+
+    Known extensions use a deterministic delimiter; unfamiliar extensions are
+    sniffed by pandas' Python engine.  This keeps the documented TSV/CSV
+    phenotype contract consistent across fit, interaction, and workflow checks.
+    """
+    import pandas as pd
+
+    suffix = Path(path).suffix.lower()
+    if "sep" not in kwargs:
+        if suffix == ".csv":
+            kwargs["sep"] = ","
+        elif suffix in {".tsv", ".tab", ".txt"}:
+            kwargs["sep"] = "\t"
+        else:
+            kwargs["sep"] = None
+            kwargs.setdefault("engine", "python")
+    return pd.read_csv(path, **kwargs)
+
+
+def plink_bim_sha256(prefix: str | Path) -> str:
+    """Return the SHA-256 digest of the exact BIM that defines BED column order."""
+    path = plink_path(prefix, ".bim")
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -45,7 +90,7 @@ def load_bed_hardcall(bed_prefix: str | Path) -> GenoChunk:
     from bed_reader import open_bed
 
     prefix = Path(bed_prefix)
-    bed_path = prefix.with_suffix(".bed")
+    bed_path = plink_path(prefix, ".bed")
     if bed_path.exists():
         path = bed_path
     else:
@@ -90,7 +135,7 @@ def iter_bed_chunks(bed_prefix: str | Path, *, chunk_size: int = 200_000):
     from bed_reader import open_bed
 
     prefix = Path(bed_prefix)
-    bed_path = prefix.with_suffix(".bed")
+    bed_path = plink_path(prefix, ".bed")
     if not bed_path.exists():
         raise FileNotFoundError(f"Expected {bed_path} (.bed/.bim/.fam prefix)")
     if chunk_size < 1:
@@ -131,7 +176,7 @@ def vcf_to_bed(vcf_gz: str | Path, out_prefix: str | Path, threads: int = 8) -> 
     import subprocess
 
     out = Path(out_prefix)
-    bed = out.with_suffix(".bed")
+    bed = plink_path(out, ".bed")
     if bed.exists():
         return bed
     out.parent.mkdir(parents=True, exist_ok=True)

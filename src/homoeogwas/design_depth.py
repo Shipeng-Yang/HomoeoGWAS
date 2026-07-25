@@ -39,7 +39,6 @@ time -- exactly what a pre-sequencing calculator requires.
 """
 from __future__ import annotations
 
-import json
 import math
 import sys
 from dataclasses import asdict, dataclass, replace
@@ -47,6 +46,8 @@ from pathlib import Path
 
 import numpy as np
 from scipy import stats
+
+from .jsonutil import dumps_strict
 
 # --------------------------------------------------------------------------- #
 # Validated empirical per-gene callable-fraction curve (from h7_marker_density,
@@ -421,6 +422,6 @@ def cmd_design(args) -> int:
     if getattr(args, "out", None):
         outp = Path(args.out)
         outp.parent.mkdir(parents=True, exist_ok=True)
-        outp.write_text(json.dumps(payload, indent=2, default=float))
+        outp.write_text(dumps_strict(payload, indent=2))
         print(f"\nwrote {outp}")
     return 0

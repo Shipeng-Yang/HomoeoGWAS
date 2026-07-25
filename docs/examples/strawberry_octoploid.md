@@ -88,5 +88,7 @@ Repeat for the other subsets (e.g. `A,B,D`) or pairwise (`A,B`), then aggregate
 the ACAT omnibus p-values across subsets. A single 4-way product is deliberately
 not offered — at realistic sample sizes it is far too sparse.
 
-The MCP server / agent skill does this subset orchestration automatically: give
-it the four subgenomes and it runs the supported 2-/3-way subsets for you.
+The CLI and MCP workflow deliberately refuse a four-subgenome interaction
+config. Run the supported 2-/3-subgenome subsets explicitly, record one
+generated config per subset, and aggregate their omnibus p-values (for example,
+with ACAT).

@@ -5,8 +5,8 @@
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-287%20passed-brightgreen.svg)](#testing)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
 <!-- DOI badge added after the first Zenodo release:
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
@@ -149,7 +149,7 @@ flowchart LR
     S --> I
     R --> V["variance fingerprint<br/>per-subgenome PVE"]
     SC --> O["Manhattan · QQ · λ_GC"]
-    N --> W["interaction network<br/>any ploidy 2n→8n+"]
+    N --> W["interaction network<br/>pairwise / triad subsets"]
     SC -. optional .-> D["zero-shot DL prior<br/>re-ranking"]
 
     classDef stage fill:#1F577B,stroke:#13384f,color:#ffffff;
@@ -175,7 +175,7 @@ Any allopolyploid is supported through configuration alone:
 1. Copy an existing `configs/species/*.yaml` and edit `subgenomes`, the
    chromosome naming / `chrom_map`, the reference assembly path, and `ploidy`.
    The schema in `src/homoeogwas/species_config.py` validates it.
-2. `homoeogwas split --species <yaml> --vcf <in.vcf.gz> --out-dir ...` splits the
+2. `homoeogwas split --species-yaml <yaml> --vcf <in.vcf.gz> -o ...` splits the
    markers into per-subgenome genotype sets. `K_hom` auto-selects its form for the
    subgenome count (full Hadamard for 2–3; pairwise-mean for 4+ to stay full-rank).
 3. `homoeogwas fit --config <run.yaml>` runs the mixed-model scan; the optional
@@ -220,7 +220,7 @@ src/homoeogwas/
 ## Testing
 
 ```bash
-pytest -m "not gpu and not slow"   # CPU suite (~3-5 min): 287 passed + 1 skipped
+pytest -m "not gpu and not slow"   # CPU suite; external-tool/GPU tests may skip
 pytest -m "not slow"               # + GPU tests (needs torch)
 pytest                             # full suite incl. simulation benchmarks
 ```
@@ -229,12 +229,12 @@ CI runs ruff + the CPU test suite on Python 3.10 / 3.11 / 3.12.
 
 ## Reproducing the paper
 
-The analysis code, configs, and figure pipeline for the manuscript live under
-[`reproducibility/`](reproducibility/). Large inputs (`data/`) and intermediate
-outputs (`results/`) are not tracked; see `reproducibility/paper/` for how to
-fetch the public datasets and regenerate the figures, and
-`reproducibility/paper/scripts/reproduce_baselines.sh` to clone the external
-benchmark tools.
+The manuscript analysis code, configs, source data for figures, and audit
+material are maintained separately in
+[Shipeng-Yang/HomoeoGWAS-reproducibility](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility).
+Raw inputs and large intermediate outputs are not tracked there; its README
+documents the boundary between versioned reproduction material and
+provider-hosted datasets.
 
 ## Status
 

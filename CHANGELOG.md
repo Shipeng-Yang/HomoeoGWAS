@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+No changes yet.
+
 ## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
 
 **Advisory.** Versions up to and including 1.0.2 applied the wrong significance threshold in
@@ -73,7 +77,7 @@ Anyone who ran a triad/clique burden scan with 1.0.2 or earlier should re-check 
 - Multi-trait scans no longer fold missing components to `p = 1.0`, and share one raw-design mask
   across every trait and every permutation.
 
-## Unreleased
+### Added
 
 - `homoeogwas design`: parametric sequencing-depth pre-flight calculator.
   Allopolyploid genomes are large, so blind WGS is expensive; this estimates how
@@ -86,6 +90,26 @@ Anyone who ran a triad/clique burden scan with 1.0.2 or earlier should re-check 
   in species anchors (`--like wheat|cotton|oat|rapeseed`) so a planner needs no
   VCF. Framed as a planning heuristic, not an empirical depth calibration (no raw
   reads are used). New module `design_depth.py`.
+
+### Release hardening
+
+- Workflow orchestration now stops immediately when `validate`, `fit`, or
+  `interact` fails and propagates a truthful `ok: false` result.
+- Fit and interaction phenotype readers accept TSV/CSV, preserve sample IDs as
+  strings, and correctly handle PLINK prefixes containing dots.
+- `interact.burden.min_snp` and the burden MAF gate are passed to the production
+  omniB scan; the configured hypothesis universe is no longer silently replaced
+  by function defaults.
+- `prep-snps` records the source BIM SHA-256 and variant count. Interaction
+  validation refuses legacy/unverified or mismatched SNP-to-gene mappings.
+- The fit CLI now uses the documented homoeolog-kernel auto policy: full
+  Hadamard for 2–3 subgenomes and pairwise-mean for 4+.
+- `homoeogwas validate` supports both fit and interaction configs.
+- Manuscript analysis code, figure workflows, and small audit outputs now live
+  in the separate
+  [HomoeoGWAS-reproducibility](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility)
+  repository; installable software releases no longer mix product and paper
+  workflows.
 
 ## v1.0.2 — homoeolog-interaction dominance adjustment
 
@@ -150,4 +174,5 @@ strawberry AABBCCDD, oat, rice).
 ### Quality
 - 318 tests pass; ruff-clean; CPU/GPU Docker images; reproducible-by-config runs.
 
-[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v1.0.0...HEAD
+[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v1.0.2...v2.0.0

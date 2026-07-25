@@ -40,7 +40,7 @@ homoeogwas fit -c my_run.yaml -o results/my_run
 ```
 
 The full input/output contract — genotype (per-subgenome PLINK `.bed`),
-phenotype TSV, config schema, and every output file — is documented in
+phenotype TSV/CSV, config schema, and every output file — is documented in
 **[Inputs & Outputs](io.md)**. The quickest template is the generated
 `demo_run/demo.yaml`.
 
@@ -52,7 +52,7 @@ cp configs/species/wheat_aestivum.yaml configs/species/myspecies.yaml
 
 # 2. Split a panel VCF into per-subgenome genotype sets
 homoeogwas split \
-    --species configs/species/myspecies.yaml \
+    --species-yaml configs/species/myspecies.yaml \
     --vcf myspecies_all.vcf.gz \
     --out-dir myspecies_geno/
 
@@ -71,7 +71,7 @@ the pairwise-mean kernel to avoid off-diagonal rank collapse.
 | `homoeogwas fit -c <cfg>` | run the subgenome-stratified LMM GWAS |
 | `homoeogwas validate -c <cfg>` | check config schema + input paths without computing |
 | `homoeogwas demo` | generate a tiny dataset and run an end-to-end fit (self-test) |
-| `homoeogwas split --species <yaml> --vcf <in>` | split a VCF into per-subgenome sets |
+| `homoeogwas split --species-yaml <yaml> --vcf <in>` | split a VCF into per-subgenome sets |
 | `homoeogwas interact` | homoeolog-pair interaction scan |
 
 `fit` flags: `-c/--config` (required), `-o/--out-dir`, `--backend {cpu,gpu,auto}`,

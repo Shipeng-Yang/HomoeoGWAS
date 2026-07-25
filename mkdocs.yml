@@ -35,6 +35,9 @@ nav:
   - Home: index.md
   - Getting Started: getting_started.md
   - Inputs & Outputs: io.md
+  - Interaction Inputs: interact_inputs.md
+  - Examples:
+      - Strawberry Octoploid: examples/strawberry_octoploid.md
   - Algorithm: algorithm.md
   - API Reference: api.md
 

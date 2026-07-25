@@ -222,10 +222,11 @@ def test_execute_plan_runs_each_subgenome(wheat_like_cfg_single, tmp_path):
 
     def fake_run(cmd, **kwargs):
         call_log.append(cmd)
-        # Simulate plink2 creating the .bed file
-        if cmd[0] == "plink2":
+        # Simulate the second plink2 pass creating a complete BED triplet.
+        if cmd[0] == "plink2" and "--make-bed" in cmd:
             out_idx = cmd.index("--out")
-            Path(cmd[out_idx + 1] + ".bed").write_text("")
+            for ext in (".bed", ".bim", ".fam"):
+                Path(cmd[out_idx + 1] + ext).write_text("")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
 
     with patch("homoeogwas.species_split.subprocess.run", side_effect=fake_run):
@@ -242,12 +243,14 @@ def test_execute_plan_skips_existing_without_force(wheat_like_cfg_single, tmp_pa
     plan = plan_split(wheat_like_cfg_single, tmp_path / "out")
     # Pre-create the A subgenome BED to simulate prior run
     (tmp_path / "out" / "A").mkdir(parents=True)
-    (tmp_path / "out" / "A" / "all.bed").write_text("")
+    for ext in (".bed", ".bim", ".fam"):
+        (tmp_path / "out" / "A" / f"all{ext}").write_text("")
 
     def fake_run(cmd, **kwargs):
-        if cmd[0] == "plink2":
+        if cmd[0] == "plink2" and "--make-bed" in cmd:
             out_idx = cmd.index("--out")
-            Path(cmd[out_idx + 1] + ".bed").write_text("")
+            for ext in (".bed", ".bim", ".fam"):
+                Path(cmd[out_idx + 1] + ext).write_text("")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
 
     with patch("homoeogwas.species_split.subprocess.run", side_effect=fake_run) as mock_run:
@@ -257,6 +260,24 @@ def test_execute_plan_skips_existing_without_force(wheat_like_cfg_single, tmp_pa
     statuses = [sg["status"] for sg in summary["subgenomes"]]
     assert "SKIPPED_EXISTING" in statuses
     assert statuses.count("OK") == 2
+
+
+def test_execute_plan_reports_partial_existing_bed(wheat_like_cfg_single, tmp_path):
+    plan = plan_split(wheat_like_cfg_single, tmp_path / "out")
+    (tmp_path / "out" / "A").mkdir(parents=True)
+    (tmp_path / "out" / "A" / "all.bed").write_text("")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "plink2" and "--make-bed" in cmd:
+            out_idx = cmd.index("--out")
+            for ext in (".bed", ".bim", ".fam"):
+                Path(cmd[out_idx + 1] + ext).write_text("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+
+    with patch("homoeogwas.species_split.subprocess.run", side_effect=fake_run):
+        summary = execute_plan(plan, dry_run=False, force=False)
+    assert summary["subgenomes"][0]["status"] == "ERROR"
+    assert "partial existing PLINK output" in summary["subgenomes"][0]["error"]
 
 
 def test_execute_plan_error_status_on_subprocess_failure(wheat_like_cfg_single, tmp_path):
@@ -299,6 +320,24 @@ def test_cli_split_dry_run_via_argparse(wheat_like_cfg_single, tmp_path, capsys)
     payload = json.loads(out)
     assert payload["species_id"] == "wheat_like"
     assert len(payload["subgenomes"]) == 3
+
+
+def test_cli_split_vcf_argument_overrides_species_yaml(
+        wheat_like_cfg_single, tmp_path, capsys):
+    yaml_path = tmp_path / "wheat_like.yaml"
+    yaml_path.write_text(_cfg_to_yaml(wheat_like_cfg_single, tmp_path))
+    override = tmp_path / "new_panel.vcf.gz"
+    override.write_text(TINY_VCF_HEADER)
+
+    from homoeogwas.cli import build_parser
+    args = build_parser().parse_args([
+        "split", "--species-yaml", str(yaml_path), "--vcf", str(override),
+        "--out-dir", str(tmp_path / "out"), "--dry-run", "--skip-validate",
+        "--project-root", str(tmp_path),
+    ])
+    assert cmd_split(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert str(override) in payload["subgenomes"][0]["bcftools"]
 
 
 def _cfg_to_yaml(cfg: SpeciesConfig, root: Path) -> str:
