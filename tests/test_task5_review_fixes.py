@@ -43,13 +43,17 @@ def _canonical_config(*, qa_only=False, B=2000):
     }
 
 
-def _fixed_scores():
+def _fixed_scores(B=3):
     family = MasterGroupFamily(
         ("A", "B"), ("one", "two"), (("a1", "b1"), ("a2", "b2")))
     expanded = expand_pair_edges(family)
-    edge_p = np.array([
+    base_p = np.array([
         [0.010, 0.20, 0.30, 0.40],
         [0.060, 0.26, 0.36, 0.46],
+    ])
+    edge_p = np.column_stack([
+        base_p[:, 0],
+        np.tile(base_p[:, 1:], (1, (B + 2) // 3))[:, :B],
     ])
     group_p = edge_p.copy()
     scores = F.OmniBFamilyScores(
@@ -100,16 +104,77 @@ def test_group_qa_bootstrap_has_no_discovery_authority(monkeypatch, tmp_path):
     assert result.n_sig is None
     assert result.sig is None
     assert result.minp_boot_rejected is None
+    assert result.minp_boot_emp is None
+    assert result.minp_boot_threshold is None
     assert fwer["inferential"] is False
     assert fwer["formal_discovery_layer"] is False
     assert fwer["rejected"] is None
+    assert fwer["empirical_p"] is None
+    assert fwer["threshold"] is None
+    assert fwer["adjusted_p"] == [None, None]
     assert fwer["n_rejected"] is None
     assert fwer["sig"] is None
     assert fwer["rejected_indices"] is None
     assert fwer["rejected_hypothesis_ids"] is None
+    assert all(record["p_adjusted_bootstrap_minp"] is None
+               for record in result.top)
+    assert all(record["p_adjusted_bootstrap_minp"] is None
+               for record in result.analytic_screen_sig)
+    assert fwer["qa_diagnostics"]["role"] == (
+        "noninferential_do_not_threshold")
+    assert fwer["qa_diagnostics"]["empirical_p"] == 0.01
+    assert fwer["qa_diagnostics"]["threshold"] == 0.05
+    assert fwer["qa_diagnostics"]["adjusted_p"] == [0.01, 0.5]
     ranking = pd.read_csv(ranking_path, sep="\t")
     assert set(ranking["primary_sig"]) == {0}
+    assert ranking["p_adjusted_bootstrap_minp"].isna().all()
     assert F.omnib_fwer_consistency_flags(asdict(result)) == ()
+
+
+def test_group_formal_bootstrap_retains_adjusted_and_cutoff_fields(monkeypatch):
+    family, scores, expanded = _fixed_scores()
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+    monkeypatch.setattr(F, "bootstrap_minp_calibration", _forced_calibration)
+
+    result = F.run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="group", bootstrap_B=3)
+
+    fwer = result.model_diagnostics["bootstrap_fwer"]
+    assert result.minp_boot_threshold == 0.05
+    assert fwer["threshold"] == 0.05
+    assert fwer["adjusted_p"] == [0.01, 0.5]
+    assert result.top[0]["p_adjusted_bootstrap_minp"] == 0.01
+    assert "qa_diagnostics" not in fwer
+    assert F.omnib_fwer_consistency_flags(asdict(result)) == ()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.__setitem__("minp_boot_threshold", 0.05),
+        lambda payload: payload["model_diagnostics"]["bootstrap_fwer"].__setitem__(
+            "threshold", 0.05),
+        lambda payload: payload["model_diagnostics"]["bootstrap_fwer"].__setitem__(
+            "adjusted_p", [0.01, None]),
+        lambda payload: payload["top"][0].__setitem__(
+            "p_adjusted_bootstrap_minp", 0.01),
+        lambda payload: payload["analytic_screen_sig"][0].__setitem__(
+            "p_adjusted_bootstrap_minp", 0.01),
+    ],
+)
+def test_qa_consistency_rejects_formal_adjustment_leaks(monkeypatch, mutate):
+    family, scores, expanded = _fixed_scores()
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+    monkeypatch.setattr(F, "bootstrap_minp_calibration", _forced_calibration)
+    payload = asdict(F.run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="group", bootstrap_B=3, inferential=False))
+    mutate(payload)
+    assert "OMNIB_FWER_QA_FORMAL_ADJUSTMENT_PRESENT" in set(
+        F.omnib_fwer_consistency_flags(payload))
 
 
 def test_qa_consistency_rejects_reintroduced_authority(monkeypatch):
@@ -183,7 +248,7 @@ def test_cmd_group_qa_b19_loads_family_once_and_serializes_no_authority(
     config_path = tmp_path / "interact.yaml"
     config_path.write_text(yaml.safe_dump(config))
 
-    family = MasterGroupFamily(("A", "B"), ("g1",), (("a1", "b1"),))
+    family, scores, expanded = _fixed_scores(B=19)
     load_calls = []
 
     def load_once(path, subs):
@@ -207,36 +272,22 @@ def test_cmd_group_qa_b19_loads_family_once_and_serializes_no_authority(
         IO, "read_delimited",
         lambda *args, **kwargs: pd.DataFrame({
             "sample": samples, "trait": np.arange(12, dtype=float)}))
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+    monkeypatch.setattr(F, "bootstrap_minp_calibration", _forced_calibration)
 
-    def fake_scan(subdata_arg, family_arg, y, sample_idx, **kwargs):
+    actual_scan = I.run_group_scan_omnib
+
+    def checked_scan(subdata_arg, family_arg, y, sample_idx, **kwargs):
         assert family_arg is family
         assert kwargs["inferential"] is False
         assert kwargs["grm_method"] == "grm_from_X"
         assert kwargs["maf_min"] == 0.01
         assert kwargs["burden_maf"] == 0.01
-        return I.InteractResult(
-            trait="", transform="INT", n=12, G=1,
-            pair_acat=0.2, pair_acat_emp=np.nan, min_p=0.2,
-            lambda_gc_obs=1.0, lambda_gc_perm_median=np.nan,
-            bonferroni_alpha=0.05, n_sig=None, sig=None, top=[],
-            covariates=None, statistic="omniB", calibration_method="bootstrap",
-            bootstrap_B=19, bootstrap_seed=2026, minp_boot_emp=0.1,
-            minp_boot_threshold=0.05, minp_boot_rejected=None,
-            model_diagnostics={
-                "bootstrap_fwer": {
-                    "inferential": False, "formal_discovery_layer": False,
-                    "rejected": None, "n_rejected": None, "sig": None,
-                    "rejected_indices": None, "rejected_hypothesis_ids": None,
-                },
-                "family_provenance": {
-                    "group_family_sha256": "a" * 64,
-                    "edge_family_sha256": "b" * 64,
-                    "n_groups_raw": 1, "n_unique_edges": 1,
-                },
-            },
-        )
+        return actual_scan(
+            subdata_arg, family_arg, y, sample_idx, **kwargs)
 
-    monkeypatch.setattr(I, "run_group_scan_omnib", fake_scan)
+    monkeypatch.setattr(I, "run_group_scan_omnib", checked_scan)
     rc = I.cmd_interact(SimpleNamespace(config=str(config_path), out_dir=None, n_jobs=1))
 
     assert rc == 0
@@ -246,4 +297,17 @@ def test_cmd_group_qa_b19_loads_family_once_and_serializes_no_authority(
     assert result["n_sig"] is None
     assert result["sig"] is None
     assert result["minp_boot_rejected"] is None
-    assert result["model_diagnostics"]["bootstrap_fwer"]["inferential"] is False
+    assert result["minp_boot_emp"] is None
+    assert result["minp_boot_threshold"] is None
+    fwer = result["model_diagnostics"]["bootstrap_fwer"]
+    assert fwer["inferential"] is False
+    assert fwer["empirical_p"] is None
+    assert fwer["threshold"] is None
+    assert fwer["adjusted_p"] == [None, None]
+    assert fwer["qa_diagnostics"]["role"] == (
+        "noninferential_do_not_threshold")
+    assert all(record["p_adjusted_bootstrap_minp"] is None
+               for record in result["top"])
+    result["minp_boot_threshold"] = 0.05
+    assert "OMNIB_FWER_QA_FORMAL_ADJUSTMENT_PRESENT" in set(
+        F.omnib_fwer_consistency_flags(result))

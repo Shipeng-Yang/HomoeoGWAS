@@ -3116,8 +3116,12 @@ def cmd_interact(args) -> int:
             raise RuntimeError(
                 "canonical group scanner omitted required family provenance: "
                 + ", ".join(missing_provenance))
+        qa_diagnostics = (
+            ((r.model_diagnostics or {}).get("bootstrap_fwer") or {})
+            .get("qa_diagnostics") or {})
         authority = (
-            f"QA_bootstrap(no formal rejections, minP_emp={r.minp_boot_emp})"
+            "QA_bootstrap(no formal rejections, diagnostic_minP_emp="
+            f"{qa_diagnostics.get('empirical_p')})"
             if calibration_qa_only else
             f"formal_bootFWER(nsig={r.n_sig})")
         print(

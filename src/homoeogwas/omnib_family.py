@@ -616,8 +616,11 @@ def run_group_scan_omnib(
     # This is deliberately the sole calibration call for primary_only and joint.
     calibration = bootstrap_minp_calibration(
         observed[finite], primary_p[finite, 1:], alpha=alpha)
-    adjusted = np.full(observed.size, np.nan)
-    adjusted[finite] = calibration["adjusted_p_local"]
+    diagnostic_adjusted = np.full(observed.size, np.nan)
+    diagnostic_adjusted[finite] = calibration["adjusted_p_local"]
+    adjusted = (
+        diagnostic_adjusted
+        if inferential else np.full(observed.size, np.nan))
     rejected_indices = [
         int(finite_indices[int(local)])
         for local in calibration["rejected_local"]
@@ -658,6 +661,11 @@ def run_group_scan_omnib(
         "n_hypotheses": int(observed.size),
         "n_calibrated": int(finite.sum()),
         "n_unestimable": int((~finite).sum()),
+        "empirical_p": (
+            float(calibration["empirical_p"]) if inferential else None),
+        "threshold": calibration["threshold"] if inferential else None,
+        "threshold_comparator": (
+            calibration.get("threshold_comparator") if inferential else None),
         "hypothesis_ids": hypothesis_ids,
         "family_order_sha256": hashlib.sha256(
             "\x00".join(hypothesis_ids).encode()).hexdigest(),
@@ -684,14 +692,27 @@ def run_group_scan_omnib(
             "QA-only bootstrap diagnostics; this object has no formal "
             "discovery or rejection authority."),
     }
+    if not inferential:
+        fwer["qa_diagnostics"] = {
+            "role": "noninferential_do_not_threshold",
+            "empirical_p": float(calibration["empirical_p"]),
+            "threshold": calibration["threshold"],
+            "threshold_comparator": calibration.get("threshold_comparator"),
+            "adjusted_p": [
+                float(value) if np.isfinite(value) else None
+                for value in diagnostic_adjusted
+            ],
+        }
 
     flags = omnib_fwer_consistency_flags({
         "n_sig": len(sig) if inferential else None,
         "sig": sig,
         "minp_boot_rejected": (
             bool(calibration["rejected"]) if inferential else None),
-        "minp_boot_emp": float(calibration["empirical_p"]),
-        "minp_boot_threshold": calibration["threshold"],
+        "minp_boot_emp": (
+            float(calibration["empirical_p"]) if inferential else None),
+        "minp_boot_threshold": (
+            calibration["threshold"] if inferential else None),
         "bootstrap_B": bootstrap_B,
         "model_diagnostics": {"bootstrap_fwer": fwer},
     })
@@ -738,8 +759,10 @@ def run_group_scan_omnib(
         calibration_method="bootstrap",
         bootstrap_B=bootstrap_B,
         bootstrap_seed=int(bootstrap_seed),
-        minp_boot_emp=float(calibration["empirical_p"]),
-        minp_boot_threshold=calibration["threshold"],
+        minp_boot_emp=(
+            float(calibration["empirical_p"]) if inferential else None),
+        minp_boot_threshold=(
+            calibration["threshold"] if inferential else None),
         minp_boot_rejected=(
             bool(calibration["rejected"]) if inferential else None),
         component_diagnostics={
@@ -840,10 +863,51 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
         value is not None and adjusted[index] is None
         for index, value in enumerate(observed)
     )
-    if missing_adjusted:
+    if inferential is not False and missing_adjusted:
         flags.append("OMNIB_FWER_ADJUSTED_P_MISSING")
 
     if inferential is False:
+        def records_have_formal_adjustment(records):
+            if records is None:
+                return False
+            if not isinstance(records, list):
+                return True
+            return any(
+                not isinstance(record, dict)
+                or record.get("p_adjusted_bootstrap_minp") is not None
+                for record in records
+            )
+
+        qa_formal_adjustment = (
+            payload.get("minp_boot_emp") is not None
+            or payload.get("minp_boot_threshold") is not None
+            or empirical_p is not None
+            or fwer.get("threshold") is not None
+            or fwer.get("threshold_comparator") is not None
+            or any(value is not None for value in adjusted)
+            or records_have_formal_adjustment(payload.get("top"))
+            or records_have_formal_adjustment(
+                payload.get("analytic_screen_sig"))
+            or records_have_formal_adjustment(payload.get("sig"))
+            or records_have_formal_adjustment(fwer.get("sig"))
+        )
+        if qa_formal_adjustment:
+            flags.append("OMNIB_FWER_QA_FORMAL_ADJUSTMENT_PRESENT")
+
+        qa = fwer.get("qa_diagnostics")
+        qa_adjusted = qa.get("adjusted_p") if isinstance(qa, dict) else None
+        qa_valid = (
+            isinstance(qa, dict)
+            and qa.get("role") == "noninferential_do_not_threshold"
+            and isinstance(qa.get("empirical_p"), (int, float))
+            and isinstance(qa_adjusted, list)
+            and len(qa_adjusted) == len(ids)
+            and all(
+                value is None or isinstance(value, (int, float))
+                for value in qa_adjusted)
+        )
+        if not qa_valid:
+            flags.append("OMNIB_FWER_QA_DIAGNOSTICS_INVALID")
         return tuple(dict.fromkeys(flags))
 
     threshold = fwer.get("threshold")
