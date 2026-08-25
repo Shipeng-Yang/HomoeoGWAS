@@ -320,6 +320,8 @@ def _change_both_hit_copies(payload, field, value):
         _change_top_level_hit_p,
         _change_fwer_hit_adjusted_p,
         lambda payload: _change_both_hit_copies(
+            payload, "p", payload["sig"][0]["p"] + 0.001),
+        lambda payload: _change_both_hit_copies(
             payload, "primary_sig", False),
         lambda payload: _change_both_hit_copies(
             payload, "p_unestimable", True),

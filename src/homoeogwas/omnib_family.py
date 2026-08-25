@@ -863,6 +863,7 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
                 hit_records_ok = False
                 break
             try:
+                hit_legacy_p = float(hit.get("p"))
                 hit_p = float(hit.get("p_interaction"))
                 hit_adjusted = float(hit.get("p_adjusted_bootstrap_minp"))
                 expected_p = float(observed[full_index])
@@ -872,6 +873,8 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
                 break
             if not (
                 hit.get("hypothesis_id") == ids[full_index]
+                and np.isfinite(hit_legacy_p)
+                and hit_legacy_p == expected_p
                 and np.isfinite(hit_p)
                 and np.isfinite(expected_p)
                 and hit_p == expected_p
