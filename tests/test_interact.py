@@ -945,7 +945,7 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     config.write_text(json.dumps(cfg), encoding="utf-8")
 
     samples = [f"s{i}" for i in range(12)]
-    monkeypatch.setattr(I, "preflight_interact", lambda _cfg: [])
+    monkeypatch.setattr(I, "preflight_interact", lambda _cfg, **_kwargs: [])
     monkeypatch.setattr(
         I, "_load_subgenome",
         lambda *_args, **_kwargs: SimpleNamespace(samples=samples),
@@ -1083,7 +1083,7 @@ def test_cmd_interact_triad3_bypasses_group_normalization_and_route(
     config = tmp_path / "triad3.yaml"
     config.write_text(json.dumps(cfg), encoding="utf-8")
     samples = [f"s{i}" for i in range(12)]
-    monkeypatch.setattr(I, "preflight_interact", lambda _cfg: [])
+    monkeypatch.setattr(I, "preflight_interact", lambda _cfg, **_kwargs: [])
     monkeypatch.setattr(
         I, "_load_subgenome",
         lambda *_args, **_kwargs: SimpleNamespace(samples=samples),

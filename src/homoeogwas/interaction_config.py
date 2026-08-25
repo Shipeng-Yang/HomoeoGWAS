@@ -38,6 +38,16 @@ def normalize_interact_config(cfg: dict) -> dict:
         ic.setdefault("hypothesis_unit", "edge" if mode == "pairwise" else "group")
         ic.setdefault("subset_order", 2)
 
+    if statistic == "omnib" and str(ic.get("mode", mode)).lower() == "group":
+        grm = ic.setdefault("grm", {})
+        if isinstance(grm, dict):
+            grm.setdefault("method", "grm_from_X")
+            grm.setdefault("maf_min", 0.01)
+            grm.setdefault("scope", "all_subgenomes")
+        burden = ic.setdefault("burden", {})
+        if isinstance(burden, dict):
+            burden.setdefault("maf_min", 0.01)
+
     ic.setdefault("family_scope", "primary_only")
     ic["_normalized_version"] = _NORMALIZED_VERSION
     return out

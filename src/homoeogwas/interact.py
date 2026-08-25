@@ -2441,11 +2441,29 @@ def validate_interact_config(cfg: dict) -> None:
         grm = ic.get("grm", {})
         if not isinstance(grm, dict):
             raise SystemExit("ERR: interact.grm must be a mapping")
-        if str(grm.get("scope", "all_subgenomes")).lower() != "all_subgenomes":
+        if grm.get("method") != "grm_from_X":
+            raise SystemExit(
+                "ERR: canonical group omniB requires "
+                "interact.grm.method=grm_from_X; remove the explicit value "
+                "to use the canonical default")
+        if grm.get("maf_min") != 0.01:
+            raise SystemExit(
+                "ERR: canonical group omniB requires "
+                "interact.grm.maf_min=0.01; remove the explicit value to use "
+                "the canonical default")
+        if grm.get("scope") != "all_subgenomes":
             raise SystemExit(
                 "ERR: canonical group omniB requires "
                 "interact.grm.scope=all_subgenomes so every pair edge shares "
                 "one null model")
+        burden = ic.get("burden", {})
+        if not isinstance(burden, dict):
+            raise SystemExit("ERR: interact.burden must be a mapping")
+        if burden.get("maf_min") != 0.01:
+            raise SystemExit(
+                "ERR: canonical group omniB requires "
+                "interact.burden.maf_min=0.01; remove the explicit value to "
+                "use the canonical default")
     elif mode not in expected_n:
         raise SystemExit(
             "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
@@ -2639,7 +2657,7 @@ def validate_interact_config(cfg: dict) -> None:
             f"got {burden_maf!r}")
 
 
-def preflight_interact(cfg: dict) -> list[str]:
+def preflight_interact(cfg: dict, *, master_family=None) -> list[str]:
     """Check interaction paths, mapping provenance, table columns, and samples."""
     from bed_reader import open_bed
 
@@ -2697,7 +2715,12 @@ def preflight_interact(cfg: dict) -> list[str]:
         problems.append(f"interact.{table_key} is required")
         return problems
     table = Path(table_value)
-    if not table.exists():
+    if mode == "group" and master_family is not None:
+        if tuple(master_family.subgenomes) != tuple(subs):
+            problems.append(
+                "groups table invalid: preloaded master-family subgenomes "
+                f"{list(master_family.subgenomes)} do not match {subs}")
+    elif not table.exists():
         problems.append(f"{table_key} table missing: {table}")
     else:
         try:
@@ -2891,15 +2914,22 @@ def cmd_interact(args) -> int:
         cfg = yaml.safe_load(fh)
     cfg = normalize_interact_config(cfg)
     validate_interact_config(cfg)
-    problems = preflight_interact(cfg)
+    ic = cfg["interact"]
+    subs = list(ic["subgenomes"])
+    mode = str(ic.get("mode", "pairwise")).lower()
+    master_family = None
+    if mode == "group":
+        try:
+            master_family = load_master_group_family(ic["groups"], subs)
+        except Exception as exc:  # noqa: BLE001 - user-facing input repair
+            print(f"ERROR: groups table invalid: {exc}")
+            return 1
+    problems = preflight_interact(cfg, master_family=master_family)
     if problems:
         print(f"ERROR: interaction input preflight found {len(problems)} problem(s):")
         for problem in problems:
             print(f"  - {problem}")
         return 1
-    ic = cfg["interact"]
-    subs = list(ic["subgenomes"])
-    mode = str(ic.get("mode", "pairwise")).lower()
     group_modes = ("group", "triad")
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3018,7 +3048,10 @@ def cmd_interact(args) -> int:
     calibration_qa_only = bool(calib.get("qa_only", False))
     n_pc = int(burden.get("n_pc", 3))
     grm_cfg = ic.get("grm", {})
-    grm_method = grm_cfg.get("method", "compute_grm_maf")
+    grm_method = grm_cfg.get(
+        "method",
+        "grm_from_X" if mode == "group" and statistic == "omnib"
+        else "compute_grm_maf")
     maf_min = float(grm_cfg.get("maf_min", 0.01))
     n_jobs = int(args.n_jobs)
 
@@ -3043,7 +3076,7 @@ def cmd_interact(args) -> int:
 
     canonical_family_provenance = {}
     if mode == "group" and statistic == "omnib":
-        family = load_master_group_family(ic["groups"], subs)
+        family = master_family
         hypothesis_unit = str(ic["hypothesis_unit"]).lower()
         family_scope = str(ic.get("family_scope", "primary_only")).lower()
         print(
@@ -3067,6 +3100,7 @@ def cmd_interact(args) -> int:
             min_snp=min_snp,
             covariates=cov_arg,
             full_dump_path=_dump_path("INT"),
+            inferential=not calibration_qa_only,
         )
         r.trait = trait
         results = {"INT": r.__dict__}
@@ -3082,10 +3116,13 @@ def cmd_interact(args) -> int:
             raise RuntimeError(
                 "canonical group scanner omitted required family provenance: "
                 + ", ".join(missing_provenance))
+        authority = (
+            f"QA_bootstrap(no formal rejections, minP_emp={r.minp_boot_emp})"
+            if calibration_qa_only else
+            f"formal_bootFWER(nsig={r.n_sig})")
         print(
             f"  [INT] G={r.G} statistic=omniB "
-            f"primary={hypothesis_unit} minP={r.min_p:.3g} "
-            f"formal_bootFWER(nsig={r.n_sig})",
+            f"primary={hypothesis_unit} minP={r.min_p:.3g} {authority}",
             flush=True,
         )
         for hit in (r.sig or []):

@@ -570,8 +570,14 @@ def run_group_scan_omnib(
     covariates=None,
     full_dump_path=None,
     alpha=0.05,
+    inferential=True,
 ):
-    """Run the formal edge, group or jointly calibrated omniB family."""
+    """Run an edge, group or jointly calibrated omniB family.
+
+    ``inferential=False`` retains the bootstrap as a QA diagnostic but strips
+    every field that could be interpreted as experiment-wide rejection
+    authority.
+    """
     from . import interact as I
 
     hypothesis_unit = str(hypothesis_unit).lower()
@@ -580,6 +586,8 @@ def run_group_scan_omnib(
         raise ValueError("hypothesis_unit must be edge or group")
     if family_scope not in {"primary_only", "joint"}:
         raise ValueError("family_scope must be primary_only or joint")
+    if not isinstance(inferential, bool):
+        raise ValueError("inferential must be true or false")
     if str(transform).upper() != "INT":
         raise ValueError("formal omniB family calibration requires transform='INT'")
     if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
@@ -614,7 +622,7 @@ def run_group_scan_omnib(
         int(finite_indices[int(local)])
         for local in calibration["rejected_local"]
     ]
-    rejected_set = set(rejected_indices)
+    rejected_set = set(rejected_indices) if inferential else set()
 
     records = []
     for index, identity in enumerate(identities):
@@ -630,7 +638,9 @@ def run_group_scan_omnib(
         })
     order = np.argsort(
         np.where(finite, observed, np.inf), kind="stable").astype(int).tolist()
-    sig = [records[index] for index in order if index in rejected_set]
+    sig = (
+        [records[index] for index in order if index in rejected_set]
+        if inferential else None)
     top = [records[index] for index in order if finite[index]][:5]
 
     hypothesis_ids = [record["hypothesis_id"] for record in records]
@@ -643,8 +653,8 @@ def run_group_scan_omnib(
         "family_scope": family_scope,
         "declared_hypothesis_unit": hypothesis_unit,
         "calibrated_layers": calibrated_layers,
-        "formal_discovery_layer": True,
-        "inferential": True,
+        "formal_discovery_layer": inferential,
+        "inferential": inferential,
         "n_hypotheses": int(observed.size),
         "n_calibrated": int(finite.sum()),
         "n_unestimable": int((~finite).sum()),
@@ -657,24 +667,29 @@ def run_group_scan_omnib(
         "adjusted_p": [
             float(value) if np.isfinite(value) else None for value in adjusted
         ],
-        "rejected_indices": [
-            int(index) for index in order if index in rejected_set
-        ],
-        "rejected_hypothesis_ids": [
-            hypothesis_ids[index] for index in order if index in rejected_set
-        ],
-        "n_rejected": len(sig),
+        "rejected": bool(calibration["rejected"]) if inferential else None,
+        "rejected_indices": (
+            [int(index) for index in order if index in rejected_set]
+            if inferential else None),
+        "rejected_hypothesis_ids": (
+            [hypothesis_ids[index] for index in order if index in rejected_set]
+            if inferential else None),
+        "n_rejected": len(sig) if inferential else None,
         "sig": sig,
         "note": (
             "This bootstrap min-P object is the sole calibrated discovery "
             "layer; edge and component decompositions are descriptive unless "
-            "included in family_scope=joint."),
+            "included in family_scope=joint."
+            if inferential else
+            "QA-only bootstrap diagnostics; this object has no formal "
+            "discovery or rejection authority."),
     }
 
     flags = omnib_fwer_consistency_flags({
-        "n_sig": len(sig),
+        "n_sig": len(sig) if inferential else None,
         "sig": sig,
-        "minp_boot_rejected": bool(calibration["rejected"]),
+        "minp_boot_rejected": (
+            bool(calibration["rejected"]) if inferential else None),
         "minp_boot_emp": float(calibration["empirical_p"]),
         "minp_boot_threshold": calibration["threshold"],
         "bootstrap_B": bootstrap_B,
@@ -707,7 +722,7 @@ def run_group_scan_omnib(
         lambda_gc_obs=float(I.lambda_gc(observed[finite])),
         lambda_gc_perm_median=float("nan"),
         bonferroni_alpha=bonferroni_alpha,
-        n_sig=len(sig),
+        n_sig=len(sig) if inferential else None,
         sig=sig,
         top=top,
         sigma_hat={
@@ -725,7 +740,8 @@ def run_group_scan_omnib(
         bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=float(calibration["empirical_p"]),
         minp_boot_threshold=calibration["threshold"],
-        minp_boot_rejected=bool(calibration["rejected"]),
+        minp_boot_rejected=(
+            bool(calibration["rejected"]) if inferential else None),
         component_diagnostics={
             "role": "descriptive_localization",
             "calibrated_layers": calibrated_layers,
@@ -760,23 +776,41 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
     if fwer.get("calibrated_layers") != expected_layers:
         flags.append("OMNIB_FWER_UNCALIBRATED_SECOND_PRIMARY_LAYER")
 
+    inferential = fwer.get("inferential")
+    formal_discovery_layer = fwer.get("formal_discovery_layer")
     n_rejected = fwer.get("n_rejected")
-    if payload.get("n_sig") != n_rejected:
-        flags.append("OMNIB_FWER_TOPLEVEL_COUNT_MISMATCH")
-
     fwer_rejected = fwer.get("rejected")
     empirical_p = fwer.get("empirical_p")
     alpha = fwer.get("alpha")
-    if not (
-        isinstance(fwer_rejected, bool)
-        and payload.get("minp_boot_rejected") == fwer_rejected
-        and isinstance(n_rejected, int)
-        and fwer_rejected == (n_rejected > 0)
-        and isinstance(empirical_p, (int, float))
-        and isinstance(alpha, (int, float))
-        and fwer_rejected == (float(empirical_p) <= float(alpha))
-    ):
-        flags.append("OMNIB_FWER_TOPLEVEL_DECISION_MISMATCH")
+    if inferential is False:
+        qa_authority = (
+            formal_discovery_layer is not False
+            or payload.get("n_sig") is not None
+            or payload.get("sig") is not None
+            or payload.get("minp_boot_rejected") is not None
+            or fwer_rejected is not None
+            or n_rejected is not None
+            or fwer.get("sig") is not None
+            or fwer.get("rejected_indices") is not None
+            or fwer.get("rejected_hypothesis_ids") is not None
+        )
+        if qa_authority:
+            flags.append("OMNIB_FWER_QA_AUTHORITY_PRESENT")
+    else:
+        if formal_discovery_layer is not True or inferential is not True:
+            flags.append("OMNIB_FWER_AUTHORITY_MODE_INVALID")
+        if payload.get("n_sig") != n_rejected:
+            flags.append("OMNIB_FWER_TOPLEVEL_COUNT_MISMATCH")
+        if not (
+            isinstance(fwer_rejected, bool)
+            and payload.get("minp_boot_rejected") == fwer_rejected
+            and isinstance(n_rejected, int)
+            and fwer_rejected == (n_rejected > 0)
+            and isinstance(empirical_p, (int, float))
+            and isinstance(alpha, (int, float))
+            and fwer_rejected == (float(empirical_p) <= float(alpha))
+        ):
+            flags.append("OMNIB_FWER_TOPLEVEL_DECISION_MISMATCH")
     if payload.get("minp_boot_emp") != empirical_p:
         flags.append("OMNIB_FWER_TOPLEVEL_EMPIRICAL_P_MISMATCH")
     if payload.get("minp_boot_threshold") != fwer.get("threshold"):
@@ -808,6 +842,9 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
     )
     if missing_adjusted:
         flags.append("OMNIB_FWER_ADJUSTED_P_MISSING")
+
+    if inferential is False:
+        return tuple(dict.fromkeys(flags))
 
     threshold = fwer.get("threshold")
     adjusted_ids = {
