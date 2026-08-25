@@ -75,7 +75,11 @@ def _null_bootstrap_responses(
     values, vectors = np.linalg.eigh(0.5 * (V + V.T))
     root = (vectors * np.sqrt(np.clip(values, 1e-12, None))) @ vectors.T
     rng = np.random.default_rng(seed)
-    return C @ beta[:, None] + root @ rng.standard_normal((V.shape[0], B))
+    # Preserve the frozen legacy stream exactly: the historical implementation
+    # drew one length-n vector per replicate in a Python loop.  NumPy fills a
+    # (B, n) array in that same row-major order; drawing (n, B) would assign a
+    # different random stream to every replicate despite using the same seed.
+    return C @ beta[:, None] + root @ rng.standard_normal((B, V.shape[0])).T
 
 
 def score_omnib_family(
@@ -269,50 +273,36 @@ def _interact_result(interact_module, **values):
         **{key: value for key, value in values.items() if key in allowed})
 
 
-def _bootstrap_minp(interact_module, p_obs, p_null, *, alpha=0.05):
-    """Use the engine calibration helper, with an exact compatibility fallback."""
-    if hasattr(interact_module, "_bootstrap_minp_calibration"):
-        return interact_module._bootstrap_minp_calibration(
-            p_obs, p_null, alpha=alpha)
+def _callable_group_rows(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    min_snp: int,
+) -> np.ndarray:
+    """Return master rows whose every declared copy passes the SNP gate."""
+    callable_rows = []
+    for group_index, genes in enumerate(family.genes):
+        if all(
+            (sub, gene) in scores.gated_snp
+            and scores.gated_snp[(sub, gene)].size >= min_snp
+            for sub, gene in zip(family.subgenomes, genes, strict=True)
+        ):
+            callable_rows.append(group_index)
+    return np.asarray(callable_rows, int)
 
-    p_obs = np.asarray(p_obs, float)
-    p_null = np.asarray(p_null, float)
-    if p_null.ndim != 2 or p_null.shape[0] != p_obs.size:
-        raise ValueError(
-            "observed and bootstrap p-values must contain the same fixed family")
-    if not np.isfinite(p_obs).all() or p_null.shape[1] < 1:
-        raise ValueError("bootstrap min-P needs finite observations and >= 1 replicate")
-    finite_null = np.isfinite(p_null)
-    degenerate = ~finite_null.all(axis=0)
-    null_min = np.where(finite_null, p_null, np.inf).min(axis=0)
-    null_min[degenerate] = 0.0
-    B = p_null.shape[1]
-    empirical_p = float((1 + (null_min <= p_obs.min()).sum()) / (B + 1))
-    k = int(np.floor(alpha * (B + 1)))
-    threshold = float(np.sort(null_min)[k - 1]) if k >= 1 else None
-    rejected_local = (
-        np.flatnonzero(p_obs < threshold).astype(int).tolist()
-        if threshold is not None else [])
-    rejected = bool(empirical_p <= alpha)
-    if rejected != bool(rejected_local):
-        raise RuntimeError(
-            "bootstrap global decision and single-step rejection set disagree")
-    return {
-        "alpha": float(alpha),
-        "method": "parametric_bootstrap_minp_plus_one",
-        "B": int(B),
-        "empirical_p": empirical_p,
-        "threshold": threshold,
-        "threshold_comparator": "strict_less_than",
-        "rejected": rejected,
-        "rejected_local": rejected_local,
-        "adjusted_p_local": (
-            (1 + (null_min[None, :] <= p_obs[:, None]).sum(axis=1))
-            / (B + 1)
-        ).astype(float),
-        "n_degenerate_replicates": int(degenerate.sum()),
-        "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
-    }
+
+def _tsv_p(interact_module, value) -> str:
+    """Serialize a probability without turning non-estimability into a number."""
+    if value is None:
+        return "NA"
+    if hasattr(interact_module, "_tsv_p"):
+        try:
+            return interact_module._tsv_p(value)
+        except (TypeError, ValueError):
+            return "NA"
+    try:
+        return repr(float(value)) if np.isfinite(value) else "NA"
+    except (TypeError, ValueError):
+        return "NA"
 
 
 def run_pair_scan_omnib(
@@ -343,6 +333,12 @@ def run_pair_scan_omnib(
     """Compatibility pair wrapper selecting the shared scorer's edge matrix."""
     from . import interact as I
 
+    primary_multiplicity = str(primary_multiplicity).lower()
+    if primary_multiplicity != "bonferroni":
+        raise ValueError(
+            "Task 3 pairwise omniB compatibility supports only "
+            "primary_multiplicity='bonferroni'; bootstrap_minp becomes a "
+            "formal discovery layer in Task 4")
     sx, sy = pair_subs
     family = MasterGroupFamily(
         (sx, sy), tuple(f"pair_{i}" for i in range(len(pairs))),
@@ -353,30 +349,30 @@ def run_pair_scan_omnib(
         bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
         grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
         min_snp=min_snp, covariates=covariates)
-    selected = np.flatnonzero(scores.edge_estimable)
+    selected = _callable_group_rows(scores, family, min_snp)
     if not selected.size:
         raise ValueError(
             "no homoeolog pairs retained: each copy must be present with "
             f">= {min_snp} SNPs passing burden MAF >= {burden_maf}")
-    kept = [
-        (expanded.edges[i].gene_x, expanded.edges[i].gene_y)
-        for i in selected
-    ]
-    P = scores.edge_p[selected]
-    component_obs = scores.edge_components_obs[selected]
+    # A pair master row has exactly one edge membership.  Index through the
+    # memberships instead of selecting unique primitive edges so duplicate
+    # planned rows remain distinct hypotheses in the legacy wrapper family.
+    edge_indices = np.asarray([
+        expanded.group_edge_indices[int(group_index)][0]
+        for group_index in selected
+    ], int)
+    kept = [family.genes[int(group_index)] for group_index in selected]
+    P = scores.edge_p[edge_indices]
+    component_obs = scores.edge_components_obs[edge_indices]
     observed = P[:, 0]
     finite = np.isfinite(observed)
-    order = [
-        int(i) for i in np.argsort(np.where(finite, observed, np.inf))
-        if finite[i]
-    ]
+    if not finite.any():
+        raise ValueError("no estimable pairs (every omniB edge was non-estimable)")
+    order_all = np.argsort(
+        np.where(finite, observed, np.inf), kind="stable").astype(int).tolist()
+    order = [index for index in order_all if finite[index]]
     G = len(kept)
     bonferroni = 0.05 / G
-    primary_multiplicity = str(primary_multiplicity).lower()
-    if primary_multiplicity not in {"bonferroni", "bootstrap_minp"}:
-        raise ValueError(
-            "pairwise omniB primary_multiplicity must be bonferroni or bootstrap_minp")
-    adjusted = np.full(G, np.nan)
 
     def hit(index):
         record = I._omnib_component_record(component_obs[index]) if hasattr(
@@ -384,43 +380,21 @@ def run_pair_scan_omnib(
         return {
             "pair": kept[index], "p": float(observed[index]),
             "p_adjusted_bonferroni": float(min(observed[index] * G, 1.0)),
-            "p_adjusted_bootstrap_minp": (
-                float(adjusted[index]) if np.isfinite(adjusted[index]) else None),
         } | record
 
     analytic_indices = [i for i in order if observed[i] < bonferroni]
     minp_emp = threshold = None
-    minp_rejected = None
-    formal_indices = None
-    bootstrap_fwer = None
     tail_excess = None
     if bootstrap_B:
-        family_indices = np.flatnonzero(finite)
-        calibration = _bootstrap_minp(
-            I, observed[finite], P[finite, 1:], alpha=0.05)
-        adjusted[finite] = calibration["adjusted_p_local"]
-        minp_emp = calibration["empirical_p"]
-        threshold = calibration["threshold"]
-        if primary_multiplicity == "bootstrap_minp":
-            minp_rejected = calibration["rejected"] if inferential else None
-            formal_indices = (
-                [int(family_indices[i]) for i in calibration["rejected_local"]]
-                if inferential else None)
-        bootstrap_fwer = {
-            key: value for key, value in calibration.items()
-            if key not in {"adjusted_p_local", "rejected_local"}
-        } | {
-            "inferential": bool(
-                inferential and primary_multiplicity == "bootstrap_minp"),
-            "rejected": minp_rejected,
-            "n_rejected": (
-                len(formal_indices) if formal_indices is not None else None),
-        }
-        tail_excess = {}
         null_family = P[finite, 1:]
+        null_min = np.nanmin(null_family, axis=0)
+        minp_emp = float(
+            (1 + int((null_min <= np.nanmin(observed[finite])).sum()))
+            / (bootstrap_B + 1))
+        threshold = float(np.quantile(null_min, 0.05))
+        tail_excess = {}
         for cutoff in tail_thresholds:
-            counts = (null_family < cutoff).sum(axis=0).astype(float)
-            counts[~np.isfinite(null_family).all(axis=0)] = float(finite.sum())
+            counts = (null_family < cutoff).sum(axis=0)
             observed_count = int((observed[finite] < cutoff).sum())
             tail_excess[f"n_below_{cutoff:g}"] = {
                 "observed": observed_count,
@@ -429,47 +403,31 @@ def run_pair_scan_omnib(
                 "empirical_p": float(
                     (1 + int((counts >= observed_count).sum()))
                     / (bootstrap_B + 1)),
-                "role": "descriptive_tail_diagnostic_not_a_discovery_test",
             }
-    elif primary_multiplicity == "bootstrap_minp" and inferential:
-        raise ValueError(
-            "formal pairwise omniB bootstrap_minp requires bootstrap_B >= 1")
-
-    if primary_multiplicity == "bonferroni" and inferential:
-        formal_indices = analytic_indices
     analytic = [hit(i) for i in analytic_indices]
-    sig = ([hit(i) for i in formal_indices]
-           if formal_indices is not None else None)
-    if bootstrap_fwer is not None:
-        bootstrap_fwer["sig"] = sig if primary_multiplicity == "bootstrap_minp" else None
-        bootstrap_fwer["note"] = (
-            "This bootstrap min-P object is the sole calibrated discovery layer. "
-            "Bonferroni fields are a descriptive analytic screen."
-            if primary_multiplicity == "bootstrap_minp" else
-            "Bootstrap min-P is diagnostic because Bonferroni was the "
-            "predeclared discovery layer.")
+    sig = analytic if inferential else None
 
     if full_dump_path:
         rows = []
-        for rank, index in enumerate(order):
-            record = hit(index)
+        for rank, index in enumerate(order_all):
+            record = (
+                I._omnib_component_record(component_obs[index])
+                if hasattr(I, "_omnib_component_record") else {})
             components = record.get("component_p", {})
             rows.append([
                 rank, kept[index][0], kept[index][1], sx, sy,
-                repr(float(observed[index])),
-                (repr(float(adjusted[index]))
-                 if np.isfinite(adjusted[index]) else "NA"),
-                repr(float(components.get("minor_burden", np.nan))),
-                repr(float(components.get("pc1", np.nan))),
-                repr(float(components.get("kernel_hadamard", np.nan))),
+                _tsv_p(I, observed[index]),
+                _tsv_p(I, components.get("minor_burden", np.nan)),
+                _tsv_p(I, components.get("pc1", np.nan)),
+                _tsv_p(I, components.get("kernel_hadamard", np.nan)),
                 record.get("smallest_component") or "NA",
+                int(not finite[index]),
             ])
         I._write_ranking_tsv(
             full_dump_path,
             ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y",
-             "p_interaction", "p_adjusted_bootstrap_minp",
-             "p_minor_burden", "p_pc1",
-             "p_kernel_hadamard", "smallest_component"], rows)
+             "p_interaction", "p_minor_burden", "p_pc1",
+             "p_kernel_hadamard", "smallest_component", "p_unestimable"], rows)
 
     if burden_dump_path:
         features = scores.feature_cache
@@ -517,10 +475,14 @@ def run_pair_scan_omnib(
         statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_emp, minp_boot_threshold=threshold,
-        minp_boot_rejected=minp_rejected,
+        minp_boot_rejected=None,
         tail_excess=tail_excess, component_diagnostics=diagnostics,
         analytic_screen_n=len(analytic), analytic_screen_sig=analytic,
-        model_diagnostics={"bootstrap_fwer": bootstrap_fwer})
+        model_diagnostics={
+            "bootstrap_fwer": {
+                "role": "diagnostic_only_task3_legacy_compatibility",
+                "formal_discovery_layer": False,
+            } if bootstrap_B else None})
 
 
 def run_clique_scan_omnib(
@@ -557,7 +519,7 @@ def run_clique_scan_omnib(
         bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
         grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
         min_snp=min_snp, covariates=covariates)
-    selected = np.flatnonzero(scores.group_estimable & ~scores.group_partial)
+    selected = _callable_group_rows(scores, family, min_snp)
     if not selected.size:
         raise ValueError(
             "no homoeolog groups retained (need all copies present with >= min_snp SNPs)")
@@ -565,10 +527,11 @@ def run_clique_scan_omnib(
     P = scores.group_p[selected]
     observed = P[:, 0]
     finite = np.isfinite(observed)
-    order = [
-        int(i) for i in np.argsort(np.where(finite, observed, np.inf))
-        if finite[i]
-    ]
+    if not finite.any():
+        raise ValueError("no estimable groups (every omniB group was non-estimable)")
+    order_all = np.argsort(
+        np.where(finite, observed, np.inf), kind="stable").astype(int).tolist()
+    order = [index for index in order_all if finite[index]]
     pair_defs = list(__import__("itertools").combinations(subs, 2))
     pair_labels = [f"{left}{right}" for left, right in pair_defs]
     pair_obs = []
@@ -613,15 +576,15 @@ def run_clique_scan_omnib(
     minp_emp = threshold = None
     tail_excess = None
     if bootstrap_B:
-        calibration = _bootstrap_minp(
-            I, observed[finite], P[finite, 1:], alpha=0.05)
-        minp_emp = calibration["empirical_p"]
-        threshold = calibration["threshold"]
-        tail_excess = {}
         null_family = P[finite, 1:]
+        null_min = np.nanmin(null_family, axis=0)
+        minp_emp = float(
+            (1 + int((null_min <= np.nanmin(observed[finite])).sum()))
+            / (bootstrap_B + 1))
+        threshold = float(np.quantile(null_min, 0.05))
+        tail_excess = {}
         for cutoff in tail_thresholds:
-            counts = (null_family < cutoff).sum(axis=0).astype(float)
-            counts[~np.isfinite(null_family).all(axis=0)] = float(finite.sum())
+            counts = (null_family < cutoff).sum(axis=0)
             observed_count = int((observed[finite] < cutoff).sum())
             tail_excess[f"n_below_{cutoff:g}"] = {
                 "observed": observed_count,
@@ -630,34 +593,34 @@ def run_clique_scan_omnib(
                 "empirical_p": float(
                     (1 + int((counts >= observed_count).sum()))
                     / (bootstrap_B + 1)),
-                "role": "descriptive_tail_diagnostic_not_a_discovery_test",
             }
 
     if full_dump_path:
         rows = []
-        for rank, index in enumerate(order):
+        for rank, index in enumerate(order_all):
             record = hit(index)
             row = [
-                rank, *kept[index], repr(float(observed[index])),
+                rank, *kept[index], _tsv_p(I, observed[index]),
                 record["smallest_pair"] or "NA",
                 record["smallest_component"] or "NA",
-                (repr(float(record["smallest_component_p"]))
-                 if record["smallest_component_p"] is not None else "NA"),
+                _tsv_p(I, record["smallest_component_p"]),
+                int(not finite[index]),
             ]
             for label in pair_labels:
                 pair_record = record["pairwise"][label]
                 component_p = pair_record.get("component_p", {})
                 row.extend([
-                    repr(float(pair_record["p_omnib"])),
-                    repr(float(component_p.get("minor_burden", np.nan))),
-                    repr(float(component_p.get("pc1", np.nan))),
-                    repr(float(component_p.get("kernel_hadamard", np.nan))),
+                    _tsv_p(I, pair_record["p_omnib"]),
+                    _tsv_p(I, component_p.get("minor_burden", np.nan)),
+                    _tsv_p(I, component_p.get("pc1", np.nan)),
+                    _tsv_p(I, component_p.get("kernel_hadamard", np.nan)),
                 ])
             rows.append(row)
         I._write_ranking_tsv(
             full_dump_path,
             ["rank", *[f"gene_{sub}" for sub in subs], "p_interaction",
-             "smallest_pair", "smallest_component", "smallest_component_p"]
+             "smallest_pair", "smallest_component", "smallest_component_p",
+             "p_unestimable"]
             + [value for label in pair_labels for value in (
                 f"p_omnib_{label}", f"p_minor_burden_{label}",
                 f"p_pc1_{label}", f"p_kernel_hadamard_{label}")],

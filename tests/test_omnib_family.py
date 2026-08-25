@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 import homoeogwas.interact as I
-import homoeogwas.omnib_family as O
 from homoeogwas.group_family import MasterGroupFamily
 from homoeogwas.interact import SubgenomeData, _score_omnib_family, acat
 from homoeogwas.omnib_family import (
@@ -127,7 +126,7 @@ def test_gene_features_are_cached_once_and_parallel_blocks_are_deterministic(mon
     np.testing.assert_array_equal(one.edge_p, parallel.edge_p)
 
 
-def test_pair_wrapper_preserves_bootstrap_primary_family_semantics(monkeypatch):
+def test_pair_wrapper_rejects_task4_bootstrap_primary_authority():
     rng = np.random.default_rng(916)
     n, group_count = 64, 3
     subdata = {
@@ -136,37 +135,175 @@ def test_pair_wrapper_preserves_bootstrap_primary_family_semantics(monkeypatch):
     }
     pairs = [(f"g{i}", f"g{i}") for i in range(group_count)]
 
-    def forced_calibration(_interact_module, p_obs, p_null, *, alpha=0.05):
-        assert p_obs.shape == (group_count,)
-        assert p_null.shape == (group_count, 3)
-        return {
-            "alpha": alpha,
-            "method": "parametric_bootstrap_minp_plus_one",
-            "B": 3,
-            "empirical_p": 0.25,
-            "threshold": 1.0,
-            "threshold_comparator": "strict_less_than",
-            "rejected": True,
-            "rejected_local": [1],
-            "adjusted_p_local": np.array([0.75, 0.25, 1.0]),
-            "n_degenerate_replicates": 0,
-            "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
-        }
+    with pytest.raises(ValueError, match="only.*bonferroni"):
+        run_shared_pair_scan_omnib(
+            subdata, pairs, rng.normal(size=n), np.arange(n), bootstrap_B=3,
+            n_jobs=1, pair_subs=("A", "D"), grm_method="grm_from_X",
+            primary_multiplicity="bootstrap_minp")
 
-    # Patch the shared module's calibration hook rather than an optional
-    # compatibility helper on interact.py.  This keeps the wrapper test valid
-    # against both the frozen baseline and the extended engine schema.
-    monkeypatch.setattr(O, "_bootstrap_minp", forced_calibration)
+
+def _subgenome_with_nonestimable_gene(rng, n):
+    random_block = rng.integers(0, 3, size=(n, 5)).astype(float)
+    constant_block = np.ones((n, 5), float)
+    return SubgenomeData(
+        X=np.column_stack([random_block, constant_block]),
+        gene_snp={"g0": np.arange(5), "g1": np.arange(5, 10)},
+        samples=[f"s{i}" for i in range(n)], chunk=None)
+
+
+def test_pair_wrapper_keeps_callable_duplicates_and_nonestimable_rows(tmp_path):
+    rng = np.random.default_rng(918)
+    n = 64
+    subdata = {
+        sub: _subgenome_with_nonestimable_gene(rng, n)
+        for sub in ("A", "D")
+    }
+    pairs = [("g0", "g0"), ("g1", "g1"), ("g0", "g0"), ("missing", "g0")]
+    ranking = tmp_path / "pairs.tsv"
     result = run_shared_pair_scan_omnib(
         subdata, pairs, rng.normal(size=n), np.arange(n), bootstrap_B=3,
         n_jobs=1, pair_subs=("A", "D"), grm_method="grm_from_X",
-        primary_multiplicity="bootstrap_minp")
+        full_dump_path=str(ranking))
 
-    assert [tuple(record["pair"]) for record in result.sig] == [pairs[1]]
-    assert result.sig[0]["p_adjusted_bootstrap_minp"] == pytest.approx(0.25)
-    if hasattr(result, "model_diagnostics"):
-        assert result.model_diagnostics["bootstrap_fwer"]["sig"] == result.sig
-        assert result.analytic_screen_sig is not result.sig
+    header, *rows = [line.split("\t") for line in ranking.read_text().splitlines()]
+    assert result.G == result.n_planned == 3
+    assert result.n_valid == 2
+    assert result.n_unestimable == 1
+    assert result.bonferroni_alpha == pytest.approx(0.05 / 3)
+    assert len(rows) == 3
+    assert [(row[1], row[2]) for row in rows].count(("g0", "g0")) == 2
+    invalid = [row for row in rows if row[1:3] == ["g1", "g1"]]
+    assert len(invalid) == 1
+    assert invalid[0][header.index("p_interaction")] == "NA"
+    assert invalid[0][header.index("p_unestimable")] == "1"
+
+
+def test_clique_wrapper_keeps_callable_duplicates_and_nonestimable_rows(tmp_path):
+    rng = np.random.default_rng(919)
+    n = 64
+    subdata = {
+        sub: _subgenome_with_nonestimable_gene(rng, n)
+        for sub in ("A", "B", "D")
+    }
+    groups = [
+        ("g0", "g0", "g0"), ("g1", "g1", "g1"),
+        ("g0", "g0", "g0"), ("missing", "g0", "g0"),
+    ]
+    ranking = tmp_path / "groups_accounting.tsv"
+    result = run_shared_clique_scan_omnib(
+        subdata, groups, rng.normal(size=n), np.arange(n), bootstrap_B=3,
+        n_jobs=1, grm_method="grm_from_X", full_dump_path=str(ranking))
+
+    header, *rows = [line.split("\t") for line in ranking.read_text().splitlines()]
+    assert result.G == result.n_planned == 3
+    assert result.n_valid == 2
+    assert result.n_unestimable == 1
+    assert result.bonferroni_alpha == pytest.approx(0.05 / 3)
+    assert len(rows) == 3
+    assert [tuple(row[1:4]) for row in rows].count(("g0", "g0", "g0")) == 2
+    invalid = [row for row in rows if row[1:4] == ["g1", "g1", "g1"]]
+    assert len(invalid) == 1
+    assert invalid[0][header.index("p_interaction")] == "NA"
+    assert invalid[0][header.index("p_unestimable")] == "1"
+
+
+def _legacy_pair_matrix(subdata, pairs, y_raw, sample_idx, *, B, seed):
+    """Frozen pre-refactor pair matrix, including its loop-ordered RNG stream."""
+    subs = list(subdata)
+    sx, sy = subs
+    kernels = {
+        sub: I._build_grm(subdata[sub], sample_idx, "grm_from_X", 0.01)
+        for sub in subs
+    }
+    y = I.rank_int(y_raw)
+    W, _V, _beta, _cv = I.null_lmm_fit(kernels, y, None, seed=42)
+    Cw = (W @ np.ones(sample_idx.size)).reshape(-1, 1)
+    rng = np.random.default_rng(seed)
+    features = {}
+    for gx, gy in pairs:
+        for sub, gene in ((sx, gx), (sy, gy)):
+            key = (sub, gene)
+            if key not in features:
+                indices = np.asarray(subdata[sub].gene_snp[gene], int)
+                Xg = subdata[sub].X[np.ix_(sample_idx, indices)]
+                local = np.arange(indices.size)
+                burden = I.block_burden_capped(
+                    Xg, local, 150, rng, minor=True).reshape(-1, 1)
+                pcs = I.gene_pc_scores(Xg, local, 150, rng, 3)
+                features[key] = burden, pcs[:, :1], pcs
+
+    responses = np.empty((sample_idx.size, B + 1), float)
+    responses[:, 0] = y
+    if B:
+        replicates, _W2, _cv2 = I.null_replicates(
+            kernels, y, C=None, B=B, method="bootstrap", seed=seed)
+        responses[:, 1:] = np.column_stack(replicates)
+    Yw = W @ responses
+    return np.vstack([
+        I._omnib_pair_over_Y(
+            W, Yw, Cw, features[(sx, gx)], features[(sy, gy)])
+        for gx, gy in pairs
+    ])
+
+
+def test_shared_pair_wrapper_is_frozen_legacy_equivalent(tmp_path):
+    rng = np.random.default_rng(920)
+    n, group_count, B, seed = 64, 4, 19, 2026
+    subdata = {
+        sub: _subgenome(rng, n, group_count)
+        for sub in ("A", "D")
+    }
+    pairs = [(f"g{i}", f"g{i}") for i in range(group_count)]
+    y = rng.normal(size=n)
+    sample_idx = np.arange(n)
+    old_P = _legacy_pair_matrix(
+        subdata, pairs, y, sample_idx, B=B, seed=seed)
+
+    family = MasterGroupFamily(
+        ("A", "D"), tuple(f"pair_{i}" for i in range(group_count)),
+        tuple(pairs))
+    shared, _expanded = _score_omnib_family(
+        subdata, family, y, sample_idx, bootstrap_B=B,
+        bootstrap_seed=seed, n_jobs=1, grm_method="grm_from_X", min_snp=3)
+    np.testing.assert_array_equal(shared.edge_p[:, 0], old_P[:, 0])
+    np.testing.assert_allclose(
+        shared.edge_p[:, 1:], old_P[:, 1:], rtol=1e-10, atol=1e-14)
+
+    ranking = tmp_path / "frozen.tsv"
+    result = run_shared_pair_scan_omnib(
+        subdata, pairs, y, sample_idx, bootstrap_B=B,
+        bootstrap_seed=seed, n_jobs=1, pair_subs=("A", "D"),
+        grm_method="grm_from_X", full_dump_path=str(ranking))
+    null_min = np.nanmin(old_P[:, 1:], axis=0)
+    expected_threshold = float(np.quantile(null_min, 0.05))
+    expected_global = float(
+        (1 + (null_min <= old_P[:, 0].min()).sum()) / (B + 1))
+    cutoff = 0.01
+    counts = (old_P[:, 1:] < cutoff).sum(axis=0)
+    observed_count = int((old_P[:, 0] < cutoff).sum())
+
+    assert result.G == result.n_planned == result.n_valid == group_count
+    assert result.n_unestimable == 0
+    assert result.min_p == old_P[:, 0].min()
+    assert result.minp_boot_threshold == pytest.approx(
+        expected_threshold, rel=1e-10, abs=1e-14)
+    assert result.minp_boot_emp == expected_global
+    assert result.tail_excess["n_below_0.01"] == {
+        "observed": observed_count,
+        "null_mean": float(counts.mean()),
+        "null_q95": float(np.quantile(counts, 0.95)),
+        "empirical_p": float(
+            (1 + (counts >= observed_count).sum()) / (B + 1)),
+    }
+    expected_sig = [
+        pairs[index]
+        for index in np.argsort(old_P[:, 0])
+        if old_P[index, 0] < 0.05 / group_count
+    ]
+    assert [tuple(record["pair"]) for record in result.sig] == expected_sig
+    header, *rows = [line.split("\t") for line in ranking.read_text().splitlines()]
+    dumped = [float(row[header.index("p_interaction")]) for row in rows]
+    assert dumped == sorted(old_P[:, 0].tolist())
 
 
 def test_clique_wrapper_full_ranking_keeps_edge_and_component_localization(tmp_path):
