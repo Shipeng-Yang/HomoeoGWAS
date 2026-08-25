@@ -748,7 +748,6 @@ def _checkpoint_manifest(
     family_scope,
     bootstrap_B,
     bootstrap_seed,
-    checkpoint_block_size,
     cap,
     n_pc,
     grm_method,
@@ -803,7 +802,6 @@ def _checkpoint_manifest(
             "inferential": bool(inferential),
             "method": "parametric_bootstrap_minp_plus_one",
         },
-        "checkpoint_block_size": checkpoint_block_size,
         "phenotype_raw": _array_identity(np.asarray(y_raw, float)),
         "phenotype_analyzed": _array_identity(scores.y),
         "sample_index": _array_identity(np.asarray(sample_idx, int)),
@@ -931,7 +929,6 @@ def run_group_scan_omnib(
             family_scope=family_scope,
             bootstrap_B=bootstrap_B,
             bootstrap_seed=bootstrap_seed,
-            checkpoint_block_size=checkpoint_block_size,
             cap=cap,
             n_pc=n_pc,
             grm_method=grm_method,
@@ -950,9 +947,7 @@ def run_group_scan_omnib(
         store.bind_manifest(manifest)
         hypothesis_ids = [record["hypothesis_id"] for record in identities]
         store.write_observed(observed, hypothesis_ids)
-        for start, stop in store.planned_ranges():
-            if store.has_range(start, stop):
-                continue
+        for start, stop in store.missing_ranges():
             edge_null, group_null = score_omnib_null_indices(
                 scores, family, expanded, range(start, stop),
                 base_seed=bootstrap_seed, n_jobs=n_jobs)

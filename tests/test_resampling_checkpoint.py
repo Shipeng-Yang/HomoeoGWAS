@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -82,6 +84,37 @@ def test_checkpoint_resume_and_completion_order_are_byte_identical(tmp_path):
     assert resumed.store.completed_ranges() == ((0, 3), (3, 6), (6, 9), (9, 10))
 
 
+def test_checkpoint_resume_discovers_existing_partition_with_new_block_size(tmp_path):
+    root = tmp_path / "resume"
+    interrupted = CheckpointStore(
+        root, manifest_id="fixture-v1", B=10, block_size=3,
+        base_seed=2026)
+    for start, stop in interrupted.planned_ranges()[:2]:
+        columns = [
+            np.random.default_rng(replicate_seed(2026, index)).uniform(size=7)
+            for index in range(start, stop)
+        ]
+        interrupted.write_block(start, stop, np.column_stack(columns))
+
+    resumed = CheckpointStore(
+        root, manifest_id="fixture-v1", B=10, block_size=5,
+        base_seed=2026)
+    assert resumed.missing_ranges() == ((6, 10),)
+    for start, stop in resumed.missing_ranges():
+        columns = [
+            np.random.default_rng(replicate_seed(2026, index)).uniform(size=7)
+            for index in range(start, stop)
+        ]
+        resumed.write_block(start, stop, np.column_stack(columns))
+
+    baseline = _run_fake_blocks(tmp_path / "full", block_size=5)
+    restored = resumed.concatenate(require_complete=True)
+    np.testing.assert_array_equal(restored, baseline.null_p)
+    assert hashlib.sha256(restored.tobytes(order="C")).hexdigest() == (
+        baseline.null_p_sha256)
+    assert resumed.completed_ranges() == ((0, 3), (3, 6), (6, 10))
+
+
 def test_block_binds_manifest_range_seed_ids_shape_dtype_and_hash(tmp_path):
     store = CheckpointStore(
         tmp_path, "manifest-a", B=5, block_size=3, base_seed=9)
@@ -103,6 +136,62 @@ def test_block_binds_manifest_range_seed_ids_shape_dtype_and_hash(tmp_path):
         assert block["matrix_sha256"].item() == hashlib.sha256(
             matrix.tobytes(order="C")).hexdigest()
     np.testing.assert_array_equal(store.read_block(0, 3), matrix)
+
+
+def test_concurrent_block_writers_accept_identical_loser(monkeypatch, tmp_path):
+    barrier = threading.Barrier(2)
+    original_savez = np.savez
+
+    def synchronized_savez(*args, **kwargs):
+        original_savez(*args, **kwargs)
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(np, "savez", synchronized_savez)
+    values = np.arange(12, dtype=np.float64).reshape(4, 3)
+    stores = [
+        CheckpointStore(
+            tmp_path, "manifest-a", B=3, block_size=3, base_seed=9)
+        for _ in range(2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paths = list(pool.map(
+            lambda store: store.write_block(0, 3, values.copy()), stores))
+
+    assert paths == [tmp_path / "block_0_3.npz"] * 2
+    np.testing.assert_array_equal(stores[0].read_block(0, 3), values)
+
+
+def test_concurrent_block_writers_reject_conflicting_loser(monkeypatch, tmp_path):
+    barrier = threading.Barrier(2)
+    original_savez = np.savez
+
+    def synchronized_savez(*args, **kwargs):
+        original_savez(*args, **kwargs)
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(np, "savez", synchronized_savez)
+    stores = [
+        CheckpointStore(
+            tmp_path, "manifest-a", B=3, block_size=3, base_seed=9)
+        for _ in range(2)
+    ]
+    matrices = [np.zeros((4, 3)), np.ones((4, 3))]
+
+    def publish(index):
+        try:
+            return stores[index].write_block(0, 3, matrices[index])
+        except CheckpointError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(publish, range(2)))
+
+    assert sum(isinstance(value, CheckpointError) for value in outcomes) == 1
+    assert sum(value == tmp_path / "block_0_3.npz" for value in outcomes) == 1
+    error = next(value for value in outcomes if isinstance(value, CheckpointError))
+    assert "conflict" in str(error).lower()
+    stored = stores[0].read_block(0, 3)
+    assert any(np.array_equal(stored, values) for values in matrices)
 
 
 def test_strict_reads_reject_corruption_wrong_manifest_and_seed_ids(tmp_path):
@@ -146,8 +235,10 @@ def test_store_rejects_overlap_gap_incomplete_and_out_of_bounds(tmp_path):
         store.write_block(2, 5, np.zeros((2, 3)))
     with pytest.raises(CheckpointError, match="bounds|range"):
         store.write_block(9, 11, np.zeros((2, 2)))
-    with pytest.raises(CheckpointError, match="already exists|duplicate"):
-        store.write_block(0, 3, np.zeros((2, 3)))
+    assert store.write_block(0, 3, np.zeros((2, 3))) == (
+        tmp_path / "block_0_3.npz")
+    with pytest.raises(CheckpointError, match="conflict"):
+        store.write_block(0, 3, np.ones((2, 3)))
 
 
 def test_concatenate_rejects_inconsistent_shape_dtype_and_filename_range(tmp_path):
@@ -299,6 +390,39 @@ def test_checkpoint_group_scan_resume_is_byte_identical(monkeypatch, tmp_path):
     uninterrupted = _checkpoint_group_run(
         tmp_path / "full", n_jobs=1, block_size=3)
     assert _result_bytes(resumed) == _result_bytes(uninterrupted)
+
+
+def test_checkpoint_group_scan_resume_with_new_block_size_is_calibration_identical(
+        monkeypatch, tmp_path):
+    original = CheckpointStore.write_block
+    calls = {"count": 0}
+
+    def interrupt_after_two(self, start, stop, matrix):
+        path = original(self, start, stop, matrix)
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise RuntimeError("simulated interruption")
+        return path
+
+    monkeypatch.setattr(CheckpointStore, "write_block", interrupt_after_two)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        _checkpoint_group_run(
+            tmp_path / "resume", n_jobs=2, block_size=3)
+    monkeypatch.setattr(CheckpointStore, "write_block", original)
+
+    resumed = _checkpoint_group_run(
+        tmp_path / "resume", n_jobs=4, block_size=5)
+    uninterrupted = _checkpoint_group_run(
+        tmp_path / "full", n_jobs=1, block_size=5)
+    resumed_checkpoint = resumed.model_diagnostics["resampling_checkpoint"]
+    full_checkpoint = uninterrupted.model_diagnostics["resampling_checkpoint"]
+    assert resumed_checkpoint["block_size"] == full_checkpoint["block_size"] == 5
+    assert resumed_checkpoint["primary_null_p_sha256"] == (
+        full_checkpoint["primary_null_p_sha256"])
+    assert resumed.model_diagnostics["bootstrap_fwer"] == (
+        uninterrupted.model_diagnostics["bootstrap_fwer"])
+    assert resumed.minp_boot_threshold == uninterrupted.minp_boot_threshold
+    assert resumed.sig == uninterrupted.sig
 
 
 def test_checkpoint_group_scan_refuses_changed_inference_manifest(tmp_path):

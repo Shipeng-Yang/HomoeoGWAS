@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +89,38 @@ def _atomic_write(path: Path, writer) -> None:
         raise
 
 
+def _fsynced_temporary(path: Path, writer) -> Path:
+    """Write and fsync one same-directory temporary file."""
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return temporary
+
+
+@contextmanager
+def _block_publication_lock(root: Path):
+    """Serialize range validation and no-replace publication across writers."""
+    path = root / ".block-publication.lock"
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 class CheckpointStore:
     """Atomic primary-null-p blocks bound to one immutable run manifest."""
 
@@ -135,10 +169,6 @@ class CheckpointStore:
         if not (0 <= start < stop <= self.B):
             raise CheckpointError(
                 f"checkpoint range [{start}, {stop}) is out of bounds for B={self.B}")
-        if (start, stop) not in set(self.planned_ranges()):
-            raise CheckpointError(
-                f"checkpoint range [{start}, {stop}) is not a planned block; "
-                "overlapping or partial blocks are forbidden")
         return start, stop
 
     def _seed_ids(self, start: int, stop: int) -> np.ndarray:
@@ -259,9 +289,6 @@ class CheckpointStore:
             raise CheckpointError("primary null-p matrix dtype cannot be object")
         values = np.ascontiguousarray(values)
         path = self._path(start, stop)
-        if path.exists():
-            raise CheckpointError(
-                f"checkpoint range [{start}, {stop}) already exists (duplicate block)")
         digest = hashlib.sha256(values.tobytes(order="C")).hexdigest()
         payload = {
             "schema_version": np.array(CHECKPOINT_SCHEMA_VERSION, dtype=np.int64),
@@ -274,8 +301,53 @@ class CheckpointStore:
             "primary_null_p": values,
             "matrix_sha256": np.array(digest),
         }
-        _atomic_write(path, lambda handle: np.savez(handle, **payload))
-        return path
+        temporary = _fsynced_temporary(
+            path, lambda handle: np.savez(handle, **payload))
+        try:
+            with _block_publication_lock(self.root):
+                ranges = self.completed_ranges()
+                if path.exists():
+                    existing = self.read_block(start, stop)
+                    existing_digest = hashlib.sha256(
+                        np.ascontiguousarray(existing).tobytes(order="C")
+                    ).hexdigest()
+                    if (
+                        existing.dtype.str != values.dtype.str
+                        or existing_digest != digest
+                    ):
+                        raise CheckpointError(
+                            f"checkpoint block publication conflict for range "
+                            f"[{start}, {stop})")
+                    return path
+                overlap = next((
+                    current for current in ranges
+                    if start < current[1] and current[0] < stop
+                ), None)
+                if overlap is not None:
+                    raise CheckpointError(
+                        f"checkpoint block publication conflict: range "
+                        f"[{start}, {stop}) overlaps existing {overlap}")
+                try:
+                    os.link(temporary, path)
+                except FileExistsError as exc:
+                    existing = self.read_block(start, stop)
+                    existing_digest = hashlib.sha256(
+                        np.ascontiguousarray(existing).tobytes(order="C")
+                    ).hexdigest()
+                    if (
+                        existing.dtype.str != values.dtype.str
+                        or existing_digest != digest
+                    ):
+                        raise CheckpointError(
+                            f"checkpoint block publication conflict for range "
+                            f"[{start}, {stop})") from exc
+                return path
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            _fsync_directory(self.root)
 
     def read_block(self, start: int, stop: int) -> np.ndarray:
         start, stop = self._validate_range(start, stop)
@@ -354,14 +426,38 @@ class CheckpointStore:
                 raise CheckpointError(f"duplicate checkpoint range: {current}")
         return tuple(ranges)
 
+    def missing_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Partition uncovered replicate indices using the current block size."""
+        missing: list[tuple[int, int]] = []
+        cursor = 0
+        for start, stop in self.completed_ranges():
+            while cursor < start:
+                block_stop = min(cursor + self.block_size, start)
+                missing.append((cursor, block_stop))
+                cursor = block_stop
+            cursor = stop
+        while cursor < self.B:
+            block_stop = min(cursor + self.block_size, self.B)
+            missing.append((cursor, block_stop))
+            cursor = block_stop
+        return tuple(missing)
+
     def concatenate(self, *, require_complete: bool = True) -> np.ndarray:
         ranges = self.completed_ranges()
         if not ranges:
             raise CheckpointError("checkpoint is incomplete: no blocks exist")
-        if require_complete and ranges != self.planned_ranges():
-            raise CheckpointError(
-                "checkpoint is incomplete or has a gap; completed ranges are "
-                f"{ranges}, expected {self.planned_ranges()}")
+        if require_complete:
+            cursor = 0
+            for start, stop in ranges:
+                if start != cursor:
+                    raise CheckpointError(
+                        "checkpoint is incomplete or has a gap; completed ranges "
+                        f"are {ranges}")
+                cursor = stop
+            if cursor != self.B:
+                raise CheckpointError(
+                    "checkpoint is incomplete or has a gap; completed ranges "
+                    f"are {ranges}")
         matrices = [self.read_block(start, stop) for start, stop in ranges]
         rows = {matrix.shape[0] for matrix in matrices}
         if len(rows) != 1:
