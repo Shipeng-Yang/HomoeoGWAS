@@ -523,6 +523,32 @@ def _ranking_rows(
     return header, rows
 
 
+def _family_provenance(
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+) -> dict:
+    """Return full ordered hashes for the biological and tested families."""
+    group_records = [
+        "\t".join((group_id, *genes))
+        for group_id, genes in zip(family.group_ids, family.genes, strict=True)
+    ]
+    edge_records = [
+        "\t".join((
+            edge.edge_id, edge.sub_x, edge.sub_y, edge.gene_x, edge.gene_y,
+            *edge.source_group_ids,
+        ))
+        for edge in expanded.edges
+    ]
+    return {
+        "group_family_sha256": hashlib.sha256(
+            "\x00".join(group_records).encode()).hexdigest(),
+        "edge_family_sha256": hashlib.sha256(
+            "\x00".join(edge_records).encode()).hexdigest(),
+        "n_groups_raw": len(family.group_ids),
+        "n_unique_edges": len(expanded.edges),
+    }
+
+
 def run_group_scan_omnib(
     subdata,
     family: MasterGroupFamily,
@@ -704,7 +730,10 @@ def run_group_scan_omnib(
             "role": "descriptive_localization",
             "calibrated_layers": calibrated_layers,
         },
-        model_diagnostics={"bootstrap_fwer": fwer},
+        model_diagnostics={
+            "bootstrap_fwer": fwer,
+            "family_provenance": _family_provenance(family, expanded),
+        },
         analytic_screen_n=len(analytic),
         analytic_screen_sig=analytic,
     )

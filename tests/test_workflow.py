@@ -21,8 +21,7 @@ def _touch_bed(prefix):
 def test_infer_interaction_mode():
     assert workflow.infer_interaction_mode(["A", "B"]) == "pairwise"
     assert workflow.infer_interaction_mode(["A", "B", "C"]) == "triad"
-    with pytest.raises(ValueError, match="2-/3-subgenome subsets"):
-        workflow.infer_interaction_mode(["A", "B", "C", "D"])
+    assert workflow.infer_interaction_mode(["A", "B", "C", "D"]) == "group"
 
 
 def test_build_fit_config_shape():
@@ -88,6 +87,25 @@ def test_build_interact_config_accepts_explicit_canonical_group_options():
     assert cfg["interact"]["mode"] == "group"
     assert cfg["interact"]["groups"] == "groups.tsv"
     assert cfg["interact"]["hypothesis_unit"] == "edge"
+
+
+def test_build_interact_config_routes_four_copies_to_pair_edge_group_omnib():
+    subs = ["A", "B", "C", "D"]
+    cfg = workflow.build_interact_config(
+        subgenomes=subs,
+        bed_prefixes={sub: sub.lower() for sub in subs},
+        snp_to_gene={sub: f"n{sub.lower()}" for sub in subs},
+        phenotype="p", sample_col="IID", trait="t", out_dir="o",
+        groups="quartets.tsv",
+    )
+    assert cfg["interact"] | {
+        "mode": "group",
+        "groups": "quartets.tsv",
+        "hypothesis_unit": "group",
+        "subset_order": 2,
+        "family_scope": "primary_only",
+    } == cfg["interact"]
+    assert cfg["outputs"]["full_ranking"] is True
 
 
 def test_check_sample_ids(tmp_path):

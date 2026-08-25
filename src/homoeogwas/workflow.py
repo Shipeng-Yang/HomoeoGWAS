@@ -25,16 +25,16 @@ from pathlib import Path
 
 
 def infer_interaction_mode(subgenomes: Sequence[str]) -> str:
-    """2 subgenomes -> ``pairwise``, 3 -> ``triad``. Refuse a single 4-way test."""
+    """Infer the input adapter; 4+ copies use pair-edge group omniB."""
     n = len(subgenomes)
     if n == 2:
         return "pairwise"
     if n == 3:
         return "triad"
+    if n >= 4:
+        return "group"
     raise ValueError(
-        f"interaction needs 2 (pairwise) or 3 (triad) subgenomes, got {n}; "
-        "for 4+ subgenomes run over 2-/3-subgenome subsets and aggregate "
-        "(never a single 4-way test) — see AGENTS.md §5")
+        f"interaction needs at least 2 subgenomes, got {n}")
 
 
 def check_phenotype_inputs(phenotype: str, sample_col: str,
@@ -179,10 +179,16 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
     )
     is_canonical_omnib = statistic_key == "omnib"
     if is_canonical_omnib:
-        group_path = groups or (pairs if mode == "pairwise" else triads)
+        group_path = groups or (
+            pairs if mode == "pairwise" else (
+                triads if mode == "triad" else None))
         if not group_path:
-            legacy_name = "pairs" if mode == "pairwise" else "triads"
-            raise ValueError(f"{mode} mode needs a {legacy_name} TSV (gene_<subgenome> columns)")
+            legacy_name = (
+                "pairs" if mode == "pairwise" else
+                ("triads" if mode == "triad" else "groups"))
+            raise ValueError(
+                f"{mode} mode needs a {legacy_name} TSV "
+                "(gene_<subgenome> columns)")
         if hypothesis_unit is None:
             hypothesis_unit = "edge" if mode == "pairwise" else "group"
     cfg = {
@@ -197,7 +203,10 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
             "grm": {"method": "grm_from_X", "maf_min": 0.01,
                     "scope": "all_subgenomes"},
             "calibration": calibration},
-        "outputs": {"out_dir": out_dir},
+        "outputs": {
+            "out_dir": out_dir,
+            **({"full_ranking": True} if is_canonical_omnib else {}),
+        },
     }
     if is_canonical_omnib:
         cfg["interact"].update({

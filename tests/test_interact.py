@@ -6,12 +6,15 @@ others; a pure-noise null produces no Bonferroni hits. These guard the engine be
 DL-weighting and multi-trait extensions are layered on.
 """
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from scipy import stats
 
 import homoeogwas.interact as I
+from homoeogwas import workflow
+from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import (
     FrozenTraitSet,
     SubgenomeData,
@@ -29,8 +32,13 @@ from homoeogwas.interact import (
     run_multitrait_pair_scan,
     run_pair_scan,
     run_pair_scan_omnib,
+    run_triad3_scan,  # noqa: F401 - exercised by legacy-route tests outside Task 5
     run_triad_scan,
+    threeway_design_mask,  # noqa: F401 - exercised by legacy-route tests outside Task 5
+    threeway_pvals,  # noqa: F401 - exercised by legacy-route tests outside Task 5
 )
+from homoeogwas.interaction_config import normalize_interact_config
+from homoeogwas.omnib_family import OmniBFamilyScores
 
 N, G, SPG = 300, 60, 8  # samples, genes/triads, snps per gene
 
@@ -842,6 +850,449 @@ def test_interact_schema_refuses_four_way_cli_config():
     }
     with pytest.raises(SystemExit, match="2-/3-subgenome subsets"):
         I.validate_interact_config(cfg)
+
+
+def _canonical_group_config(subgenomes=("A", "B", "C", "D"), **updates):
+    interact = {
+        "mode": "group",
+        "subgenomes": list(subgenomes),
+        "groups": "groups.tsv",
+        "statistic": "omniB",
+        "hypothesis_unit": "group",
+        "subset_order": 2,
+        "family_scope": "primary_only",
+        "primary_transform": "INT",
+        "primary_multiplicity": "bootstrap_minp",
+        "genotype": {sub: sub.lower() for sub in subgenomes},
+        "snp_to_gene": {sub: f"n{sub.lower()}" for sub in subgenomes},
+        "phenotype": "p.tsv",
+        "sample_col": "sample",
+        "trait": "trait",
+        "burden": {"cap": 150, "min_snp": 3, "maf_min": 0.01},
+        "grm": {
+            "method": "grm_from_X", "maf_min": 0.01,
+            "scope": "all_subgenomes",
+        },
+        "calibration": {"method": "bootstrap", "B": 2000, "seed": 2026},
+    }
+    interact.update(updates)
+    return {"interact": interact}
+
+
+@pytest.mark.parametrize("statistic", ["fourway", "4way", "four-way", "4_way"])
+def test_group_mode_accepts_four_copies_but_refuses_fourway_statistic(statistic):
+    cfg = _canonical_group_config()
+    I.validate_interact_config(cfg)
+    cfg["interact"]["statistic"] = statistic
+    with pytest.raises(SystemExit, match="never fits a direct four-way"):
+        I.validate_interact_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("legacy_mode", "subgenomes", "table_key", "hypothesis_unit"),
+    [
+        ("pairwise", ("A", "D"), "pairs", "edge"),
+        ("triad", ("A", "B", "D"), "triads", "group"),
+    ],
+)
+def test_legacy_and_canonical_omnib_configs_normalize_identically(
+        legacy_mode, subgenomes, table_key, hypothesis_unit):
+    base = {
+        "subgenomes": list(subgenomes),
+        "statistic": "omniB",
+        "genotype": {sub: sub.lower() for sub in subgenomes},
+        "snp_to_gene": {sub: f"n{sub.lower()}" for sub in subgenomes},
+        "phenotype": "p.tsv",
+        "sample_col": "sample",
+        "trait": "trait",
+    }
+    legacy = {
+        "interact": base | {"mode": legacy_mode, table_key: "groups.tsv"}}
+    canonical = {"interact": base | {
+        "mode": "group", "groups": "groups.tsv",
+        "hypothesis_unit": hypothesis_unit, "subset_order": 2,
+        "family_scope": "primary_only",
+    }}
+    assert normalize_interact_config(legacy) == normalize_interact_config(canonical)
+
+
+def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
+        monkeypatch, tmp_path):
+    subs = ("A", "B", "C", "D")
+    groups = tmp_path / "groups.tsv"
+    groups.write_text(
+        "group_id\tgene_A\tgene_B\tgene_C\tgene_D\n"
+        "q1\ta1\tb1\tc1\td1\n",
+        encoding="utf-8",
+    )
+    phenotype = tmp_path / "phenotype.tsv"
+    phenotype.write_text(
+        "sample\ttrait\n" + "".join(
+            f"s{i}\t{i / 10}\n" for i in range(12)),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    cfg = workflow.build_interact_config(
+        subgenomes=subs,
+        bed_prefixes={sub: sub.lower() for sub in subs},
+        snp_to_gene={sub: f"n{sub.lower()}" for sub in subs},
+        phenotype=str(phenotype), sample_col="sample", trait="trait",
+        out_dir=str(out_dir), groups=str(groups), perm_b=2000,
+    )
+    cfg["outputs"] = {
+        "out_dir": str(out_dir), "full_ranking": True, "plots": False}
+    config = tmp_path / "config.yaml"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+
+    samples = [f"s{i}" for i in range(12)]
+    monkeypatch.setattr(I, "preflight_interact", lambda _cfg: [])
+    monkeypatch.setattr(
+        I, "_load_subgenome",
+        lambda *_args, **_kwargs: SimpleNamespace(samples=samples),
+    )
+    calls = []
+
+    def _fake_group_scan(_subdata, family, _y, _sample_idx, **kwargs):
+        calls.append((family, kwargs))
+        return SimpleNamespace(
+            trait="", G=1, min_p=0.2, lambda_gc_obs=1.0,
+            bonferroni_alpha=0.05, n_sig=0, sig=[], top=[], covariates=None,
+            model_diagnostics={
+                "bootstrap_fwer": {"family_id": "group"},
+                "family_provenance": {
+                    "group_family_sha256": "g" * 64,
+                    "edge_family_sha256": "e" * 64,
+                    "n_groups_raw": 1,
+                    "n_unique_edges": 6,
+                },
+            },
+        )
+
+    monkeypatch.setattr(I, "run_group_scan_omnib", _fake_group_scan)
+    rc = I.cmd_interact(SimpleNamespace(
+        config=str(config), out_dir=None, n_jobs=4))
+
+    assert rc == 0
+    assert len(calls) == 1
+    family, kwargs = calls[0]
+    assert family.subgenomes == subs
+    assert family.group_ids == ("q1",)
+    assert kwargs["hypothesis_unit"] == "group"
+    assert kwargs["family_scope"] == "primary_only"
+    assert kwargs["bootstrap_B"] == 2000
+    payload = json.loads((out_dir / "interact_trait.json").read_text())
+    provenance = payload["provenance"]
+    assert provenance | {
+        "mode": "group",
+        "hypothesis_unit": "group",
+        "subset_order": 2,
+        "family_scope": "primary_only",
+        "group_family_sha256": "g" * 64,
+        "edge_family_sha256": "e" * 64,
+        "n_groups_raw": 1,
+        "n_unique_edges": 6,
+        "grm_scope": "all_subgenomes",
+    } == provenance
+    assert list(payload["results"]) == ["INT"]
+    assert payload["results"]["INT"]["model_diagnostics"][
+        "bootstrap_fwer"]["family_id"] == "group"
+
+
+def test_quartet_formal_group_has_six_edges_and_no_fourth_order_fields(
+        monkeypatch, tmp_path):
+    subs = ("A", "B", "C", "D")
+    family = MasterGroupFamily(
+        subgenomes=subs,
+        group_ids=("quartet_1",),
+        genes=(("g0", "g0", "g0", "g0"),),
+    )
+    expanded = expand_pair_edges(family)
+    assert len(expanded.edges) == 6
+    edge_p = np.array([
+        [0.10 + index * 0.01, 0.2, 0.3, 0.4]
+        for index in range(6)
+    ])
+    group_p = np.array([[
+        acat(edge_p[:, column]) for column in range(edge_p.shape[1])
+    ]])
+    scores = OmniBFamilyScores(
+        edge_p=edge_p,
+        group_p=group_p,
+        edge_components_obs=np.tile(
+            np.array([[0.1, 0.2, 0.3]]), (6, 1)),
+        edge_estimable=np.ones(6, bool),
+        group_estimable=np.ones(1, bool),
+        W=np.eye(4), y=np.arange(4.0),
+        covariance_components={
+            "A": 0.15, "B": 0.15, "C": 0.15, "D": 0.15, "e": 0.4},
+    )
+    monkeypatch.setattr(
+        I._family_score, "score_omnib_family",
+        lambda *_args, **_kwargs: (scores, expanded),
+    )
+    ranking = tmp_path / "quartet.tsv"
+    result = I.run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="group", family_scope="primary_only",
+        transform="INT", bootstrap_B=3, full_dump_path=str(ranking),
+    )
+
+    assert result.G == 1
+    assert len(result.top) == 1
+    assert len(result.top[0]["edge_localization"]) == 6
+    provenance = result.model_diagnostics["family_provenance"]
+    assert provenance["n_groups_raw"] == 1
+    assert provenance["n_unique_edges"] == 6
+    assert len(provenance["group_family_sha256"]) == 64
+    assert len(provenance["edge_family_sha256"]) == 64
+    serialized = json.dumps(I._json_safe(result.__dict__))
+    header = ranking.read_text().splitlines()[0]
+    for forbidden in ("p_fourway", "A:B:C:D", "fourth_order"):
+        assert forbidden not in serialized
+        assert forbidden not in header
+
+
+def test_cmd_interact_triad3_bypasses_group_normalization_and_route(
+        monkeypatch, tmp_path):
+    subs = ("A", "B", "D")
+    triads = tmp_path / "triads.tsv"
+    triads.write_text(
+        "gene_A\tgene_B\tgene_D\na1\tb1\td1\n", encoding="utf-8")
+    phenotype = tmp_path / "phenotype.tsv"
+    phenotype.write_text(
+        "sample\ttrait\n" + "".join(
+            f"s{i}\t{i / 10}\n" for i in range(12)),
+        encoding="utf-8",
+    )
+    cfg = {
+        "interact": {
+            "mode": "triad", "subgenomes": list(subs),
+            "triads": str(triads), "statistic": "triad3",
+            "primary_transform": "INT",
+            "primary_multiplicity": "bootstrap_minp",
+            "genotype": {sub: sub.lower() for sub in subs},
+            "snp_to_gene": {sub: f"n{sub.lower()}" for sub in subs},
+            "phenotype": str(phenotype), "sample_col": "sample",
+            "trait": "trait",
+            "calibration": {"method": "bootstrap", "B": 2000, "seed": 2026},
+        },
+        "outputs": {
+            "out_dir": str(tmp_path / "out"), "plots": False,
+        },
+    }
+    config = tmp_path / "triad3.yaml"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    samples = [f"s{i}" for i in range(12)]
+    monkeypatch.setattr(I, "preflight_interact", lambda _cfg: [])
+    monkeypatch.setattr(
+        I, "_load_subgenome",
+        lambda *_args, **_kwargs: SimpleNamespace(samples=samples),
+    )
+    monkeypatch.setattr(
+        I, "run_group_scan_omnib",
+        lambda *_args, **_kwargs: pytest.fail("triad3 entered group omniB"),
+    )
+    calls = []
+
+    def _fake_triad3(_subdata, groups, _y, _sample_idx, **kwargs):
+        calls.append((groups, kwargs))
+        return SimpleNamespace(
+            trait="", G=1, min_p=0.3, lambda_gc_obs=1.0,
+            bonferroni_alpha=0.05, analytic_screen_n=0,
+            analytic_screen_sig=[], n_sig=0 if kwargs["inferential"] else None,
+            sig=[] if kwargs["inferential"] else None,
+            bootstrap_B=kwargs["bootstrap_B"], covariates=None,
+            model_diagnostics={"bootstrap_fwer": {
+                "n_degenerate_replicates": 0}},
+            minp_boot_emp=0.5,
+        )
+
+    monkeypatch.setattr(I, "run_triad3_scan", _fake_triad3)
+    assert I.cmd_interact(SimpleNamespace(
+        config=str(config), out_dir=None, n_jobs=3)) == 0
+    assert len(calls) == 2
+    assert all(groups == [("a1", "b1", "d1")] for groups, _ in calls)
+    assert calls[0][1]["inferential"] is True
+    assert calls[1][1]["inferential"] is False
+    payload = json.loads(
+        (tmp_path / "out" / "interact_trait.json").read_text())
+    assert payload["mode"] == "triad"
+    assert payload["provenance"]["statistic"] == "triad3"
+
+
+def test_triad3_dispatch_executes_exact_three_copy_estimator():
+    rng = np.random.default_rng(15000)
+    n, group_count = 64, 2
+    subdata = {
+        sub: _make_sub_maf(rng, n=n, g=group_count, spg=5)
+        for sub in ("A", "B", "D")
+    }
+    triads = [tuple(f"g{i}" for _ in subdata) for i in range(group_count)]
+    result = I.run_triad3_scan(
+        subdata, triads, rng.normal(size=n), np.arange(n),
+        transform="INT", bootstrap_B=0, inferential=False,
+        n_jobs=1, grm_method="grm_from_X", min_snp=3,
+    )
+    assert result.statistic == "triad3"
+    assert result.G == group_count
+    assert result.n_sig is None
+    assert result.model_diagnostics["tested_term"] == "A:B:D"
+
+
+def _minimal_interact_config(**updates):
+    interact = {
+        "mode": "pairwise",
+        "subgenomes": ["A", "D"],
+        "genotype": {"A": "a", "D": "d"},
+        "snp_to_gene": {"A": "a.npz", "D": "d.npz"},
+        "pairs": "pairs.tsv",
+        "phenotype": "pheno.tsv",
+        "sample_col": "sample",
+        "trait": "trait",
+    }
+    interact.update(updates)
+    return {"interact": interact}
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"statistic": "unknown"}, "statistic must be"),
+        (
+            {"statistic": "burden", "calibration": {"method": "bootstrap"}},
+            "supported statistic/calibration",
+        ),
+        (
+            {"statistic": "omniB", "weights": "weights.tsv"},
+            "weights is not used",
+        ),
+        (
+            {"statistic": "burden", "primary_weighting": "weighted"},
+            "requires interact.weights",
+        ),
+        (
+            {"statistic": "burden", "calibration": {"perm_B": -1}},
+            "must be an integer >= 0",
+        ),
+    ],
+)
+def test_interact_schema_rejects_inference_config_mismatches(updates, message):
+    with pytest.raises(SystemExit, match=message):
+        I.validate_interact_config(_minimal_interact_config(**updates))
+
+
+def test_interact_schema_accepts_explicit_frozen_burden_config():
+    cfg = _minimal_interact_config(
+        statistic="burden",
+        primary_transform="INT",
+        primary_weighting="unweighted",
+        calibration={"method": "permutation", "perm_B": 500},
+    )
+    I.validate_interact_config(cfg)
+
+
+@pytest.mark.parametrize("perm_B", [0, 18, 998])
+def test_interact_schema_rejects_underresolved_formal_burden_permutation_minp(perm_B):
+    cfg = _minimal_interact_config(
+        statistic="burden",
+        primary_multiplicity="permutation_minp",
+        calibration={"method": "permutation", "perm_B": perm_B},
+    )
+    with pytest.raises(SystemExit, match="requires interact.calibration.perm_B >= 999"):
+        I.validate_interact_config(cfg)
+
+
+def test_interact_schema_accepts_burden_permutation_minp_qa_only():
+    cfg = _minimal_interact_config(
+        statistic="burden",
+        primary_multiplicity="permutation_minp",
+        calibration={"method": "permutation", "perm_B": 19, "qa_only": True},
+    )
+    I.validate_interact_config(cfg)
+
+
+def test_interact_schema_accepts_experimental_triad3_config():
+    cfg = {
+        "interact": {
+            "mode": "triad",
+            "subgenomes": ["A", "B", "D"],
+            "statistic": "triad3",
+            "genotype": {"A": "a", "B": "b", "D": "d"},
+            "snp_to_gene": {
+                "A": "a.npz", "B": "b.npz", "D": "d.npz"},
+            "triads": "triads.tsv",
+            "phenotype": "pheno.tsv",
+            "sample_col": "sample",
+            "trait": "trait",
+            "calibration": {"method": "bootstrap", "B": 999},
+        }
+    }
+    I.validate_interact_config(cfg)
+
+
+@pytest.mark.parametrize("B", [0, 18, 998])
+def test_interact_schema_rejects_underresolved_triad3_bootstrap(B):
+    cfg = {
+        "interact": {
+            "mode": "triad",
+            "subgenomes": ["A", "B", "C"],
+            "statistic": "triad3",
+            "genotype": {"A": "a", "B": "b", "C": "c"},
+            "snp_to_gene": {"A": "a.npz", "B": "b.npz", "C": "c.npz"},
+            "triads": "triads.tsv",
+            "phenotype": "pheno.tsv",
+            "sample_col": "sample",
+            "trait": "trait",
+            "calibration": {"method": "bootstrap", "B": B},
+        }
+    }
+    with pytest.raises(SystemExit, match="requires interact.calibration.B >= 999"):
+        I.validate_interact_config(cfg)
+
+
+def test_interact_schema_accepts_explicit_triad3_qa_only():
+    cfg = {
+        "interact": {
+            "mode": "triad",
+            "subgenomes": ["A", "B", "C"],
+            "statistic": "triad3",
+            "genotype": {"A": "a", "B": "b", "C": "c"},
+            "snp_to_gene": {"A": "a.npz", "B": "b.npz", "C": "c.npz"},
+            "triads": "triads.tsv",
+            "phenotype": "pheno.tsv",
+            "sample_col": "sample",
+            "trait": "trait",
+            "calibration": {
+                "method": "bootstrap", "B": 19, "qa_only": True},
+        }
+    }
+    I.validate_interact_config(cfg)
+
+
+def test_interact_schema_rejects_triad3_dominance_adjust():
+    cfg = {
+        "interact": {
+            "mode": "triad",
+            "subgenomes": ["A", "B", "C"],
+            "statistic": "triad3",
+            "genotype": {"A": "a", "B": "b", "C": "c"},
+            "snp_to_gene": {"A": "a.npz", "B": "b.npz", "C": "c.npz"},
+            "triads": "triads.tsv",
+            "phenotype": "pheno.tsv",
+            "sample_col": "sample",
+            "trait": "trait",
+            "burden": {"dominance_adjust": True},
+            "calibration": {"method": "bootstrap", "B": 999},
+        }
+    }
+    with pytest.raises(SystemExit, match="dominance_adjust is not implemented"):
+        I.validate_interact_config(cfg)
+
+
+def test_interact_schema_rejects_triad3_outside_triad_mode():
+    with pytest.raises(SystemExit, match="triad3 requires mode=triad"):
+        I.validate_interact_config(
+            _minimal_interact_config(statistic="triad3"))
 
 
 def test_omnib_strictly_invariant_to_ref_alt_recoding():

@@ -40,6 +40,7 @@ import pandas as pd
 from scipy import stats
 
 from . import omnib_family as _family_score
+from .group_family import load_master_group_family
 from .interaction_config import normalize_interact_config
 
 
@@ -176,7 +177,8 @@ def null_lmm_fit(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray = 
 
 
 def null_replicates(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray = None,
-                    B: int = 1000, method: str = "bootstrap", seed: int = 0):
+                    B: int = 1000, method: str = "bootstrap", seed: int = 0,
+                    null_fit: tuple | None = None):
     """``B`` null phenotypes for experiment-wide calibration under KINSHIP.
 
     A raw ``y``-shuffle is NOT a valid null here: samples are not exchangeable under a GRM, and the
@@ -201,7 +203,10 @@ def null_replicates(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray
     n = next(iter(kernels.values())).shape[0]
     if C is None:
         C = np.ones((n, 1))
-    W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    if null_fit is None:
+        W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    else:
+        W, V, beta, cv = null_fit
     rng = np.random.default_rng(seed)
     fit = C @ beta
     out = []
@@ -435,6 +440,119 @@ def pairwise_pvals(Wh: np.ndarray, y: np.ndarray, BX: np.ndarray, BY: np.ndarray
             (fail if ok else excl)[g] = why
     if return_diag:
         return pv, dict(n_planned=int(G), estimable=design_ok, exclusions=excl, failures=fail)
+    return pv
+
+
+def _threeway_nuisance(A: np.ndarray, B: np.ndarray, D: np.ndarray,
+                       C: np.ndarray = None) -> np.ndarray:
+    """Hierarchy-preserving nuisance block for a conditional three-way test.
+
+    The tested model is
+
+    ``y ~ C + A + B + D + A:B + A:D + B:D + A:B:D``.
+
+    This helper returns every term below ``A:B:D``.  Keeping all lower-order
+    terms is mandatory: without them, a strong pairwise interaction can leak
+    into the nominal three-way coefficient.
+    """
+    n = A.shape[0]
+    base = np.ones((n, 1)) if C is None else np.asarray(C, float).reshape(n, -1)
+    return np.column_stack([base, A, B, D, A * B, A * D, B * D])
+
+
+def threeway_design_mask(BA: np.ndarray, BB: np.ndarray, BD: np.ndarray,
+                         C: np.ndarray = None) -> tuple:
+    """Outcome-independent estimability mask for conditional ``A×B×D`` tests.
+
+    Estimability is frozen on the raw design, before the phenotype-dependent
+    whitener is fitted.  The returned diagnostics include the fraction of the
+    raw three-way column that survives projection on all lower-order terms;
+    values near the global target tolerance are numerically fragile even when
+    they remain formally testable.
+    """
+    n, G = BA.shape
+    if BB.shape != (n, G) or BD.shape != (n, G):
+        raise ValueError("threeway burden matrices must have identical shapes")
+    mask = np.zeros(G, bool)
+    excl = {}
+    residual_ratio = np.full(G, np.nan)
+    target_sd = np.full(G, np.nan)
+    information_max_fraction = np.full(G, np.nan)
+    information_top10_fraction = np.full(G, np.nan)
+    information_effective_n = np.full(G, np.nan)
+    for g in range(G):
+        a, b, d = BA[:, g], BB[:, g], BD[:, g]
+        target = a * b * d
+        nuisance = _threeway_nuisance(a, b, d, C=C)
+        _Q, _rank, xr, xrn, why = _fwl_design(nuisance, target)
+        xn = float(np.linalg.norm(target))
+        target_sd[g] = float(np.std(target, ddof=0))
+        if xn > 0 and np.isfinite(xrn):
+            residual_ratio[g] = xrn / xn
+        if xr is not None and np.isfinite(xr).all():
+            information = xr ** 2
+            total = float(information.sum())
+            if total > 0:
+                share = information / total
+                k = min(10, share.size)
+                information_max_fraction[g] = float(share.max())
+                information_top10_fraction[g] = float(
+                    np.partition(share, share.size - k)[-k:].sum())
+                information_effective_n[g] = float(
+                    1.0 / np.sum(share ** 2))
+        mask[g] = why is None
+        if why is not None:
+            excl[g] = why
+    return mask, excl, {
+        "target_residual_ratio": residual_ratio,
+        "target_sd": target_sd,
+        "target_information_max_fraction": information_max_fraction,
+        "target_information_top10_fraction": information_top10_fraction,
+        "target_information_effective_n": information_effective_n,
+    }
+
+
+def threeway_pvals(Wh: np.ndarray, y: np.ndarray, BA: np.ndarray, BB: np.ndarray,
+                   BD: np.ndarray, C: np.ndarray = None, *,
+                   fixed_mask: np.ndarray = None, return_diag: bool = False):
+    """Conditional three-way burden p-values under a whitened GLS model.
+
+    For every homoeolog triad this tests only the ``A×B×D`` coefficient while
+    retaining the three main effects and all three pairwise products.  ``BA``,
+    ``BB`` and ``BD`` are expected to be centered/scaled gene burden matrices.
+    A fixed raw-design mask should be supplied for resampling analyses so that
+    the tested family cannot change with the phenotype.
+    """
+    n, G = BA.shape
+    if BB.shape != (n, G) or BD.shape != (n, G):
+        raise ValueError("threeway burden matrices must have identical shapes")
+    yw = Wh @ np.asarray(y, float)
+    if not np.all(np.isfinite(yw)):
+        raise ValueError("whitened response contains non-finite values")
+    if C is None:
+        Cw = (Wh @ np.ones(n)).reshape(-1, 1)
+    else:
+        Cw = Wh @ np.asarray(C, float).reshape(n, -1)
+    Aw, Bw, Dw = Wh @ BA, Wh @ BB, Wh @ BD
+    ABw, ADw, BDw = Wh @ (BA * BB), Wh @ (BA * BD), Wh @ (BB * BD)
+    ABDw = Wh @ (BA * BB * BD)
+    pv = np.full(G, np.nan)
+    design_ok = np.zeros(G, bool) if fixed_mask is None else np.asarray(fixed_mask, bool).copy()
+    excl, fail = {}, {}
+    for g in range(G):
+        if fixed_mask is not None and not fixed_mask[g]:
+            continue
+        nuisance = np.column_stack([
+            Cw, Aw[:, g], Bw[:, g], Dw[:, g],
+            ABw[:, g], ADw[:, g], BDw[:, g],
+        ])
+        pv[g], why, ok = _coef_pval_fwl(nuisance, ABDw[:, g], yw)
+        design_ok[g] = ok
+        if why is not None:
+            (fail if ok else excl)[g] = why
+    if return_diag:
+        return pv, dict(n_planned=int(G), estimable=design_ok,
+                        exclusions=excl, failures=fail)
     return pv
 
 
@@ -764,7 +882,10 @@ class InteractResult:
     minp_boot_threshold: float = None          # 5th-percentile of bootstrap min-p (alpha=0.05 experiment-wide cutoff)
     minp_boot_rejected: bool = None            # exact plus-one min-P decision when defined
     tail_excess: dict = None                   # aggregate tail-excess: observed vs bootstrap null (per threshold)
-    model_diagnostics: dict = None             # authoritative resampling-family diagnostics
+    component_diagnostics: dict = None         # omniB component names/driver counts + interpretation guard
+    model_diagnostics: dict = None             # optional design/support diagnostics for experimental models
+    analytic_screen_n: int = None              # descriptive Bonferroni screen; never a triad3 discovery
+    analytic_screen_sig: list = None
 
 
 def _validate_snp_mapping(
@@ -1571,9 +1692,9 @@ def run_clique_scan_omnib(
 OmniBFamilyScores = _family_score.OmniBFamilyScores
 _score_omnib_family = _family_score.score_omnib_family
 _omnib_components_over_Y = _family_score.omnib_components_over_Y
-run_pair_scan_omnib = _family_score.run_pair_scan_omnib
-run_clique_scan_omnib = _family_score.run_clique_scan_omnib
-run_group_scan_omnib = _family_score.run_group_scan_omnib
+run_pair_scan_omnib = _family_score.run_pair_scan_omnib  # noqa: F811
+run_clique_scan_omnib = _family_score.run_clique_scan_omnib  # noqa: F811
+run_group_scan_omnib = _family_score.run_group_scan_omnib  # noqa: F811
 
 
 def run_clique_scan(
@@ -2246,6 +2367,16 @@ def run_multitrait_pair_scan(
               "relative to G x T single-trait Bonferroni."))
 
 
+_bootstrap_minp_calibration = _family_score.bootstrap_minp_calibration
+
+
+def run_triad3_scan(*args, **kwargs):
+    """Dispatch the opt-in exact-three-copy estimator without normalizing it."""
+    from .triad3 import run_triad3_scan as _run
+
+    return _run(*args, **kwargs)
+
+
 def _load_pairs(path: str, subs: list[str]):
     import pandas as pd
 
@@ -2283,8 +2414,16 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit(f"ERR: interact.subgenomes has duplicates: {subs}")
     mode = str(ic.get("mode", "pairwise")).lower()
     expected_n = {"pairwise": 2, "triad": 3}
+    statistic_requested = str(ic.get("statistic", "omniB")).lower()
+    if statistic_requested.replace("-", "").replace("_", "") in {
+        "fourway", "4way",
+    }:
+        raise SystemExit(
+            "ERR: HomoeoGWAS never fits a direct four-way interaction; "
+            "use the pair-edge group omniB (subset_order=2), which combines "
+            "the six supported pair interactions without a fourth-order term")
     if mode == "group":
-        if str(ic.get("statistic", "omniB")).lower() != "omnib":
+        if statistic_requested != "omnib":
             raise SystemExit(
                 "ERR: interact.mode=group is currently defined only for statistic=omniB")
         if len(subs) < 2:
@@ -2299,6 +2438,14 @@ def validate_interact_config(cfg: dict) -> None:
         if family_scope not in {"primary_only", "joint"}:
             raise SystemExit(
                 "ERR: interact.family_scope must be primary_only or joint")
+        grm = ic.get("grm", {})
+        if not isinstance(grm, dict):
+            raise SystemExit("ERR: interact.grm must be a mapping")
+        if str(grm.get("scope", "all_subgenomes")).lower() != "all_subgenomes":
+            raise SystemExit(
+                "ERR: canonical group omniB requires "
+                "interact.grm.scope=all_subgenomes so every pair edge shares "
+                "one null model")
     elif mode not in expected_n:
         raise SystemExit(
             "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
@@ -2329,7 +2476,7 @@ def validate_interact_config(cfg: dict) -> None:
                 "ERR: interact.multi_trait must be a non-empty list of unique trait names")
         if mode != "pairwise":
             raise SystemExit("ERR: interact.multi_trait is supported only in pairwise mode")
-    statistic = str(ic.get("statistic", "omniB")).lower()
+    statistic = statistic_requested
     if statistic not in {"omnib", "burden", "triad3"}:
         raise SystemExit(
             "ERR: interact.statistic must be omniB, burden, or experimental triad3; "
@@ -2473,6 +2620,10 @@ def validate_interact_config(cfg: dict) -> None:
     burden = ic.get("burden", {})
     if not isinstance(burden, dict):
         raise SystemExit("ERR: interact.burden must be a mapping")
+    if statistic == "triad3" and bool(burden.get("dominance_adjust", False)):
+        raise SystemExit(
+            "ERR: interact.burden.dominance_adjust is not implemented for "
+            "statistic=triad3; remove it or set it to false")
     min_snp = burden.get("min_snp", 2)
     if not isinstance(min_snp, int) or min_snp < 1:
         raise SystemExit(
@@ -2550,9 +2701,22 @@ def preflight_interact(cfg: dict) -> list[str]:
         problems.append(f"{table_key} table missing: {table}")
     else:
         try:
-            _load_pairs(str(table), subs)
+            if mode == "group":
+                load_master_group_family(table, subs)
+            else:
+                _load_pairs(str(table), subs)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{table_key} table invalid: {exc}")
+    weights = ic.get("weights")
+    if weights:
+        weights_path = Path(weights)
+        if not weights_path.exists():
+            problems.append(f"weights table missing: {weights_path}")
+        else:
+            try:
+                _load_pair_weights(str(weights_path), subs)
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"weights table invalid: {exc}")
 
     phenotype = Path(ic["phenotype"])
     if not phenotype.exists():
@@ -2798,8 +2962,8 @@ def cmd_interact(args) -> int:
         print(f"ERROR: interact.primary_weighting must be 'unweighted' or 'weighted'; "
               f"got '{primary_weighting}'.")
         return 2
-    if primary_weighting == "weighted" and statistic == "omnib":
-        print("ERROR: primary_weighting='weighted' is not implemented for statistic=omniB; "
+    if primary_weighting == "weighted" and statistic in {"omnib", "triad3"}:
+        print(f"ERROR: primary_weighting='weighted' is not implemented for statistic={statistic}; "
               "use statistic=burden or primary_weighting=unweighted.")
         return 2
     if primary_weighting == "weighted" and ic.get("multi_trait"):
@@ -2811,12 +2975,22 @@ def cmd_interact(args) -> int:
         print(f"ERROR: interact.primary_transform must be 'INT' or 'raw'; got "
               f"'{primary_transform}'.")
         return 2
-    primary_multiplicity = str(ic.get("primary_multiplicity", "bonferroni")).lower()
-    if primary_multiplicity not in ("bonferroni", "permutation_minp"):
-        print(f"ERROR: interact.primary_multiplicity must be 'bonferroni' or "
-              f"'permutation_minp'; got '{primary_multiplicity}'.")
+    default_multiplicity = (
+        "bootstrap_minp"
+        if statistic == "triad3" or (mode == "group" and statistic == "omnib")
+        else "bonferroni")
+    primary_multiplicity = str(
+        ic.get("primary_multiplicity", default_multiplicity)).lower()
+    if primary_multiplicity not in (
+            "bonferroni", "permutation_minp", "bootstrap_minp"):
+        print("ERROR: interact.primary_multiplicity must be 'bonferroni', "
+              f"'bootstrap_minp', or 'permutation_minp'; got '{primary_multiplicity}'.")
         return 2
-    if primary_multiplicity == "permutation_minp" and (statistic == "omnib" or mode in group_modes
+    if statistic == "triad3" and primary_multiplicity != "bootstrap_minp":
+        print("ERROR: statistic=triad3 requires primary_multiplicity='bootstrap_minp'; "
+              "analytic Bonferroni is descriptive only.")
+        return 2
+    if primary_multiplicity == "permutation_minp" and (statistic != "burden" or mode in group_modes
                                                        or ic.get("multi_trait")):
         print("ERROR: primary_multiplicity='permutation_minp' is only defined for the "
               "single-trait two-subgenome burden pair scan.")
@@ -2825,15 +2999,23 @@ def cmd_interact(args) -> int:
         print("ERROR: weighted permutation min-P is not implemented; the permuted statistic would "
               "have to be the weighted one. Use primary_multiplicity=bonferroni.")
         return 2
-    calib_method = str(calib.get("method", "bootstrap" if statistic == "omnib" else "permutation")).lower()
-    if (statistic, calib_method) not in (("omnib", "bootstrap"), ("burden", "permutation")):
-        print(f"ERROR: interact: only statistic=omniB + calibration.method=bootstrap (paper default) "
-              f"or statistic=burden + calibration.method=permutation (legacy) are supported; got "
+    if statistic == "triad3" and mode != "triad":
+        print("ERROR: statistic=triad3 requires mode=triad and exactly three subgenomes.")
+        return 2
+    calib_method = str(calib.get(
+        "method", "bootstrap" if statistic in {"omnib", "triad3"} else "permutation"
+    )).lower()
+    if (statistic, calib_method) not in (
+            ("omnib", "bootstrap"), ("triad3", "bootstrap"),
+            ("burden", "permutation")):
+        print(f"ERROR: interact: statistic=omniB or triad3 requires "
+              f"calibration.method=bootstrap; statistic=burden requires permutation; got "
               f"statistic={statistic}, calibration.method={calib_method}.")
         return 1
     perm_B = int(calib.get("perm_B", calib.get("B", 2000)))
     boot_B = int(calib.get("B", calib.get("perm_B", 2000)))
     boot_seed = int(calib.get("seed", 2026))
+    calibration_qa_only = bool(calib.get("qa_only", False))
     n_pc = int(burden.get("n_pc", 3))
     grm_cfg = ic.get("grm", {})
     grm_method = grm_cfg.get("method", "compute_grm_maf")
@@ -2846,7 +3028,11 @@ def cmd_interact(args) -> int:
         print(f"  covariates: {cov_label}", flush=True)
 
     # opt-in full genome-wide ranking dump (outputs.full_ranking: true)
-    dump_on = bool(cfg.get("outputs", {}).get("full_ranking", False))
+    # Canonical formal families always serialize their complete ranking.  It is
+    # part of the inferential record, not an optional plotting convenience.
+    dump_on = (
+        mode == "group" and statistic == "omnib"
+    ) or bool(cfg.get("outputs", {}).get("full_ranking", False))
 
     def _dump_path(transform):
         return str(out_dir / f"interact_{trait}_ranking_{mode}_{transform}.tsv") if dump_on else None
@@ -2855,7 +3041,59 @@ def cmd_interact(args) -> int:
         return (str(out_dir / f"interact_{trait}_topburdens_{transform}.tsv")
                 if dump_on else None)
 
-    if mode in group_modes:
+    canonical_family_provenance = {}
+    if mode == "group" and statistic == "omnib":
+        family = load_master_group_family(ic["groups"], subs)
+        hypothesis_unit = str(ic["hypothesis_unit"]).lower()
+        family_scope = str(ic.get("family_scope", "primary_only")).lower()
+        print(
+            f"  n={len(valid)} groups(raw)={len(family.group_ids)} "
+            f"(n_sub={len(subs)}) ({time.time()-t0:.1f}s)",
+            flush=True,
+        )
+        r = run_group_scan_omnib(
+            subdata, family, y_raw, sample_idx,
+            hypothesis_unit=hypothesis_unit,
+            family_scope=family_scope,
+            cap=cap,
+            n_pc=n_pc,
+            transform="INT",
+            bootstrap_B=boot_B,
+            bootstrap_seed=boot_seed,
+            n_jobs=n_jobs,
+            grm_method=grm_method,
+            maf_min=maf_min,
+            burden_maf=burden_maf,
+            min_snp=min_snp,
+            covariates=cov_arg,
+            full_dump_path=_dump_path("INT"),
+        )
+        r.trait = trait
+        results = {"INT": r.__dict__}
+        canonical_family_provenance = dict(
+            (r.model_diagnostics or {}).get("family_provenance") or {})
+        required_provenance = {
+            "group_family_sha256", "edge_family_sha256",
+            "n_groups_raw", "n_unique_edges",
+        }
+        missing_provenance = sorted(
+            required_provenance - canonical_family_provenance.keys())
+        if missing_provenance:
+            raise RuntimeError(
+                "canonical group scanner omitted required family provenance: "
+                + ", ".join(missing_provenance))
+        print(
+            f"  [INT] G={r.G} statistic=omniB "
+            f"primary={hypothesis_unit} minP={r.min_p:.3g} "
+            f"formal_bootFWER(nsig={r.n_sig})",
+            flush=True,
+        )
+        for hit in (r.sig or []):
+            print(
+                f"      BOOTSTRAP-FWER HIT {hit['hypothesis_id']} "
+                f"p={hit['p_interaction']:.3g}")
+        n_units = len(family.group_ids)
+    elif mode in group_modes:
         # gene_<S> columns -> n-tuple per homoeolog group; key `groups` (generic) or legacy `triads`
         group_file = ic.get("groups") or ic.get("triads")
         if not group_file:
@@ -2890,6 +3128,52 @@ def cmd_interact(args) -> int:
                          f"emp_p={te['empirical_p']:.3g})" if te else ""), flush=True)
                 for h in (r.sig or []):
                     print(f"      HIT {h['pair']} p={h['p']:.3g}")
+        elif statistic == "triad3":
+            for transform in ("INT", "raw"):
+                r = run_triad3_scan(
+                    subdata, triads, y_raw, sample_idx, cap=cap,
+                    transform=transform,
+                    inferential=(
+                        transform.upper() == primary_transform
+                        and not calibration_qa_only),
+                    bootstrap_B=(boot_B if transform.upper() == primary_transform
+                                 else 0),
+                    bootstrap_seed=boot_seed, n_jobs=n_jobs,
+                    grm_method=grm_method, maf_min=maf_min,
+                    burden_maf=burden_maf, min_snp=min_snp,
+                    covariates=cov_arg,
+                    full_dump_path=_dump_path(transform))
+                r.trait = trait
+                results[transform] = r.__dict__
+                degenerate_b = int(
+                    ((r.model_diagnostics or {}).get("bootstrap_fwer") or {})
+                    .get("n_degenerate_replicates", 0))
+                print(
+                    f"  [{transform}] G={r.G} statistic=triad3 "
+                    f"conditional {'×'.join(subs)} minP={r.min_p:.3g} "
+                    f"λ_obs={r.lambda_gc_obs:.3f} "
+                    f"analytic_screen(Bonf α={r.bonferroni_alpha:.1e})="
+                    f"{r.analytic_screen_n} "
+                    + (
+                        f"QA_bootFWER(no formal rejections, "
+                        f"minP_emp={r.minp_boot_emp})"
+                        if calibration_qa_only else
+                        f"formal_bootFWER(nsig={r.n_sig}, "
+                        f"minP_emp={r.minp_boot_emp})"
+                    )
+                    + (f" degenerate_bootstrap={degenerate_b}/{r.bootstrap_B}"
+                       if degenerate_b else ""),
+                    flush=True)
+                for h in (r.sig or []):
+                    print(
+                        f"      BOOTSTRAP-FWER HIT {h['triad']} p={h['p']:.3g} "
+                        f"residual_ratio={h['target_residual_ratio']:.3g}")
+                if not r.sig:
+                    for h in (r.analytic_screen_sig or [])[:5]:
+                        print(
+                            f"      ANALYTIC SCREEN ONLY {h['triad']} "
+                            f"p={h['p']:.3g} "
+                            f"residual_ratio={h['target_residual_ratio']:.3g}")
         else:
             for transform in ("INT", "raw"):
                 r = run_clique_scan(subdata, triads, y_raw, sample_idx, cap=cap, transform=transform,
@@ -3010,18 +3294,37 @@ def cmd_interact(args) -> int:
                       primary_weighting=primary_weighting,
                       primary_multiplicity=primary_multiplicity,
                       primary_transform=primary_transform,
-                      transform_firewall=("both transforms are scanned but only the primary one "
-                                          "emits rejections; the other is a sensitivity analysis "
-                                          "whose rejection fields are null"),
+                      statistic=("omniB" if statistic == "omnib" else statistic),
+                      calibration_method=calib_method,
+                      calibration_qa_only=calibration_qa_only,
+                      transform_firewall=(
+                          "canonical group omniB emits INT formal inference only; "
+                          "RAW is not emitted and cannot spend alpha"
+                          if mode == "group" and statistic == "omnib" else
+                          "both transforms are scanned but only the primary one "
+                          "emits rejections; the other is a sensitivity analysis "
+                          "whose rejection fields are null"),
                       weighting_firewall="rejection fields are emitted only for the predeclared "
                                          "procedure; the weighted and unweighted Bonferroni tests "
                                          "each spend the full alpha over the same hypotheses",
                       full_ranking=dump_on,
-                      full_ranking_note=("full per-unit ranking TSV is descriptive (every callable "
-                                         "unit); inference is the pre-registered enrichment, not "
-                                         "per-row Bonferroni; gene_len emitted as NA (engine has no "
-                                         "coordinates) and joined downstream from annotation"),
+                      full_ranking_note=(
+                          "Full per-unit ranking TSV is descriptive (every callable unit). "
+                          "For omniB it includes minor-burden, PC1 and kernel-Hadamard component "
+                          "p-values; the smallest component localizes evidence but is not a "
+                          "separately calibrated discovery. Inference remains on the predeclared "
+                          "primary statistic and multiplicity procedure."),
                       config_path=str(args.config))
+    if mode == "group" and statistic == "omnib":
+        provenance.update({
+            "mode": "group",
+            "hypothesis_unit": str(ic["hypothesis_unit"]).lower(),
+            "subset_order": 2,
+            "family_scope": str(
+                ic.get("family_scope", "primary_only")).lower(),
+            "grm_scope": "all_subgenomes",
+            **canonical_family_provenance,
+        })
     payload = dict(tool="homoeogwas", command="interact", mode=mode, subgenomes=subs, trait=trait,
                    provenance=provenance, results=results)
     fp = out_dir / f"interact_{trait}.json"
@@ -3040,8 +3343,11 @@ def cmd_interact(args) -> int:
 
 
 def add_interact_subparser(sub) -> None:
-    ap = sub.add_parser("interact", help="gene-resolution homoeolog-pair burden-product "
-                                         "interaction scan from a YAML config")
+    ap = sub.add_parser(
+        "interact",
+        help=("gene-resolution homoeolog interaction scan from a YAML config "
+              "(omniB default; experimental triad3 and legacy burden opt-ins)"))
     ap.add_argument("-c", "--config", required=True, help="YAML run-config path")
     ap.add_argument("-o", "--out-dir", default=None, help="override outputs.out_dir")
-    ap.add_argument("--n-jobs", type=int, default=8, help="parallel workers for permutation")
+    ap.add_argument("--n-jobs", type=int, default=8,
+                    help="parallel workers for bootstrap/permutation scans")

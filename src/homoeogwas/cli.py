@@ -1256,16 +1256,20 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
         return None
 
     ranking = _first("interact_*_ranking_pairwise_INT.tsv",
-                     "interact_*_ranking_pairwise_*.tsv")
+                     "interact_*_ranking_group_INT.tsv",
+                     "interact_*_ranking_pairwise_*.tsv",
+                     "interact_*_ranking_group_*.tsv")
     burdens = _first("interact_*_topburdens_INT.tsv",
                      "interact_*_topburdens_*.tsv")
     # group ranking from any clique-mode run (triad=3 or generic homoeolog/clique for any n>=3)
-    triad = _first("interact_*_ranking_triad_INT.tsv",
+    triad = _first("interact_*_ranking_group_INT.tsv",
+                   "interact_*_ranking_triad_INT.tsv",
                    "interact_*_ranking_homoeolog_INT.tsv",
                    "interact_*_ranking_clique_INT.tsv",
                    "interact_*_ranking_triad_*.tsv",
                    "interact_*_ranking_homoeolog_*.tsv",
-                   "interact_*_ranking_clique_*.tsv")
+                   "interact_*_ranking_clique_*.tsv",
+                   "interact_*_ranking_group_*.tsv")
 
     def _trait_from(path, marker):
         # interact_<trait>_<marker>... -> <trait>; ties the label to THIS file
@@ -1278,6 +1282,7 @@ def _rplot_distinctive(base: list, rdir: Path, out_dir: Path, prefix: str,
         return None
 
     itrait = (_trait_from(ranking, "_ranking_pairwise")
+              or _trait_from(ranking, "_ranking_group")
               or _trait_from(burdens, "_topburdens")
               or _trait_from(triad, "_ranking_triad")
               or _trait_from(triad, "_ranking_homoeolog")
@@ -1340,7 +1345,8 @@ def _autoplot_interact_figures(out_dir) -> None:
     Uses single-format PNG (the R channel renders one format per call)."""
     out_dir = Path(out_dir)
     has_rank = (any(out_dir.glob("interact_*_ranking_pairwise_*.tsv"))
-                or any(out_dir.glob("interact_*_ranking_triad_*.tsv")))
+                or any(out_dir.glob("interact_*_ranking_triad_*.tsv"))
+                or any(out_dir.glob("interact_*_ranking_group_*.tsv")))
     if not has_rank:
         print("[interact] figures: no ranking dump (set outputs.full_ranking: "
               "true) — skipping; the data was written")
