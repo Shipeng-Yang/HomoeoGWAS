@@ -12,7 +12,7 @@ from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edg
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
-PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v1"
+PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v2"
 
 
 @dataclass
@@ -37,6 +37,8 @@ class OmniBFamilyScores:
     null_design: np.ndarray | None = field(default=None, repr=False)
     null_kernels: dict = field(default_factory=dict, repr=False)
     projection_cache: dict = field(default_factory=dict, repr=False)
+    edge_membership: np.ndarray = field(
+        default_factory=lambda: np.empty(0, bool), repr=False)
     grm_provenance: dict = field(default_factory=dict)
 
 
@@ -287,8 +289,180 @@ def score_omnib_family(
         null_beta=np.asarray(beta, float),
         null_design=C_design,
         null_kernels=kernels,
+        edge_membership=edge_estimable.copy(),
         grm_provenance=grm_provenance,
     ), expanded
+
+
+def _prepare_checkpoint_omnib(
+    subdata: dict,
+    family: MasterGroupFamily,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int,
+    n_pc: int,
+    transform: str,
+    bootstrap_seed: int,
+    n_jobs: int,
+    grm_method: str,
+    maf_min: float,
+    burden_maf: float,
+    min_snp: int,
+    covariates: dict | None,
+) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
+    """Prepare formal null/features/projections without legacy response scoring."""
+    from . import interact as I
+
+    sample_idx = np.asarray(sample_idx, int)
+    y_raw = np.asarray(y_raw, float)
+    if y_raw.ndim != 1 or y_raw.size != sample_idx.size:
+        raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
+    if not np.all(np.isfinite(y_raw)):
+        raise ValueError("phenotype contains non-finite values")
+    if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
+        raise ValueError("n_jobs must be an integer >= 1")
+    missing = [sub for sub in family.subgenomes if sub not in subdata]
+    if missing:
+        raise ValueError(
+            "master family references missing subgenomes: " + ", ".join(missing))
+
+    expanded = expand_pair_edges(family)
+    if not expanded.edges:
+        raise ValueError("master homoeolog family contains no pair edges")
+
+    n = sample_idx.size
+    kernels = {}
+    grm_provenance = {}
+    for sub in subdata:
+        kernel, provenance = I._build_grm(
+            subdata[sub], sample_idx, grm_method, maf_min,
+            return_provenance=True)
+        kernels[sub] = kernel
+        grm_provenance[sub] = {
+            key: value for key, value in provenance.items()
+            if key != "retained_variant_mask"
+        }
+    C = None
+    covariate_metadata = {"policy": "none"}
+    if covariates:
+        C, covariate_metadata = I.build_covariate_block(
+            kernels, n, n_pcs=int(covariates.get("n_pcs", 0)),
+            extra=covariates.get("extra"))
+    C_design = (
+        np.ones((n, 1))
+        if C is None else np.asarray(C, float).reshape(n, -1)
+    )
+    y = I.rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
+    W, V, beta, covariance_components = I.null_lmm_fit(
+        kernels, y, C, seed=42)
+
+    feature_rng = np.random.default_rng(bootstrap_seed)
+    gated: dict[tuple[str, str], np.ndarray] = {}
+    features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    def gated_snps(sub: str, gene: str) -> np.ndarray | None:
+        key = (sub, gene)
+        if key in gated:
+            return gated[key]
+        if gene not in subdata[sub].gene_snp:
+            return None
+        indices = np.asarray(subdata[sub].gene_snp[gene], int)
+        means = np.nanmean(
+            subdata[sub].X[np.ix_(sample_idx, indices)], axis=0) / 2.0
+        gated[key] = indices[np.minimum(means, 1.0 - means) >= burden_maf]
+        return gated[key]
+
+    def feature(sub: str, gene: str, indices: np.ndarray):
+        key = (sub, gene)
+        if key not in features:
+            Xg = subdata[sub].X[np.ix_(sample_idx, indices)]
+            local = np.arange(indices.size)
+            burden = I.block_burden_capped(
+                Xg, local, cap, feature_rng, minor=True).reshape(-1, 1)
+            pcs = I.gene_pc_scores(Xg, local, cap, feature_rng, n_pc)
+            features[key] = burden, pcs[:, :1], pcs
+        return features[key]
+
+    edge_membership = np.zeros(len(expanded.edges), bool)
+    for edge_index, edge in enumerate(expanded.edges):
+        ix = gated_snps(edge.sub_x, edge.gene_x)
+        iy = gated_snps(edge.sub_y, edge.gene_y)
+        if ix is None or iy is None or ix.size < min_snp or iy.size < min_snp:
+            continue
+        feature(edge.sub_x, edge.gene_x, ix)
+        feature(edge.sub_y, edge.gene_y, iy)
+        edge_membership[edge_index] = True
+
+    scores = OmniBFamilyScores(
+        edge_p=np.full((len(expanded.edges), 0), np.nan),
+        group_p=np.full((len(family.group_ids), 0), np.nan),
+        edge_components_obs=np.full(
+            (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan),
+        edge_estimable=edge_membership.copy(),
+        group_estimable=np.zeros(len(family.group_ids), bool),
+        W=W,
+        y=y,
+        covariance_components={
+            str(name): float(value)
+            for name, value in covariance_components.items()
+        },
+        group_partial=np.zeros(len(family.group_ids), bool),
+        gated_snp=gated,
+        feature_cache=features,
+        covariate_block=C,
+        covariate_metadata=covariate_metadata,
+        null_covariance=V,
+        null_beta=np.asarray(beta, float),
+        null_design=C_design,
+        null_kernels=kernels,
+        edge_membership=edge_membership,
+        grm_provenance=grm_provenance,
+    )
+    scores.edge_estimable = _prepare_projection_cache(scores, expanded)
+    _update_group_partial(scores, expanded)
+    return scores, expanded
+
+
+def _prepare_projection_cache(
+    scores: OmniBFamilyScores,
+    expanded: ExpandedEdgeFamily,
+) -> np.ndarray:
+    """Prepare frozen whitened projections and derive their estimability mask."""
+    Cw = scores.W @ scores.null_design
+    membership = (
+        scores.edge_membership
+        if scores.edge_membership.size == len(expanded.edges)
+        else scores.edge_estimable
+    )
+    estimable = np.zeros(len(expanded.edges), bool)
+    for edge_index in np.flatnonzero(membership):
+        edge = expanded.edges[int(edge_index)]
+        cache_key = int(edge_index)
+        if cache_key not in scores.projection_cache:
+            scores.projection_cache[cache_key] = _prepare_omnib_nested_designs(
+                scores.W,
+                Cw,
+                scores.feature_cache[(edge.sub_x, edge.gene_x)],
+                scores.feature_cache[(edge.sub_y, edge.gene_y)],
+            )
+        estimable[edge_index] = any(
+            dfn >= 1 and dfd >= 1
+            for _Qr, _Qa, dfn, dfd in scores.projection_cache[cache_key]
+        )
+    return estimable
+
+
+def _update_group_partial(
+    scores: OmniBFamilyScores,
+    expanded: ExpandedEdgeFamily,
+) -> None:
+    partial = np.zeros(len(expanded.group_edge_indices), bool)
+    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
+        selected = np.asarray(edge_indices, int)
+        valid_count = int(scores.edge_estimable[selected].sum())
+        partial[group_index] = 0 < valid_count < selected.size
+    scores.group_partial = partial
 
 
 def _score_prepared_responses(
@@ -331,21 +505,14 @@ def _score_prepared_responses(
             (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
         padded[:, :width] = whitened[:, start:stop]
         whitened_blocks.append((start, stop, padded))
-    Cw = scores.W @ scores.null_design
     edge_p = np.full((len(expanded.edges), response_count), np.nan)
     edge_components = np.full(
         (len(expanded.edges), len(OMNIB_COMPONENT_NAMES), response_count),
         np.nan,
     )
+    scores.edge_estimable = _prepare_projection_cache(scores, expanded)
+    _update_group_partial(scores, expanded)
     valid_indices = np.flatnonzero(scores.edge_estimable)
-    for edge_index in valid_indices:
-        edge = expanded.edges[int(edge_index)]
-        cache_key = int(edge_index)
-        if cache_key not in scores.projection_cache:
-            scores.projection_cache[cache_key] = _prepare_omnib_nested_designs(
-                scores.W, Cw,
-                scores.feature_cache[(edge.sub_x, edge.gene_x)],
-                scores.feature_cache[(edge.sub_y, edge.gene_y)])
 
     def score_block(bounds):
         lo, hi = bounds
@@ -392,6 +559,23 @@ def _score_prepared_responses(
     return edge_p, group_p, edge_components
 
 
+def score_omnib_observed(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    *,
+    n_jobs: int = 8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Score and retain the observed response through the prepared API."""
+    edge_p, group_p, components = _score_prepared_responses(
+        scores, family, expanded, scores.y.reshape(-1, 1), n_jobs=n_jobs)
+    scores.edge_p = edge_p
+    scores.group_p = group_p
+    scores.edge_components_obs = components[:, :, 0]
+    scores.group_estimable = np.isfinite(group_p[:, 0])
+    return edge_p, group_p, components
+
+
 def score_omnib_null_indices(
     scores: OmniBFamilyScores,
     family: MasterGroupFamily,
@@ -400,16 +584,21 @@ def score_omnib_null_indices(
     *,
     base_seed: int,
     n_jobs: int = 8,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_components: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Score only the requested indexed null responses using prepared features."""
     from . import interact as I
 
     requested = tuple(int(index) for index in indices)
     if not requested:
-        return (
+        empty = (
             np.empty((len(expanded.edges), 0), float),
             np.empty((len(family.group_ids), 0), float),
         )
+        if return_components:
+            return empty + (np.empty(
+                (len(expanded.edges), len(OMNIB_COMPONENT_NAMES), 0), float),)
+        return empty
     if (
         scores.null_covariance is None
         or scores.null_beta is None
@@ -427,8 +616,10 @@ def score_omnib_null_indices(
         scores.null_kernels, scores.y, scores.null_design,
         indices=requested, base_seed=base_seed, null_fit=null_fit)
     responses = np.column_stack(response_list)
-    edge_p, group_p, _ = _score_prepared_responses(
+    edge_p, group_p, components = _score_prepared_responses(
         scores, family, expanded, responses, n_jobs=n_jobs)
+    if return_components:
+        return edge_p, group_p, components
     return edge_p, group_p
 
 
@@ -966,20 +1157,13 @@ def run_group_scan_omnib(
         ):
             raise ValueError("checkpoint_block_size must be an integer >= 1")
         checkpoint_block_size = int(checkpoint_block_size)
-        scores, expanded = score_omnib_family(
+        scores, expanded = _prepare_checkpoint_omnib(
             subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
-            transform="INT", bootstrap_B=0,
+            transform="INT",
             bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates)
-        prepared_edge, prepared_group, prepared_components = (
-            _score_prepared_responses(
-                scores, family, expanded, scores.y.reshape(-1, 1),
-                n_jobs=n_jobs))
-        scores.edge_p = prepared_edge
-        scores.group_p = prepared_group
-        scores.edge_components_obs = prepared_components[:, :, 0]
-        scores.group_estimable = np.isfinite(prepared_group[:, 0])
+        score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(
                 scores, family, expanded, hypothesis_unit, family_scope))

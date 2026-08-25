@@ -16,7 +16,9 @@ from homoeogwas.group_family import MasterGroupFamily
 from homoeogwas.interact import SubgenomeData, _build_grm
 
 
-def _family_fixture(*, rank_stressed: bool = False):
+def _family_fixture(
+    *, rank_stressed: bool = False, include_unestimable: bool = False,
+):
     rng = np.random.default_rng(2901 if rank_stressed else 2900)
     n = 36
     subdata = {}
@@ -34,8 +36,11 @@ def _family_fixture(*, rank_stressed: bool = False):
         )
     family = MasterGroupFamily(
         subgenomes=("A", "D"),
-        group_ids=("g",),
-        genes=(("g0", "g0"),),
+        group_ids=("g", "missing") if include_unestimable else ("g",),
+        genes=(
+            (("g0", "g0"), ("not_mapped", "not_mapped"))
+            if include_unestimable else (("g0", "g0"),)
+        ),
     )
     return subdata, family, rng.normal(size=n), np.arange(n)
 
@@ -74,6 +79,121 @@ def test_prepared_response_scorer_is_bit_exact_across_width_and_workers(
             wide_matrix[..., 1],
             equal_nan=True,
         )
+
+
+@pytest.mark.parametrize("rank_stressed", [False, True])
+def test_same_response_is_bit_exact_through_observed_and_indexed_entrypoints(
+    rank_stressed,
+):
+    """Splitting observed/indexed component or NaN handling must fail this."""
+    import homoeogwas.interact as I
+
+    subdata, family, y, sample_idx = _family_fixture(
+        rank_stressed=rank_stressed, include_unestimable=True)
+    scores, expanded = F.score_omnib_family(
+        subdata,
+        family,
+        y,
+        sample_idx,
+        bootstrap_B=0,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        min_snp=3,
+    )
+    null_fit = (
+        scores.W,
+        scores.null_covariance,
+        scores.null_beta,
+        scores.covariance_components,
+    )
+    response_list, _, _ = I.null_replicates_by_index(
+        scores.null_kernels,
+        scores.y,
+        scores.null_design,
+        indices=[7],
+        base_seed=2026,
+        null_fit=null_fit,
+    )
+    # The observed entry point owns scores.y. The indexed entry point
+    # regenerates this exact response from the same frozen fit and index.
+    scores.y = np.asarray(response_list[0], float)
+    observed = F.score_omnib_observed(
+        scores, family, expanded, n_jobs=1)
+    indexed = F.score_omnib_null_indices(
+        scores,
+        family,
+        expanded,
+        [7],
+        base_seed=2026,
+        n_jobs=2,
+        return_components=True,
+    )
+
+    for observed_matrix, indexed_matrix in zip(
+        observed, indexed, strict=True,
+    ):
+        assert np.array_equal(
+            np.isnan(observed_matrix), np.isnan(indexed_matrix))
+        assert np.array_equal(
+            observed_matrix, indexed_matrix, equal_nan=True)
+    assert any(np.isnan(matrix).any() for matrix in observed)
+
+
+def test_checkpoint_setup_never_executes_legacy_observed_scorer(
+    monkeypatch, tmp_path,
+):
+    """A legacy numerical failure must not precede formal prepared scoring."""
+    import homoeogwas.interact as I
+
+    subdata, family, y, sample_idx = _family_fixture()
+
+    def forbidden_legacy_score(*_args, **_kwargs):
+        raise AssertionError("checkpoint executed legacy observed scorer")
+
+    monkeypatch.setattr(I, "_omnib_components_over_Y", forbidden_legacy_score)
+    result = F.run_group_scan_omnib(
+        subdata,
+        family,
+        y,
+        sample_idx,
+        hypothesis_unit="edge",
+        bootstrap_B=1,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        min_snp=3,
+        checkpoint_dir=tmp_path / "checkpoint",
+        checkpoint_block_size=1,
+    )
+    assert result.G == 1
+
+
+def test_checkpoint_estimability_is_derived_from_prepared_projections(
+    monkeypatch, tmp_path,
+):
+    """The formal gate must not inherit the raw legacy rank decision."""
+    subdata, family, y, sample_idx = _family_fixture(rank_stressed=True)
+
+    def forbidden_legacy_gate(*_args, **_kwargs):
+        raise AssertionError("checkpoint executed legacy estimability gate")
+
+    monkeypatch.setattr(F, "_edge_design_estimable", forbidden_legacy_gate)
+    result = F.run_group_scan_omnib(
+        subdata,
+        family,
+        y,
+        sample_idx,
+        hypothesis_unit="edge",
+        bootstrap_B=1,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        min_snp=3,
+        checkpoint_dir=tmp_path / "checkpoint",
+        checkpoint_block_size=1,
+    )
+    assert result.G == 1
 
 
 def test_checkpoint_observed_artifact_is_written_from_prepared_scorer(
@@ -250,6 +370,53 @@ def _write_formal_identity_fixture(tmp_path, *, source=None, runtime=None):
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     return config_path, cfg, manifest_path, source, runtime
+
+
+def test_formal_checkpoint_without_pre_run_manifest_fails_closed(tmp_path):
+    """Deleting provenance must not downgrade a checkpoint run to legacy."""
+    from homoeogwas import formal_provenance as P
+
+    config_path = tmp_path / "formal-checkpoint.yaml"
+    cfg = {
+        "interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "calibration": {
+                "method": "bootstrap",
+                "B": 2000,
+                "checkpoint": {
+                    "enabled": True,
+                    "root": str(tmp_path / "checkpoint"),
+                },
+            },
+        },
+    }
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    with pytest.raises(
+        P.FormalLaunchError,
+        match="checkpoint.*provenance.pre_run_manifest",
+    ):
+        P.verify_formal_launch(config_path, cfg)
+
+
+def test_explicit_noncheckpoint_config_retains_legacy_provenance_opt_out(
+    tmp_path,
+):
+    """Only an explicitly non-checkpoint path may omit formal provenance."""
+    from homoeogwas import formal_provenance as P
+
+    config_path = tmp_path / "legacy-noncheckpoint.yaml"
+    cfg = {
+        "interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "calibration": {"method": "bootstrap", "B": 19},
+        },
+    }
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    assert P.verify_formal_launch(config_path, cfg) is None
 
 
 def test_formal_launch_rejects_changed_raw_config_sha(tmp_path, monkeypatch):

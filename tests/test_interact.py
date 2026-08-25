@@ -986,6 +986,12 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     config.write_text(json.dumps(cfg), encoding="utf-8")
 
     samples = [f"s{i}" for i in range(12)]
+    monkeypatch.setattr(
+        I,
+        "verify_formal_launch",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            checkpoint_context={"raw_config_sha256": "a" * 64}),
+    )
     monkeypatch.setattr(I, "preflight_interact", lambda _cfg, **_kwargs: [])
     monkeypatch.setattr(
         I, "_load_subgenome",

@@ -149,6 +149,20 @@ def _require_equal(label: str, expected: Any, actual: Any) -> None:
             "regenerate the preparation bundle from this clean executable source")
 
 
+def _formal_checkpoint_requested(raw_config: dict[str, Any]) -> bool:
+    """Return whether raw config requests the canonical checkpointed omniB path."""
+    interact = raw_config.get("interact")
+    if not isinstance(interact, dict):
+        return False
+    if str(interact.get("statistic", "omniB")).lower() != "omnib":
+        return False
+    calibration = interact.get("calibration")
+    if not isinstance(calibration, dict):
+        return False
+    checkpoint = calibration.get("checkpoint")
+    return isinstance(checkpoint, dict) and checkpoint.get("enabled") is True
+
+
 def verify_formal_launch(
     config_path: str | Path,
     raw_config: dict[str, Any],
@@ -163,6 +177,11 @@ def verify_formal_launch(
         return None
     provenance = raw_config.get("provenance")
     if not isinstance(provenance, dict) or not provenance.get("pre_run_manifest"):
+        if _formal_checkpoint_requested(raw_config):
+            raise FormalLaunchError(
+                "checkpointed group omniB requires "
+                "provenance.pre_run_manifest; regenerate the formal config "
+                "instead of removing its provenance binding")
         return None
 
     config_path = Path(config_path).resolve(strict=True)
