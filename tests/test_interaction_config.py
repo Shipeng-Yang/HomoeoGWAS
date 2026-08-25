@@ -90,9 +90,16 @@ def test_group_validation_accepts_three_subgenomes_and_joint_scope():
 
 
 def test_joint_scope_refuses_two_uncalibrated_primary_layers():
-    with pytest.raises(SystemExit, match="one union.*bootstrap_minp"):
+    with pytest.raises(SystemExit, match="mode=group.*bootstrap_minp"):
         validate_interact_config(_canonical_config(
             family_scope="joint", primary_multiplicity="bonferroni"))
+
+
+@pytest.mark.parametrize("family_scope", ["primary_only", "joint"])
+def test_every_canonical_group_run_requires_bootstrap_minp(family_scope):
+    with pytest.raises(SystemExit, match="mode=group.*bootstrap_minp"):
+        validate_interact_config(_canonical_config(
+            family_scope=family_scope, primary_multiplicity="bonferroni"))
 
 
 def test_group_omnib_rejects_raw_as_sensitivity_only():

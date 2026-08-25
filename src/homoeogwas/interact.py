@@ -2388,12 +2388,13 @@ def validate_interact_config(cfg: dict) -> None:
             "Bonferroni is descriptive only")
     if (
         mode == "group"
-        and str(ic.get("family_scope", "primary_only")).lower() == "joint"
+        and statistic == "omnib"
         and primary_multiplicity != "bootstrap_minp"
     ):
         raise SystemExit(
-            "ERR: interact.family_scope=joint requires one union "
-            "primary_multiplicity=bootstrap_minp calibration")
+            "ERR: interact.mode=group statistic=omniB requires "
+            "primary_multiplicity=bootstrap_minp; the formal group API always "
+            "uses one bootstrap min-P family")
     bootstrap_minp_supported = (
         statistic == "triad3"
         or (statistic == "omnib" and mode in {"pairwise", "group"})

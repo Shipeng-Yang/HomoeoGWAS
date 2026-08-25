@@ -647,6 +647,11 @@ def run_group_scan_omnib(
 
     flags = omnib_fwer_consistency_flags({
         "n_sig": len(sig),
+        "sig": sig,
+        "minp_boot_rejected": bool(calibration["rejected"]),
+        "minp_boot_emp": float(calibration["empirical_p"]),
+        "minp_boot_threshold": calibration["threshold"],
+        "bootstrap_B": bootstrap_B,
         "model_diagnostics": {"bootstrap_fwer": fwer},
     })
     if flags:
@@ -730,6 +735,26 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
     if payload.get("n_sig") != n_rejected:
         flags.append("OMNIB_FWER_TOPLEVEL_COUNT_MISMATCH")
 
+    fwer_rejected = fwer.get("rejected")
+    empirical_p = fwer.get("empirical_p")
+    alpha = fwer.get("alpha")
+    if not (
+        isinstance(fwer_rejected, bool)
+        and payload.get("minp_boot_rejected") == fwer_rejected
+        and isinstance(n_rejected, int)
+        and fwer_rejected == (n_rejected > 0)
+        and isinstance(empirical_p, (int, float))
+        and isinstance(alpha, (int, float))
+        and fwer_rejected == (float(empirical_p) <= float(alpha))
+    ):
+        flags.append("OMNIB_FWER_TOPLEVEL_DECISION_MISMATCH")
+    if payload.get("minp_boot_emp") != empirical_p:
+        flags.append("OMNIB_FWER_TOPLEVEL_EMPIRICAL_P_MISMATCH")
+    if payload.get("minp_boot_threshold") != fwer.get("threshold"):
+        flags.append("OMNIB_FWER_TOPLEVEL_THRESHOLD_MISMATCH")
+    if payload.get("bootstrap_B") != fwer.get("B"):
+        flags.append("OMNIB_FWER_TOPLEVEL_BOOTSTRAP_B_MISMATCH")
+
     ids = fwer.get("hypothesis_ids")
     observed = fwer.get("observed_p")
     adjusted = fwer.get("adjusted_p")
@@ -737,11 +762,16 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
         isinstance(ids, list)
         and isinstance(observed, list)
         and isinstance(adjusted, list)
+        and all(isinstance(value, str) for value in ids)
         and len(ids) == len(observed) == len(adjusted)
         and fwer.get("n_hypotheses") == len(ids)
     ):
         flags.append("OMNIB_FWER_VECTOR_LENGTH_MISMATCH")
         return tuple(dict.fromkeys(flags))
+
+    expected_hash = hashlib.sha256("\x00".join(ids).encode()).hexdigest()
+    if fwer.get("family_order_sha256") != expected_hash:
+        flags.append("OMNIB_FWER_FAMILY_HASH_MISMATCH")
 
     missing_adjusted = any(
         value is not None and adjusted[index] is None
@@ -750,7 +780,6 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
     if missing_adjusted:
         flags.append("OMNIB_FWER_ADJUSTED_P_MISSING")
 
-    alpha = fwer.get("alpha")
     threshold = fwer.get("threshold")
     adjusted_ids = {
         ids[index]
@@ -762,10 +791,12 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
         for index, value in enumerate(observed)
         if value is not None and threshold is not None and value < threshold
     }
-    serialized_ids = set(fwer.get("rejected_hypothesis_ids") or [])
+    rejected_ids_raw = fwer.get("rejected_hypothesis_ids")
+    serialized_ids = set(rejected_ids_raw or [])
+    fwer_sig = fwer.get("sig")
     sig_ids = {
         record.get("hypothesis_id")
-        for record in (fwer.get("sig") or [])
+        for record in (fwer_sig or [])
         if isinstance(record, dict)
     }
     if not (
@@ -773,6 +804,52 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
         and n_rejected == len(serialized_ids)
     ):
         flags.append("OMNIB_FWER_THRESHOLD_HIT_MISMATCH")
+
+    def ordered_hit_ids(value):
+        if not isinstance(value, list):
+            return None
+        result = []
+        for record in value:
+            if not isinstance(record, dict) or not isinstance(
+                record.get("hypothesis_id"), str
+            ):
+                return None
+            result.append(record["hypothesis_id"])
+        return result
+
+    top_sig_ids = ordered_hit_ids(payload.get("sig"))
+    fwer_sig_ids = ordered_hit_ids(fwer_sig)
+    rejected_ids = (
+        rejected_ids_raw
+        if isinstance(rejected_ids_raw, list)
+        and all(isinstance(value, str) for value in rejected_ids_raw)
+        else None
+    )
+    if not (
+        top_sig_ids is not None
+        and fwer_sig_ids is not None
+        and rejected_ids is not None
+        and top_sig_ids == fwer_sig_ids == rejected_ids
+    ):
+        flags.append("OMNIB_FWER_TOPLEVEL_SIG_MISMATCH")
+
+    rejected_indices = fwer.get("rejected_indices")
+    valid_indices = (
+        isinstance(rejected_indices, list)
+        and all(
+            isinstance(index, int)
+            and not isinstance(index, bool)
+            and 0 <= index < len(ids)
+            for index in rejected_indices
+        )
+        and len(set(rejected_indices)) == len(rejected_indices)
+    )
+    mapped_ids = (
+        [ids[index] for index in rejected_indices]
+        if valid_indices else None
+    )
+    if mapped_ids is None or mapped_ids != rejected_ids:
+        flags.append("OMNIB_FWER_REJECTED_INDEX_MISMATCH")
     return tuple(dict.fromkeys(flags))
 
 

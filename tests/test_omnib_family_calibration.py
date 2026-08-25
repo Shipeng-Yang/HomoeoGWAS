@@ -204,3 +204,97 @@ def test_pure_fwer_consistency_validator_rejects_corruption(monkeypatch, mutate,
     payload = asdict(result)
     mutate(payload)
     assert expected in set(F.omnib_fwer_consistency_flags(payload))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda payload: payload.__setitem__(
+            "sig", [{"hypothesis_id": "edge:corrupt"}]),
+         "OMNIB_FWER_TOPLEVEL_SIG_MISMATCH"),
+        (lambda payload: payload.__setitem__(
+            "minp_boot_rejected", not payload["minp_boot_rejected"]),
+         "OMNIB_FWER_TOPLEVEL_DECISION_MISMATCH"),
+        (lambda payload: payload.__setitem__(
+            "minp_boot_emp", payload["minp_boot_emp"] + 0.1),
+         "OMNIB_FWER_TOPLEVEL_EMPIRICAL_P_MISMATCH"),
+        (lambda payload: payload.__setitem__("minp_boot_threshold", 0.123),
+         "OMNIB_FWER_TOPLEVEL_THRESHOLD_MISMATCH"),
+        (lambda payload: payload.__setitem__(
+            "bootstrap_B", payload["bootstrap_B"] + 1),
+         "OMNIB_FWER_TOPLEVEL_BOOTSTRAP_B_MISMATCH"),
+        (lambda payload: payload["model_diagnostics"]["bootstrap_fwer"].__setitem__(
+            "rejected_indices", [0]),
+         "OMNIB_FWER_REJECTED_INDEX_MISMATCH"),
+        (lambda payload: payload["model_diagnostics"]["bootstrap_fwer"].__setitem__(
+            "family_order_sha256", "0" * 64),
+         "OMNIB_FWER_FAMILY_HASH_MISMATCH"),
+    ],
+)
+def test_zero_hit_authority_fields_are_independently_audited(
+        monkeypatch, mutate, expected):
+    family, scores, expanded = _fixed_scores()
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+    result = run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="edge", family_scope="primary_only",
+        transform="INT", bootstrap_B=3)
+    payload = asdict(result)
+    assert payload["sig"] == []
+    assert F.omnib_fwer_consistency_flags(payload) == ()
+    mutate(payload)
+    assert expected in set(F.omnib_fwer_consistency_flags(payload))
+
+
+def _forced_hit_payload(monkeypatch):
+    family, scores, expanded = _fixed_scores()
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+
+    def forced_calibration(p_obs, p_null, *, alpha):
+        adjusted = np.full(p_obs.size, 0.20)
+        adjusted[:3] = 0.01
+        return {
+            "alpha": alpha,
+            "method": "parametric_bootstrap_minp_plus_one",
+            "B": 3,
+            "empirical_p": 0.01,
+            "threshold": 0.035,
+            "threshold_comparator": "strict_less_than",
+            "rejected": True,
+            "rejected_local": [0, 1, 2],
+            "adjusted_p_local": adjusted,
+            "n_degenerate_replicates": 0,
+            "degenerate_policy": "conservative",
+        }
+
+    monkeypatch.setattr(F, "bootstrap_minp_calibration", forced_calibration)
+    return asdict(run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="edge", family_scope="primary_only",
+        transform="INT", bootstrap_B=3))
+
+
+@pytest.mark.parametrize("authority", ["top_level_sig", "fwer_sig", "rejected_ids"])
+def test_rejected_identity_order_must_match_every_authority(monkeypatch, authority):
+    payload = _forced_hit_payload(monkeypatch)
+    assert F.omnib_fwer_consistency_flags(payload) == ()
+    fwer = payload["model_diagnostics"]["bootstrap_fwer"]
+    if authority == "top_level_sig":
+        payload["sig"] = list(reversed(payload["sig"]))
+    elif authority == "fwer_sig":
+        fwer["sig"] = list(reversed(fwer["sig"]))
+    else:
+        fwer["rejected_hypothesis_ids"] = list(
+            reversed(fwer["rejected_hypothesis_ids"]))
+    assert "OMNIB_FWER_TOPLEVEL_SIG_MISMATCH" in set(
+        F.omnib_fwer_consistency_flags(payload))
+
+
+def test_rejected_full_indices_must_map_in_order_to_rejected_ids(monkeypatch):
+    payload = _forced_hit_payload(monkeypatch)
+    fwer = payload["model_diagnostics"]["bootstrap_fwer"]
+    fwer["rejected_indices"] = list(reversed(fwer["rejected_indices"]))
+    assert "OMNIB_FWER_REJECTED_INDEX_MISMATCH" in set(
+        F.omnib_fwer_consistency_flags(payload))
