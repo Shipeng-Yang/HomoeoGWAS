@@ -84,10 +84,15 @@ def test_group_omnib_requires_pairwise_subset_order(hypothesis_unit):
         validate_interact_config(cfg)
 
 
-def test_group_validation_accepts_three_subgenomes_and_rejects_joint_scope():
+def test_group_validation_accepts_three_subgenomes_and_joint_scope():
     validate_interact_config(_canonical_config())
-    with pytest.raises(SystemExit, match="family_scope=joint"):
-        validate_interact_config(_canonical_config(family_scope="joint"))
+    validate_interact_config(_canonical_config(family_scope="joint"))
+
+
+def test_joint_scope_refuses_two_uncalibrated_primary_layers():
+    with pytest.raises(SystemExit, match="one union.*bootstrap_minp"):
+        validate_interact_config(_canonical_config(
+            family_scope="joint", primary_multiplicity="bonferroni"))
 
 
 def test_group_omnib_rejects_raw_as_sensitivity_only():

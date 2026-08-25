@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -303,6 +304,476 @@ def _tsv_p(interact_module, value) -> str:
         return repr(float(value)) if np.isfinite(value) else "NA"
     except (TypeError, ValueError):
         return "NA"
+
+
+def bootstrap_minp_calibration(
+    p_obs: np.ndarray,
+    p_null: np.ndarray,
+    *,
+    alpha: float = 0.05,
+) -> dict:
+    """Calibrate one fixed hypothesis matrix by plus-one single-step min-P."""
+    p_obs = np.asarray(p_obs, float)
+    p_null = np.asarray(p_null, float)
+    if p_obs.ndim != 1:
+        raise ValueError("p_obs must be one-dimensional")
+    if p_null.ndim != 2 or p_null.shape[0] != p_obs.size:
+        raise ValueError(
+            "p_obs and p_null must contain the same fixed hypothesis family")
+    if not np.isfinite(p_obs).all():
+        raise ValueError("observed min-P family contains non-finite statistics")
+    B = int(p_null.shape[1])
+    if B < 1:
+        raise ValueError("bootstrap min-P calibration requires at least one replicate")
+
+    finite_null = np.isfinite(p_null)
+    degenerate = ~finite_null.all(axis=0)
+    safe = np.where(finite_null, p_null, np.inf)
+    null_min = safe.min(axis=0)
+    null_min[degenerate] = 0.0
+    minp_obs = float(p_obs.min())
+    empirical_p = float(
+        (1 + int((null_min <= minp_obs).sum())) / (B + 1))
+    k = int(np.floor(alpha * (B + 1)))
+    threshold = float(np.sort(null_min)[k - 1]) if k >= 1 else None
+    rejected_local = (
+        np.flatnonzero(p_obs < threshold).astype(int).tolist()
+        if threshold is not None else [])
+    adjusted = (
+        (1 + (null_min[None, :] <= p_obs[:, None]).sum(axis=1))
+        / (B + 1)
+    ).astype(float)
+    rejected = bool(empirical_p <= alpha)
+    if rejected != bool(rejected_local):
+        raise RuntimeError(
+            "bootstrap global decision and single-step rejection set disagree")
+    if set(rejected_local) != set(np.flatnonzero(adjusted <= alpha).tolist()):
+        raise RuntimeError(
+            "bootstrap adjusted-p and threshold rejection sets disagree")
+    return {
+        "alpha": float(alpha),
+        "method": "parametric_bootstrap_minp_plus_one",
+        "B": B,
+        "empirical_p": empirical_p,
+        "threshold": threshold,
+        "threshold_comparator": "strict_less_than",
+        "rejected": rejected,
+        "rejected_local": rejected_local,
+        "adjusted_p_local": adjusted,
+        "n_degenerate_replicates": int(degenerate.sum()),
+        "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
+    }
+
+
+def _component_localization(values: np.ndarray) -> dict:
+    values = np.asarray(values, float)
+    component_p = {
+        name: (float(values[index]) if np.isfinite(values[index]) else None)
+        for index, name in enumerate(OMNIB_COMPONENT_NAMES)
+    }
+    finite = np.isfinite(values)
+    smallest = int(np.nanargmin(values)) if finite.any() else None
+    return {
+        "component_p": component_p,
+        "smallest_component": (
+            OMNIB_COMPONENT_NAMES[smallest] if smallest is not None else None),
+        "smallest_component_p": (
+            float(values[smallest]) if smallest is not None else None),
+    }
+
+
+def _edge_identity_record(
+    scores: OmniBFamilyScores,
+    expanded: ExpandedEdgeFamily,
+    index: int,
+) -> dict:
+    edge = expanded.edges[index]
+    return {
+        "hypothesis_id": f"edge:{edge.edge_id}",
+        "hypothesis_unit": "edge",
+        "edge_id": edge.edge_id,
+        "group_ids": list(edge.source_group_ids),
+        "direction": edge.direction,
+        "sub_x": edge.sub_x,
+        "sub_y": edge.sub_y,
+        "gene_x": edge.gene_x,
+        "gene_y": edge.gene_y,
+    } | _component_localization(scores.edge_components_obs[index])
+
+
+def _group_identity_record(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    index: int,
+) -> dict:
+    edge_indices = np.asarray(expanded.group_edge_indices[index], int)
+    edge_values = scores.edge_p[edge_indices, 0]
+    finite_edges = np.isfinite(edge_values)
+    driving_index = (
+        int(edge_indices[int(np.nanargmin(edge_values))])
+        if finite_edges.any() else None)
+    driving = (
+        _edge_identity_record(scores, expanded, driving_index)
+        if driving_index is not None else {})
+    return {
+        "hypothesis_id": f"group:{family.group_ids[index]}",
+        "hypothesis_unit": "group",
+        "group_id": family.group_ids[index],
+        "genes": {
+            sub: gene
+            for sub, gene in zip(
+                family.subgenomes, family.genes[index], strict=True)
+        },
+        "ordered_genes": list(family.genes[index]),
+        "driving_edge": driving.get("edge_id"),
+        "driving_direction": driving.get("direction"),
+        "driving_component": driving.get("smallest_component"),
+        "driving_component_p": driving.get("smallest_component_p"),
+        "edge_localization": [
+            {
+                "edge_id": expanded.edges[int(edge_index)].edge_id,
+                "direction": expanded.edges[int(edge_index)].direction,
+                "p_omnib": (
+                    float(scores.edge_p[int(edge_index), 0])
+                    if np.isfinite(scores.edge_p[int(edge_index), 0]) else None),
+            }
+            for edge_index in edge_indices
+        ],
+    }
+
+
+def _select_primary_family(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    hypothesis_unit: str,
+    family_scope: str,
+) -> tuple[np.ndarray, list[dict], str, list[str]]:
+    edge_records = [
+        _edge_identity_record(scores, expanded, index)
+        for index in range(len(expanded.edges))
+    ]
+    group_records = [
+        _group_identity_record(scores, family, expanded, index)
+        for index in range(len(family.group_ids))
+    ]
+    if family_scope == "joint":
+        return (
+            np.vstack([scores.edge_p, scores.group_p]),
+            edge_records + group_records,
+            "joint",
+            ["edge", "group"],
+        )
+    if hypothesis_unit == "edge":
+        return scores.edge_p, edge_records, "edge", ["edge"]
+    return scores.group_p, group_records, "group", ["group"]
+
+
+def _ranking_rows(
+    interact_module,
+    records: list[dict],
+    order: list[int],
+    family: MasterGroupFamily,
+) -> tuple[list[str], list[list]]:
+    header = [
+        "rank", "hypothesis_id", "family_id", "hypothesis_unit",
+        "group_id", "edge_id", "group_ids", "direction", "sub_x", "sub_y",
+        *[f"gene_{sub}" for sub in family.subgenomes],
+        "p_interaction", "p_adjusted_bootstrap_minp", "primary_sig",
+        "p_unestimable", "driving_edge", "driving_component",
+        "driving_component_p",
+    ]
+    rows = []
+    for rank, index in enumerate(order):
+        record = records[index]
+        genes = record.get("genes", {})
+        if record["hypothesis_unit"] == "edge":
+            genes = {
+                record["sub_x"]: record["gene_x"],
+                record["sub_y"]: record["gene_y"],
+            }
+        group_ids = record.get("group_ids", [])
+        rows.append([
+            rank,
+            record["hypothesis_id"],
+            record["family_id"],
+            record["hypothesis_unit"],
+            record.get("group_id") or "|".join(group_ids) or "NA",
+            record.get("edge_id") or "NA",
+            "|".join(group_ids) or "NA",
+            record.get("direction") or "NA",
+            record.get("sub_x") or "NA",
+            record.get("sub_y") or "NA",
+            *[genes.get(sub, "NA") for sub in family.subgenomes],
+            _tsv_p(interact_module, record["p_interaction"]),
+            _tsv_p(
+                interact_module, record["p_adjusted_bootstrap_minp"]),
+            int(record["primary_sig"]),
+            int(record["p_unestimable"]),
+            record.get("driving_edge") or record.get("edge_id") or "NA",
+            record.get("driving_component")
+            or record.get("smallest_component") or "NA",
+            _tsv_p(
+                interact_module,
+                record.get("driving_component_p")
+                if record["hypothesis_unit"] == "group"
+                else record.get("smallest_component_p")),
+        ])
+    return header, rows
+
+
+def run_group_scan_omnib(
+    subdata,
+    family: MasterGroupFamily,
+    y_raw,
+    sample_idx,
+    *,
+    hypothesis_unit="group",
+    family_scope="primary_only",
+    cap=150,
+    n_pc=3,
+    transform="INT",
+    bootstrap_B=2000,
+    bootstrap_seed=2026,
+    n_jobs=8,
+    grm_method="grm_from_X",
+    maf_min=0.01,
+    burden_maf=0.01,
+    min_snp=3,
+    covariates=None,
+    full_dump_path=None,
+    alpha=0.05,
+):
+    """Run the formal edge, group or jointly calibrated omniB family."""
+    from . import interact as I
+
+    hypothesis_unit = str(hypothesis_unit).lower()
+    family_scope = str(family_scope).lower()
+    if hypothesis_unit not in {"edge", "group"}:
+        raise ValueError("hypothesis_unit must be edge or group")
+    if family_scope not in {"primary_only", "joint"}:
+        raise ValueError("family_scope must be primary_only or joint")
+    if str(transform).upper() != "INT":
+        raise ValueError("formal omniB family calibration requires transform='INT'")
+    if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
+        raise ValueError("formal calibration bootstrap_B must be an integer")
+    bootstrap_B = int(bootstrap_B)
+    if bootstrap_B < 1:
+        raise ValueError("formal calibration requires at least one bootstrap replicate")
+
+    scores, expanded = score_omnib_family(
+        subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
+        transform="INT", bootstrap_B=bootstrap_B,
+        bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+        grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
+        min_snp=min_snp, covariates=covariates)
+    primary_p, identities, family_id, calibrated_layers = _select_primary_family(
+        scores, family, expanded, hypothesis_unit, family_scope)
+    if primary_p.ndim != 2 or primary_p.shape[1] != bootstrap_B + 1:
+        raise RuntimeError(
+            "omniB scorer returned an invalid observed/bootstrap matrix shape")
+    observed = primary_p[:, 0]
+    finite = np.isfinite(observed)
+    if not finite.any():
+        raise ValueError("declared omniB primary family has no estimable hypotheses")
+    finite_indices = np.flatnonzero(finite)
+
+    # This is deliberately the sole calibration call for primary_only and joint.
+    calibration = bootstrap_minp_calibration(
+        observed[finite], primary_p[finite, 1:], alpha=alpha)
+    adjusted = np.full(observed.size, np.nan)
+    adjusted[finite] = calibration["adjusted_p_local"]
+    rejected_indices = [
+        int(finite_indices[int(local)])
+        for local in calibration["rejected_local"]
+    ]
+    rejected_set = set(rejected_indices)
+
+    records = []
+    for index, identity in enumerate(identities):
+        records.append(identity | {
+            "family_id": family_id,
+            "p": float(observed[index]) if finite[index] else None,
+            "p_interaction": (
+                float(observed[index]) if finite[index] else None),
+            "p_adjusted_bootstrap_minp": (
+                float(adjusted[index]) if np.isfinite(adjusted[index]) else None),
+            "primary_sig": index in rejected_set,
+            "p_unestimable": not bool(finite[index]),
+        })
+    order = np.argsort(
+        np.where(finite, observed, np.inf), kind="stable").astype(int).tolist()
+    sig = [records[index] for index in order if index in rejected_set]
+    top = [records[index] for index in order if finite[index]][:5]
+
+    hypothesis_ids = [record["hypothesis_id"] for record in records]
+    fwer = {
+        key: value
+        for key, value in calibration.items()
+        if key not in {"rejected_local", "adjusted_p_local"}
+    } | {
+        "family_id": family_id,
+        "family_scope": family_scope,
+        "declared_hypothesis_unit": hypothesis_unit,
+        "calibrated_layers": calibrated_layers,
+        "formal_discovery_layer": True,
+        "inferential": True,
+        "n_hypotheses": int(observed.size),
+        "n_calibrated": int(finite.sum()),
+        "n_unestimable": int((~finite).sum()),
+        "hypothesis_ids": hypothesis_ids,
+        "family_order_sha256": hashlib.sha256(
+            "\x00".join(hypothesis_ids).encode()).hexdigest(),
+        "observed_p": [
+            float(value) if np.isfinite(value) else None for value in observed
+        ],
+        "adjusted_p": [
+            float(value) if np.isfinite(value) else None for value in adjusted
+        ],
+        "rejected_indices": [
+            int(index) for index in order if index in rejected_set
+        ],
+        "rejected_hypothesis_ids": [
+            hypothesis_ids[index] for index in order if index in rejected_set
+        ],
+        "n_rejected": len(sig),
+        "sig": sig,
+        "note": (
+            "This bootstrap min-P object is the sole calibrated discovery "
+            "layer; edge and component decompositions are descriptive unless "
+            "included in family_scope=joint."),
+    }
+
+    flags = omnib_fwer_consistency_flags({
+        "n_sig": len(sig),
+        "model_diagnostics": {"bootstrap_fwer": fwer},
+    })
+    if flags:
+        raise RuntimeError(
+            "internal omniB FWER serialization inconsistency: " + ", ".join(flags))
+
+    if full_dump_path:
+        header, rows = _ranking_rows(I, records, order, family)
+        I._write_ranking_tsv(full_dump_path, header, rows)
+
+    G = int(observed.size)
+    bonferroni_alpha = float(alpha / G)
+    analytic_indices = [
+        index for index in order
+        if finite[index] and observed[index] < bonferroni_alpha
+    ]
+    analytic = [records[index] for index in analytic_indices]
+    return _interact_result(
+        I,
+        trait="",
+        transform="INT",
+        n=int(np.asarray(sample_idx).size),
+        G=G,
+        pair_acat=float(I.acat(observed[finite])),
+        pair_acat_emp=float("nan"),
+        min_p=float(observed[finite].min()),
+        lambda_gc_obs=float(I.lambda_gc(observed[finite])),
+        lambda_gc_perm_median=float("nan"),
+        bonferroni_alpha=bonferroni_alpha,
+        n_sig=len(sig),
+        sig=sig,
+        top=top,
+        sigma_hat={
+            sub: float(scores.covariance_components.get(sub, 0.0))
+            for sub in family.subgenomes
+        } | {"e": float(scores.covariance_components.get("e", 0.0))},
+        weighted=None,
+        covariates=scores.covariate_metadata,
+        n_planned=G,
+        n_valid=int(finite.sum()),
+        n_unestimable=int((~finite).sum()),
+        statistic="omniB",
+        calibration_method="bootstrap",
+        bootstrap_B=bootstrap_B,
+        bootstrap_seed=int(bootstrap_seed),
+        minp_boot_emp=float(calibration["empirical_p"]),
+        minp_boot_threshold=calibration["threshold"],
+        minp_boot_rejected=bool(calibration["rejected"]),
+        component_diagnostics={
+            "role": "descriptive_localization",
+            "calibrated_layers": calibrated_layers,
+        },
+        model_diagnostics={"bootstrap_fwer": fwer},
+        analytic_screen_n=len(analytic),
+        analytic_screen_sig=analytic,
+    )
+
+
+def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
+    """Return stable audit codes for a serialized formal omniB result record."""
+    flags: list[str] = []
+    try:
+        fwer = payload["model_diagnostics"]["bootstrap_fwer"]
+    except (KeyError, TypeError):
+        return ("OMNIB_FWER_OBJECT_MISSING",)
+    if not isinstance(fwer, dict):
+        return ("OMNIB_FWER_OBJECT_MISSING",)
+
+    family_scope = fwer.get("family_scope")
+    declared = fwer.get("declared_hypothesis_unit")
+    expected_family = "joint" if family_scope == "joint" else declared
+    if fwer.get("family_id") != expected_family:
+        flags.append("OMNIB_FWER_FAMILY_ID_MISMATCH")
+
+    expected_layers = (
+        ["edge", "group"] if family_scope == "joint" else [declared])
+    if fwer.get("calibrated_layers") != expected_layers:
+        flags.append("OMNIB_FWER_UNCALIBRATED_SECOND_PRIMARY_LAYER")
+
+    n_rejected = fwer.get("n_rejected")
+    if payload.get("n_sig") != n_rejected:
+        flags.append("OMNIB_FWER_TOPLEVEL_COUNT_MISMATCH")
+
+    ids = fwer.get("hypothesis_ids")
+    observed = fwer.get("observed_p")
+    adjusted = fwer.get("adjusted_p")
+    if not (
+        isinstance(ids, list)
+        and isinstance(observed, list)
+        and isinstance(adjusted, list)
+        and len(ids) == len(observed) == len(adjusted)
+        and fwer.get("n_hypotheses") == len(ids)
+    ):
+        flags.append("OMNIB_FWER_VECTOR_LENGTH_MISMATCH")
+        return tuple(dict.fromkeys(flags))
+
+    missing_adjusted = any(
+        value is not None and adjusted[index] is None
+        for index, value in enumerate(observed)
+    )
+    if missing_adjusted:
+        flags.append("OMNIB_FWER_ADJUSTED_P_MISSING")
+
+    alpha = fwer.get("alpha")
+    threshold = fwer.get("threshold")
+    adjusted_ids = {
+        ids[index]
+        for index, value in enumerate(adjusted)
+        if value is not None and alpha is not None and value <= alpha
+    }
+    threshold_ids = {
+        ids[index]
+        for index, value in enumerate(observed)
+        if value is not None and threshold is not None and value < threshold
+    }
+    serialized_ids = set(fwer.get("rejected_hypothesis_ids") or [])
+    sig_ids = {
+        record.get("hypothesis_id")
+        for record in (fwer.get("sig") or [])
+        if isinstance(record, dict)
+    }
+    if not (
+        adjusted_ids == threshold_ids == serialized_ids == sig_ids
+        and n_rejected == len(serialized_ids)
+    ):
+        flags.append("OMNIB_FWER_THRESHOLD_HIT_MISMATCH")
+    return tuple(dict.fromkeys(flags))
 
 
 def run_pair_scan_omnib(

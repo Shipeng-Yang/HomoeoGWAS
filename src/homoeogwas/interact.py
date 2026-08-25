@@ -273,6 +273,9 @@ def whiten_multi(kernels: dict[str, np.ndarray], y: np.ndarray, X: np.ndarray = 
 
 
 TARGET_ESTIMABILITY_RTOL = float(np.sqrt(np.finfo(np.float64).eps))   # 1.4901161193847656e-08
+TRIAD3_FORMAL_BOOTSTRAP_MIN_B = 999
+PAIRWISE_OMNIB_FORMAL_BOOTSTRAP_MIN_B = 999
+PAIRWISE_BURDEN_FORMAL_PERMUTATION_MIN_B = 999
 ESTIMABILITY_POLICY = dict(
     method="frisch_waugh_lovell_target_residual_ratio",
     nuisance_rank_rtol_formula="max(n, q_active) * float64_eps",
@@ -759,7 +762,9 @@ class InteractResult:
     bootstrap_seed: int = None
     minp_boot_emp: float = None                # experiment-wide FWER: empirical p of observed min-p under bootstrap null
     minp_boot_threshold: float = None          # 5th-percentile of bootstrap min-p (alpha=0.05 experiment-wide cutoff)
+    minp_boot_rejected: bool = None            # exact plus-one min-P decision when defined
     tail_excess: dict = None                   # aggregate tail-excess: observed vs bootstrap null (per threshold)
+    model_diagnostics: dict = None             # authoritative resampling-family diagnostics
 
 
 def _validate_snp_mapping(
@@ -1568,6 +1573,7 @@ _score_omnib_family = _family_score.score_omnib_family
 _omnib_components_over_Y = _family_score.omnib_components_over_Y
 run_pair_scan_omnib = _family_score.run_pair_scan_omnib
 run_clique_scan_omnib = _family_score.run_clique_scan_omnib
+run_group_scan_omnib = _family_score.run_group_scan_omnib
 
 
 def run_clique_scan(
@@ -2290,10 +2296,9 @@ def validate_interact_config(cfg: dict) -> None:
             raise SystemExit(
                 "ERR: interact.subset_order=2 is required for hypothesis_unit=edge/group")
         family_scope = str(ic.get("family_scope", "primary_only")).lower()
-        if family_scope == "joint":
-            raise SystemExit("ERR: interact.family_scope=joint is not implemented yet")
-        if family_scope != "primary_only":
-            raise SystemExit("ERR: interact.family_scope must be primary_only")
+        if family_scope not in {"primary_only", "joint"}:
+            raise SystemExit(
+                "ERR: interact.family_scope must be primary_only or joint")
     elif mode not in expected_n:
         raise SystemExit(
             "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
@@ -2363,7 +2368,9 @@ def validate_interact_config(cfg: dict) -> None:
             f"ERR: interact.weights is not used by statistic={statistic}; use burden or "
             "remove the weights file")
     default_multiplicity = (
-        "bootstrap_minp" if statistic == "triad3" else "bonferroni")
+        "bootstrap_minp"
+        if statistic == "triad3" or (statistic == "omnib" and mode == "group")
+        else "bonferroni")
     primary_multiplicity = str(
         ic.get("primary_multiplicity", default_multiplicity)
     ).lower()
@@ -2379,6 +2386,14 @@ def validate_interact_config(cfg: dict) -> None:
             "ERR: statistic=triad3 requires "
             "interact.primary_multiplicity=bootstrap_minp; analytic "
             "Bonferroni is descriptive only")
+    if (
+        mode == "group"
+        and str(ic.get("family_scope", "primary_only")).lower() == "joint"
+        and primary_multiplicity != "bootstrap_minp"
+    ):
+        raise SystemExit(
+            "ERR: interact.family_scope=joint requires one union "
+            "primary_multiplicity=bootstrap_minp calibration")
     bootstrap_minp_supported = (
         statistic == "triad3"
         or (statistic == "omnib" and mode in {"pairwise", "group"})
