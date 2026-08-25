@@ -24,6 +24,10 @@ class MasterGroupFamily:
         object.__setattr__(self, "genes", genes)
         if len(subgenomes) < 2 or len(set(subgenomes)) != len(subgenomes):
             raise ValueError("subgenomes must contain at least two unique labels")
+        if any(not isinstance(group_id, str) for group_id in group_ids):
+            raise ValueError("group_id values must be strings")
+        if any(not isinstance(gene, str) for row in genes for gene in row):
+            raise ValueError("gene identifiers must be strings")
         if len(group_ids) != len(genes):
             raise ValueError("group_ids and genes must have the same row count")
         if len(set(group_ids)) != len(group_ids):

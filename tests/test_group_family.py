@@ -33,6 +33,15 @@ def test_two_copy_group_has_exactly_one_edge():
     assert out.group_edge_indices == ((0,),)
 
 
+@pytest.mark.parametrize("group_ids, genes", [
+    ((1,), (("a1", "d1"),)),
+    (("g1",), (("a1", 2),)),
+])
+def test_family_rejects_non_string_identifiers(group_ids, genes):
+    with pytest.raises(ValueError, match="strings"):
+        MasterGroupFamily(("A", "D"), group_ids, genes)
+
+
 def test_load_legacy_table_derives_stable_group_ids(tmp_path):
     path = tmp_path / "triads.tsv"
     path.write_text("gene_A\tgene_B\tgene_D\na1\tb1\td1\n")
