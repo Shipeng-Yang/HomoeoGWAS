@@ -233,6 +233,53 @@ def null_replicates(kernels: dict[str, np.ndarray], y: np.ndarray, C: np.ndarray
     return out, W, cv
 
 
+def null_replicates_by_index(
+    kernels: dict[str, np.ndarray],
+    y: np.ndarray,
+    C: np.ndarray = None,
+    *,
+    indices,
+    base_seed: int,
+    null_fit: tuple | None = None,
+):
+    """Generate indexed parametric-bootstrap phenotypes from one frozen null fit.
+
+    Each replicate owns a SHA-256-derived RNG stream keyed only by
+    ``(base_seed, replicate_index)``.  Returned phenotypes remain on the input
+    analysis scale; callers must not apply INT again.
+    """
+    from .resampling_checkpoint import replicate_seed
+
+    n = next(iter(kernels.values())).shape[0]
+    if C is None:
+        C = np.ones((n, 1))
+    C = np.asarray(C, float).reshape(n, -1)
+    if null_fit is None:
+        W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    else:
+        W, V, beta, cv = null_fit
+    requested = []
+    for value in indices:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError("replicate indices must be non-negative integers")
+        value = int(value)
+        if value < 0:
+            raise ValueError("replicate indices must be non-negative")
+        requested.append(value)
+    if len(set(requested)) != len(requested):
+        raise ValueError("replicate indices must be unique")
+
+    values, vectors = np.linalg.eigh(0.5 * (V + V.T))
+    root = (vectors * np.sqrt(np.clip(values, 1e-12, None))) @ vectors.T
+    fit = C @ np.asarray(beta, float)
+    out = [
+        fit + root @ np.random.default_rng(
+            replicate_seed(base_seed, index)).standard_normal(n)
+        for index in requested
+    ]
+    return out, W, cv
+
+
 def scols_safe(M: np.ndarray) -> np.ndarray:
     mu = M.mean(0)
     sd = M.std(0, ddof=0)
@@ -2595,6 +2642,34 @@ def validate_interact_config(cfg: dict) -> None:
             "ERR: supported statistic/calibration pairs are "
             "omniB+bootstrap, triad3+bootstrap, and burden+permutation; got "
             f"{statistic}+{calibration_method}")
+    checkpoint = calibration.get("checkpoint")
+    if checkpoint is not None:
+        if not isinstance(checkpoint, dict):
+            raise SystemExit(
+                "ERR: interact.calibration.checkpoint must be a mapping")
+        checkpoint_enabled = checkpoint.get("enabled", False)
+        if not isinstance(checkpoint_enabled, bool):
+            raise SystemExit(
+                "ERR: interact.calibration.checkpoint.enabled must be true or false")
+        block_size = checkpoint.get("block_size", 25)
+        if (
+            isinstance(block_size, bool)
+            or not isinstance(block_size, int)
+            or block_size < 1
+        ):
+            raise SystemExit(
+                "ERR: interact.calibration.checkpoint.block_size must be an "
+                f"integer >= 1; got {block_size!r}")
+        if checkpoint_enabled:
+            if mode != "group" or statistic != "omnib":
+                raise SystemExit(
+                    "ERR: bootstrap checkpointing is supported only by the "
+                    "canonical group omniB path")
+            checkpoint_root = checkpoint.get("root")
+            if not isinstance(checkpoint_root, str) or not checkpoint_root.strip():
+                raise SystemExit(
+                    "ERR: interact.calibration.checkpoint.root must be a "
+                    "non-empty path string")
     replicate_key = "B" if statistic in {"omnib", "triad3"} else "perm_B"
     replicate_value = calibration.get(
         replicate_key,
@@ -3046,6 +3121,11 @@ def cmd_interact(args) -> int:
     boot_B = int(calib.get("B", calib.get("perm_B", 2000)))
     boot_seed = int(calib.get("seed", 2026))
     calibration_qa_only = bool(calib.get("qa_only", False))
+    checkpoint_cfg = calib.get("checkpoint") or {}
+    checkpoint_dir = (
+        checkpoint_cfg.get("root")
+        if checkpoint_cfg.get("enabled", False) else None)
+    checkpoint_block_size = int(checkpoint_cfg.get("block_size", 25))
     n_pc = int(burden.get("n_pc", 3))
     grm_cfg = ic.get("grm", {})
     grm_method = grm_cfg.get(
@@ -3101,6 +3181,8 @@ def cmd_interact(args) -> int:
             covariates=cov_arg,
             full_dump_path=_dump_path("INT"),
             inferential=not calibration_qa_only,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_block_size=checkpoint_block_size,
         )
         r.trait = trait
         results = {"INT": r.__dict__}

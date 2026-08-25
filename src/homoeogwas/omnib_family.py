@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -10,6 +11,7 @@ import numpy as np
 from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edges
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
+INDEXED_SCORE_MICROBLOCK = 25
 
 
 @dataclass
@@ -29,6 +31,11 @@ class OmniBFamilyScores:
     feature_cache: dict = field(default_factory=dict, repr=False)
     covariate_block: np.ndarray | None = field(default=None, repr=False)
     covariate_metadata: dict = field(default_factory=dict)
+    null_covariance: np.ndarray | None = field(default=None, repr=False)
+    null_beta: np.ndarray | None = field(default=None, repr=False)
+    null_design: np.ndarray | None = field(default=None, repr=False)
+    null_kernels: dict = field(default_factory=dict, repr=False)
+    projection_cache: dict = field(default_factory=dict, repr=False)
 
 
 def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
@@ -264,7 +271,160 @@ def score_omnib_family(
         feature_cache=features,
         covariate_block=C,
         covariate_metadata=covariate_metadata,
+        null_covariance=V,
+        null_beta=np.asarray(beta, float),
+        null_design=C_design,
+        null_kernels=kernels,
     ), expanded
+
+
+def score_omnib_null_indices(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    indices,
+    *,
+    base_seed: int,
+    n_jobs: int = 8,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score only the requested indexed null responses using prepared features."""
+    from joblib import Parallel, delayed
+
+    from . import interact as I
+
+    requested = tuple(int(index) for index in indices)
+    if not requested:
+        return (
+            np.empty((len(expanded.edges), 0), float),
+            np.empty((len(family.group_ids), 0), float),
+        )
+    if (
+        scores.null_covariance is None
+        or scores.null_beta is None
+        or scores.null_design is None
+        or not scores.null_kernels
+    ):
+        raise RuntimeError("omniB score context lacks its frozen null fit")
+    null_fit = (
+        scores.W,
+        scores.null_covariance,
+        scores.null_beta,
+        scores.covariance_components,
+    )
+    responses, _, _ = I.null_replicates_by_index(
+        scores.null_kernels, scores.y, scores.null_design,
+        indices=requested, base_seed=base_seed, null_fit=null_fit)
+    # Whiten each response independently, then batch only column-independent
+    # contractions below. General matrix multiplication may select a reduction
+    # strategy from the block shape and thereby change the last bits.
+    whitened = np.column_stack([
+        scores.W @ np.asarray(response, float) for response in responses])
+    whitened_blocks = []
+    for start in range(0, len(requested), INDEXED_SCORE_MICROBLOCK):
+        stop = min(start + INDEXED_SCORE_MICROBLOCK, len(requested))
+        width = stop - start
+        padded = np.zeros(
+            (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
+        padded[:, :width] = whitened[:, start:stop]
+        whitened_blocks.append((start, stop, padded))
+    Cw = scores.W @ scores.null_design
+    edge_p = np.full((len(expanded.edges), len(requested)), np.nan)
+    valid_indices = np.flatnonzero(scores.edge_estimable)
+
+    def score_block(bounds):
+        lo, hi = bounds
+        edge_indices = valid_indices[lo:hi]
+        values = np.full((edge_indices.size, len(requested)), np.nan)
+        for local, edge_index in enumerate(edge_indices):
+            edge = expanded.edges[int(edge_index)]
+            cache_key = int(edge_index)
+            prepared = scores.projection_cache.get(cache_key)
+            if prepared is None:
+                prepared = _prepare_omnib_nested_designs(
+                    scores.W, Cw,
+                    scores.feature_cache[(edge.sub_x, edge.gene_x)],
+                    scores.feature_cache[(edge.sub_y, edge.gene_y)])
+                scores.projection_cache[cache_key] = prepared
+            for start, stop, response_block in whitened_blocks:
+                components = _prepared_components_over_Y(
+                    response_block, prepared)[:, :stop - start]
+                values[local, start:stop] = np.asarray([
+                    I.acat(components[:, column])
+                    for column in range(stop - start)
+                ], float)
+        return edge_indices, values
+
+    if valid_indices.size:
+        step = max(1, valid_indices.size // (int(n_jobs) * 8))
+        blocks = [
+            (lo, min(lo + step, valid_indices.size))
+            for lo in range(0, valid_indices.size, step)
+        ]
+        for edge_indices, values in Parallel(
+            n_jobs=int(n_jobs), backend="threading"
+        )(delayed(score_block)(block) for block in blocks):
+            edge_p[edge_indices] = values
+
+    group_p = np.full((len(family.group_ids), len(requested)), np.nan)
+    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
+        selected = np.asarray(edge_indices, int)
+        if selected.size == 1:
+            group_p[group_index] = edge_p[selected[0]]
+        else:
+            for column in range(len(requested)):
+                group_p[group_index, column] = I.acat(
+                    edge_p[selected, column])
+    return edge_p, group_p
+
+
+def _prepare_omnib_nested_designs(Wh, Cw, gsx, gsy):
+    """Cache response-independent nested-model bases for one omniB edge."""
+    from scipy.linalg import orth
+
+    prepared = []
+    for ax, ay in zip(gsx, gsy, strict=True):
+        reduced = np.column_stack([Cw, Wh @ ax, Wh @ ay])
+        Qr = orth(reduced)
+        cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
+        added = Wh @ cross
+        added_residual = added - Qr @ (Qr.T @ added) if Qr.size else added
+        Qa = orth(added_residual)
+        prepared.append((Qr, Qa, int(Qa.shape[1]), int(
+            reduced.shape[0] - Qr.shape[1] - Qa.shape[1])))
+    return tuple(prepared)
+
+
+def _prepared_components_over_Y(Yw, prepared):
+    """Score a response block with fixed, column-independent reduction order."""
+    from scipy import stats
+
+    Yw = np.asarray(Yw, float)
+    output = np.full((len(prepared), Yw.shape[1]), np.nan)
+    for component, (Qr, Qa, dfn, dfd) in enumerate(prepared):
+        if dfn < 1 or dfd < 1:
+            continue
+        if Qr.size:
+            reduced_coef = np.einsum(
+                "ij,ik->jk", Qr, Yw, optimize=False)
+            y_residual = Yw - np.einsum(
+                "ij,jk->ik", Qr, reduced_coef, optimize=False)
+        else:
+            y_residual = Yw.copy()
+        added_coef = np.einsum(
+            "ij,ik->jk", Qa, y_residual, optimize=False)
+        added_ss = np.einsum(
+            "ij,ij->j", added_coef, added_coef, optimize=False)
+        full_residual = y_residual - np.einsum(
+            "ij,jk->ik", Qa, added_coef, optimize=False)
+        rss_full = np.einsum(
+            "ij,ij->j", full_residual, full_residual, optimize=False)
+        denominator = rss_full / dfd
+        bad = denominator <= 1e-300
+        f_stat = added_ss / dfn / np.where(bad, 1.0, denominator)
+        p_value = stats.f.sf(np.maximum(f_stat, 0.0), dfn, dfd)
+        output[component] = np.where(
+            bad, np.where(added_ss > 1e-300, 0.0, np.nan), p_value)
+    return output
 
 
 def _interact_result(interact_module, **values):
@@ -549,6 +709,121 @@ def _family_provenance(
     }
 
 
+def _array_identity(values: np.ndarray) -> dict:
+    """Hash an array together with shape and dtype without phenotype semantics."""
+    array = np.asarray(values)
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode())
+    digest.update(b"\0")
+    digest.update(json.dumps(array.shape, separators=(",", ":")).encode())
+    digest.update(b"\0")
+    if array.flags.c_contiguous:
+        digest.update(memoryview(array).cast("B"))
+    else:
+        digest.update(np.ascontiguousarray(array).tobytes(order="C"))
+    return {
+        "shape": list(array.shape),
+        "dtype": array.dtype.str,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _text_identity(values) -> str:
+    body = json.dumps(
+        values, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode()
+    return hashlib.sha256(body).hexdigest()
+
+
+def _checkpoint_manifest(
+    subdata,
+    family,
+    expanded,
+    scores,
+    y_raw,
+    sample_idx,
+    identities,
+    *,
+    hypothesis_unit,
+    family_scope,
+    bootstrap_B,
+    bootstrap_seed,
+    checkpoint_block_size,
+    cap,
+    n_pc,
+    grm_method,
+    maf_min,
+    burden_maf,
+    min_snp,
+    covariates,
+    alpha,
+    inferential,
+    manifest_context,
+) -> dict:
+    """Bind every inference-relevant canonical group input to one run ID."""
+    from . import __version__
+    from .resampling_checkpoint import CHECKPOINT_SCHEMA_VERSION
+
+    subgenome_identity = {}
+    for sub in family.subgenomes:
+        data = subdata[sub]
+        gene_map = [
+            [str(gene), [int(index) for index in np.asarray(indices, int)]]
+            for gene, indices in sorted(data.gene_snp.items())
+        ]
+        subgenome_identity[sub] = {
+            "dosage": _array_identity(data.X),
+            "samples_sha256": _text_identity([str(value) for value in data.samples]),
+            "gene_snp_sha256": _text_identity(gene_map),
+        }
+    covariate_identity = {"configured": bool(covariates)}
+    if covariates:
+        covariate_identity["n_pcs"] = int(covariates.get("n_pcs", 0))
+        extra = covariates.get("extra")
+        covariate_identity["extra"] = (
+            _array_identity(extra) if extra is not None else None)
+    provenance = _family_provenance(family, expanded)
+    return {
+        "schema": "homoeogwas-omnib-bootstrap-manifest-v1",
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "indexed_score_microblock": INDEXED_SCORE_MICROBLOCK,
+        "implementation_version": __version__,
+        "family": provenance | {
+            "subgenomes": list(family.subgenomes),
+            "group_ids": list(family.group_ids),
+            "hypothesis_ids": [record["hypothesis_id"] for record in identities],
+        },
+        "hypothesis_unit": hypothesis_unit,
+        "family_scope": family_scope,
+        "subset_order": 2,
+        "transform": "INT",
+        "bootstrap": {"B": bootstrap_B, "seed": bootstrap_seed},
+        "calibration": {
+            "alpha": float(alpha),
+            "inferential": bool(inferential),
+            "method": "parametric_bootstrap_minp_plus_one",
+        },
+        "checkpoint_block_size": checkpoint_block_size,
+        "phenotype_raw": _array_identity(np.asarray(y_raw, float)),
+        "phenotype_analyzed": _array_identity(scores.y),
+        "sample_index": _array_identity(np.asarray(sample_idx, int)),
+        "covariates": covariate_identity,
+        "grm": {"method": grm_method, "maf_min": float(maf_min)},
+        "burden": {
+            "cap": int(cap), "n_pc": int(n_pc), "maf_min": float(burden_maf),
+            "min_snp": int(min_snp),
+        },
+        "subgenome_inputs": subgenome_identity,
+        "context": manifest_context or {},
+    }
+
+
+def _select_primary_matrix(edge_p, group_p, hypothesis_unit, family_scope):
+    if family_scope == "joint":
+        return np.vstack([edge_p, group_p])
+    return edge_p if hypothesis_unit == "edge" else group_p
+
+
 def run_group_scan_omnib(
     subdata,
     family: MasterGroupFamily,
@@ -571,6 +846,9 @@ def run_group_scan_omnib(
     full_dump_path=None,
     alpha=0.05,
     inferential=True,
+    checkpoint_dir=None,
+    checkpoint_block_size=25,
+    checkpoint_manifest_context=None,
 ):
     """Run an edge, group or jointly calibrated omniB family.
 
@@ -595,22 +873,113 @@ def run_group_scan_omnib(
     bootstrap_B = int(bootstrap_B)
     if bootstrap_B < 1:
         raise ValueError("formal calibration requires at least one bootstrap replicate")
+    checkpoint_metadata = None
+    if checkpoint_dir is None:
+        # Keep the historical, single-stream bootstrap byte-for-byte unchanged
+        # unless indexed checkpointing is explicitly requested.
+        scores, expanded = score_omnib_family(
+            subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
+            transform="INT", bootstrap_B=bootstrap_B,
+            bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+            grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
+            min_snp=min_snp, covariates=covariates)
+        primary_p, identities, family_id, calibrated_layers = (
+            _select_primary_family(
+                scores, family, expanded, hypothesis_unit, family_scope))
+        if primary_p.ndim != 2 or primary_p.shape[1] != bootstrap_B + 1:
+            raise RuntimeError(
+                "omniB scorer returned an invalid observed/bootstrap matrix shape")
+        observed = primary_p[:, 0]
+        finite = np.isfinite(observed)
+        if not finite.any():
+            raise ValueError(
+                "declared omniB primary family has no estimable hypotheses")
+    else:
+        from .resampling_checkpoint import (
+            CHECKPOINT_SCHEMA_VERSION,
+            CheckpointStore,
+            canonical_manifest_id,
+        )
 
-    scores, expanded = score_omnib_family(
-        subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
-        transform="INT", bootstrap_B=bootstrap_B,
-        bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
-        grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
-        min_snp=min_snp, covariates=covariates)
-    primary_p, identities, family_id, calibrated_layers = _select_primary_family(
-        scores, family, expanded, hypothesis_unit, family_scope)
-    if primary_p.ndim != 2 or primary_p.shape[1] != bootstrap_B + 1:
-        raise RuntimeError(
-            "omniB scorer returned an invalid observed/bootstrap matrix shape")
-    observed = primary_p[:, 0]
-    finite = np.isfinite(observed)
-    if not finite.any():
-        raise ValueError("declared omniB primary family has no estimable hypotheses")
+        if (
+            isinstance(checkpoint_block_size, bool)
+            or not isinstance(checkpoint_block_size, (int, np.integer))
+            or int(checkpoint_block_size) < 1
+        ):
+            raise ValueError("checkpoint_block_size must be an integer >= 1")
+        checkpoint_block_size = int(checkpoint_block_size)
+        scores, expanded = score_omnib_family(
+            subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
+            transform="INT", bootstrap_B=0,
+            bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+            grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
+            min_snp=min_snp, covariates=covariates)
+        observed_matrix, identities, family_id, calibrated_layers = (
+            _select_primary_family(
+                scores, family, expanded, hypothesis_unit, family_scope))
+        if observed_matrix.ndim != 2 or observed_matrix.shape[1] != 1:
+            raise RuntimeError(
+                "omniB scorer returned an invalid observed matrix shape")
+        observed = observed_matrix[:, 0]
+        finite = np.isfinite(observed)
+        if not finite.any():
+            raise ValueError(
+                "declared omniB primary family has no estimable hypotheses")
+        manifest = _checkpoint_manifest(
+            subdata, family, expanded, scores, y_raw, sample_idx, identities,
+            hypothesis_unit=hypothesis_unit,
+            family_scope=family_scope,
+            bootstrap_B=bootstrap_B,
+            bootstrap_seed=bootstrap_seed,
+            checkpoint_block_size=checkpoint_block_size,
+            cap=cap,
+            n_pc=n_pc,
+            grm_method=grm_method,
+            maf_min=maf_min,
+            burden_maf=burden_maf,
+            min_snp=min_snp,
+            covariates=covariates,
+            alpha=alpha,
+            inferential=inferential,
+            manifest_context=checkpoint_manifest_context,
+        )
+        manifest_id = canonical_manifest_id(manifest)
+        store = CheckpointStore(
+            checkpoint_dir, manifest_id, bootstrap_B,
+            checkpoint_block_size, base_seed=bootstrap_seed)
+        store.bind_manifest(manifest)
+        hypothesis_ids = [record["hypothesis_id"] for record in identities]
+        store.write_observed(observed, hypothesis_ids)
+        for start, stop in store.planned_ranges():
+            if store.has_range(start, stop):
+                continue
+            edge_null, group_null = score_omnib_null_indices(
+                scores, family, expanded, range(start, stop),
+                base_seed=bootstrap_seed, n_jobs=n_jobs)
+            block = _select_primary_matrix(
+                edge_null, group_null, hypothesis_unit, family_scope)
+            store.write_block(start, stop, block[finite])
+        primary_null = store.concatenate(require_complete=True)
+        if primary_null.shape != (int(finite.sum()), bootstrap_B):
+            raise RuntimeError(
+                "checkpoint primary null-p matrix has an invalid shape")
+        primary_p = np.full((observed.size, bootstrap_B + 1), np.nan)
+        primary_p[:, 0] = observed
+        primary_p[finite, 1:] = primary_null
+        checkpoint_metadata = {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "manifest_id": manifest_id,
+            "block_size": checkpoint_block_size,
+            "score_microblock_size": INDEXED_SCORE_MICROBLOCK,
+            "completed_ranges": [
+                [int(start), int(stop)]
+                for start, stop in store.completed_ranges()
+            ],
+            "primary_null_p_sha256": hashlib.sha256(
+                np.ascontiguousarray(primary_null).tobytes(order="C")
+            ).hexdigest(),
+        }
+
     finite_indices = np.flatnonzero(finite)
 
     # This is deliberately the sole calibration call for primary_only and joint.
@@ -731,6 +1100,22 @@ def run_group_scan_omnib(
         if finite[index] and observed[index] < bonferroni_alpha
     ]
     analytic = [records[index] for index in analytic_indices]
+    family_provenance = _family_provenance(family, expanded)
+    if checkpoint_metadata is not None:
+        family_provenance |= {
+            "checkpoint_manifest_id": checkpoint_metadata["manifest_id"],
+            "checkpoint_block_size": checkpoint_metadata["block_size"],
+            "checkpoint_completed_ranges": checkpoint_metadata[
+                "completed_ranges"],
+            "primary_null_p_sha256": checkpoint_metadata[
+                "primary_null_p_sha256"],
+        }
+    model_diagnostics = {
+        "bootstrap_fwer": fwer,
+        "family_provenance": family_provenance,
+    }
+    if checkpoint_metadata is not None:
+        model_diagnostics["resampling_checkpoint"] = checkpoint_metadata
     return _interact_result(
         I,
         trait="",
@@ -769,10 +1154,7 @@ def run_group_scan_omnib(
             "role": "descriptive_localization",
             "calibrated_layers": calibrated_layers,
         },
-        model_diagnostics={
-            "bootstrap_fwer": fwer,
-            "family_provenance": _family_provenance(family, expanded),
-        },
+        model_diagnostics=model_diagnostics,
         analytic_screen_n=len(analytic),
         analytic_screen_sig=analytic,
     )

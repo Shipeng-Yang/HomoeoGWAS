@@ -5,6 +5,7 @@ an injected interaction is detected in the correct subgenome-pair and isolated f
 others; a pure-noise null produces no Bonferroni hits. These guard the engine before the
 DL-weighting and multi-trait extensions are layered on.
 """
+import copy
 import json
 from types import SimpleNamespace
 
@@ -888,6 +889,43 @@ def test_group_mode_accepts_four_copies_but_refuses_fourway_statistic(statistic)
         I.validate_interact_config(cfg)
 
 
+def test_group_checkpoint_config_is_strict_and_canonical_only(tmp_path):
+    cfg = _canonical_group_config()
+    cfg["interact"]["calibration"]["checkpoint"] = {
+        "enabled": True,
+        "root": str(tmp_path / "checkpoint"),
+        "block_size": 25,
+    }
+    I.validate_interact_config(cfg)
+
+    for bad in (True, 0, 1.5, "25"):
+        invalid = copy.deepcopy(cfg)
+        invalid["interact"]["calibration"]["checkpoint"]["block_size"] = bad
+        with pytest.raises(SystemExit, match="checkpoint.block_size"):
+            I.validate_interact_config(invalid)
+    invalid = copy.deepcopy(cfg)
+    invalid["interact"]["calibration"]["checkpoint"]["root"] = ""
+    with pytest.raises(SystemExit, match="checkpoint.root"):
+        I.validate_interact_config(invalid)
+    invalid = copy.deepcopy(cfg)
+    invalid["interact"]["calibration"]["checkpoint"]["enabled"] = "yes"
+    with pytest.raises(SystemExit, match="checkpoint.enabled"):
+        I.validate_interact_config(invalid)
+
+    pair = _canonical_group_config(subgenomes=("A", "D"))
+    pair["interact"].update({
+        "mode": "pairwise",
+        "pairs": pair["interact"].pop("groups"),
+        "statistic": "burden",
+        "primary_multiplicity": "bonferroni",
+        "calibration": {"method": "permutation", "perm_B": 2000},
+    })
+    pair["interact"]["calibration"]["checkpoint"] = {
+        "enabled": True, "root": str(tmp_path / "pair"), "block_size": 25}
+    with pytest.raises(SystemExit, match="canonical group omniB"):
+        I.validate_interact_config(pair)
+
+
 @pytest.mark.parametrize(
     ("legacy_mode", "subgenomes", "table_key", "hypothesis_unit"),
     [
@@ -941,6 +979,9 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     )
     cfg["outputs"] = {
         "out_dir": str(out_dir), "full_ranking": True, "plots": False}
+    checkpoint_root = out_dir / "checkpoint"
+    cfg["interact"]["calibration"]["checkpoint"] = {
+        "enabled": True, "root": str(checkpoint_root), "block_size": 25}
     config = tmp_path / "config.yaml"
     config.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -980,6 +1021,8 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     assert kwargs["hypothesis_unit"] == "group"
     assert kwargs["family_scope"] == "primary_only"
     assert kwargs["bootstrap_B"] == 2000
+    assert kwargs["checkpoint_dir"] == str(checkpoint_root)
+    assert kwargs["checkpoint_block_size"] == 25
     payload = json.loads((out_dir / "interact_trait.json").read_text())
     provenance = payload["provenance"]
     assert provenance | {
@@ -2067,3 +2110,38 @@ def test_sensitivity_run_is_never_aborted_by_inference_only_guards():
                        pair_subs=("A", "D"), grm_method="grm_from_X",
                        primary_multiplicity="permutation_minp", inferential=False)
     assert r2.minp_perm_rejected is None and r2.sig is None
+
+
+def test_null_replicates_by_index_are_order_independent_and_not_retransformed():
+    from homoeogwas.resampling_checkpoint import replicate_seed
+
+    n = 6
+    kernels = {"A": np.eye(n)}
+    y = np.linspace(7.0, 12.0, n)
+    C = np.ones((n, 1))
+    W = np.eye(n)
+    V = np.diag(np.linspace(0.2, 0.7, n))
+    beta = np.array([10.0])
+    null_fit = (W, V, beta, {"A": 0.0, "e": 1.0})
+
+    values, returned_W, returned_cv = I.null_replicates_by_index(
+        kernels, y, C, indices=[4, 1], base_seed=2026,
+        null_fit=null_fit)
+    reversed_values, _, _ = I.null_replicates_by_index(
+        kernels, y, C, indices=[1, 4], base_seed=2026,
+        null_fit=null_fit)
+
+    np.testing.assert_array_equal(values[0], reversed_values[1])
+    np.testing.assert_array_equal(values[1], reversed_values[0])
+    root = np.diag(np.sqrt(np.diag(V)))
+    expected = 10.0 + root @ np.random.default_rng(
+        replicate_seed(2026, 4)).standard_normal(n)
+    np.testing.assert_array_equal(values[0], expected)
+    assert values[0].mean() > 5.0  # still on the analysis scale, not rank-INT
+    np.testing.assert_array_equal(returned_W, W)
+    assert returned_cv == {"A": 0.0, "e": 1.0}
+
+    with pytest.raises(ValueError, match="non-negative"):
+        I.null_replicates_by_index(
+            kernels, y, C, indices=[-1], base_seed=2026,
+            null_fit=null_fit)
