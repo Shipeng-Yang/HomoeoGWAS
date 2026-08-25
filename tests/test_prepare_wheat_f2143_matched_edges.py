@@ -190,6 +190,14 @@ def test_prepare_emits_canonical_edge_config_with_task7_checkpoint_policy(
         "out_dir": str((tmp_path / "run").resolve()),
         "full_ranking": True,
     }
+    assert cfg["provenance"]["pre_run_manifest"] == str(
+        (tmp_path / "run" / "provenance" / "pre_run_manifest.json").resolve())
+    assert cfg["provenance"]["blas_thread_policy"] == {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    }
 
 
 def test_prepare_rejects_wrong_source_hash_before_copying(tmp_path, monkeypatch):
@@ -342,6 +350,12 @@ def test_prepare_production_validates_real_config_and_mapping_fingerprints(
     _write_resources(tmp_path, monkeypatch, samples)
     monkeypatch.setattr(PREP, "FROZEN_GROUP_SHA256", _digest(groups))
     monkeypatch.setattr(PREP, "FROZEN_PHENOTYPE_SHA256", _digest(phenotype))
+    monkeypatch.setattr(PREP, "capture_source_identity", lambda: {
+        "git_commit": "1" * 40,
+        "git_tree": "2" * 40,
+        "package_source_sha256": "3" * 64,
+        "source_clean": True,
+    })
 
     result = _prepare(groups, phenotype, tmp_path / "run", production=True)
     manifest = json.loads(Path(result.manifest).read_text())
@@ -353,6 +367,16 @@ def test_prepare_production_validates_real_config_and_mapping_fingerprints(
     assert manifest["n_groups"] == 2143
     assert manifest["n_samples"] == 827
     assert manifest["config_sha256"] == _digest(Path(result.config))
+    assert manifest["config"]["sha256"] == _digest(Path(result.config))
+    assert set(manifest["source_identity"]) == {
+        "git_commit", "git_tree", "package_source_sha256", "source_clean"}
+    assert len(manifest["source_identity"]["package_source_sha256"]) == 64
+    assert manifest["runtime_fingerprint"]["blas_thread_policy"] == {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    }
 
 
 def test_prepare_rejects_bim_npz_fingerprint_mismatch(tmp_path, monkeypatch):

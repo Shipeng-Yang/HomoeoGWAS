@@ -19,6 +19,12 @@ from typing import Any
 import yaml
 
 from homoeogwas import __version__
+from homoeogwas.formal_provenance import (
+    FORMAL_BLAS_THREAD_POLICY,
+    PRE_RUN_MANIFEST_SCHEMA,
+    capture_source_identity,
+    runtime_fingerprint,
+)
 from homoeogwas.group_family import (
     MasterGroupFamily,
     expand_pair_edges,
@@ -44,7 +50,7 @@ PRODUCTION_SAMPLE_COUNT = 827
 BOOTSTRAP_B = 2000
 BOOTSTRAP_SEED = 2026
 CHECKPOINT_BLOCK_SIZE = 25
-MANIFEST_SCHEMA = "homoeogwas-wheat-f2143-edge-pre-run-manifest-v1"
+MANIFEST_SCHEMA = PRE_RUN_MANIFEST_SCHEMA
 CONFIG_SCHEMA = "homoeogwas-canonical-group-omnib-v1"
 
 GENOTYPE_PREFIXES = {
@@ -378,6 +384,13 @@ def _build_config(
                 },
             },
         },
+        "provenance": {
+            # Non-circular binding rule: the config stores only this manifest
+            # reference; the manifest stores the final raw config SHA-256.
+            "pre_run_manifest": str(
+                (out_dir / "provenance" / "pre_run_manifest.json").resolve()),
+            "blas_thread_policy": dict(FORMAL_BLAS_THREAD_POLICY),
+        },
         "outputs": {"out_dir": str(out_dir.resolve()), "full_ranking": True},
     }
 
@@ -476,6 +489,12 @@ def prepare_wheat_inputs(
     ).encode("utf-8")
     _atomic_write_bytes(config_path, config_bytes)
     config_sha256 = _sha256_file(config_path)
+    source_identity = capture_source_identity()
+    if production and source_identity.get("source_clean") is not True:
+        raise RuntimeError(
+            "production preparation requires a clean source worktree so the "
+            "expected commit/tree/package identity is launchable")
+    expected_runtime = runtime_fingerprint(FORMAL_BLAS_THREAD_POLICY)
 
     validation = {
         "schema": "passed",
@@ -499,6 +518,8 @@ def prepare_wheat_inputs(
             "version": __version__,
             "preparation_script_sha256": _sha256_file(Path(__file__).resolve()),
         },
+        "source_identity": source_identity,
+        "runtime_fingerprint": expected_runtime,
         "production": bool(production),
         "source_group_id_column": id_column,
         "subgenomes": list(SUBGENOMES),
@@ -545,6 +566,9 @@ def prepare_wheat_inputs(
         "config": {
             "path": str(config_path),
             "sha256": config_sha256,
+            "binding_rule": (
+                "config embeds only provenance.pre_run_manifest path; pre-run "
+                "manifest embeds SHA-256 of final raw config bytes"),
         },
         "config_sha256": config_sha256,
         "validation": validation,

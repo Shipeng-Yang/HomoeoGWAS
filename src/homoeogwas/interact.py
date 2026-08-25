@@ -30,6 +30,7 @@ Config (YAML)::
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ import pandas as pd
 from scipy import stats
 
 from . import omnib_family as _family_score
+from .formal_provenance import FormalLaunchError, verify_formal_launch
 from .group_family import load_master_group_family
 from .interaction_config import normalize_interact_config
 
@@ -287,20 +289,94 @@ def scols_safe(M: np.ndarray) -> np.ndarray:
     return (M - mu) / sd
 
 
-def grm_from_X(X: np.ndarray) -> np.ndarray:
-    """Additive GRM from a dosage matrix (mean-impute, standardize, XX'/m), trace-normed + PSD-clipped."""
-    mu = np.nanmean(X, axis=0)
-    mu = np.where(np.isfinite(mu), mu, 0.0)
-    Xi = np.where(np.isnan(X), mu, X)
-    sd = Xi.std(0, ddof=0)
+def grm_from_X(
+    X: np.ndarray,
+    maf_min: float = 0.0,
+    *,
+    return_provenance: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict]:
+    """Build the standardized additive GRM and optionally bind its SNP filter.
+
+    A direct call with the default ``maf_min=0`` retains the historical
+    all-column implementation.  Canonical callers request provenance, which
+    activates finite-value handling and the declared inclusive MAF filter on
+    the already selected analysis-sample matrix.
+    """
+    X = np.asarray(X, float)
+    if X.ndim != 2:
+        raise ValueError("GRM dosage matrix must be two-dimensional")
+    if X.shape[0] < 1:
+        raise ValueError("GRM dosage matrix must contain at least one sample")
+    if not return_provenance and float(maf_min) == 0.0:
+        # Frozen direct-call compatibility path.
+        mu = np.nanmean(X, axis=0)
+        mu = np.where(np.isfinite(mu), mu, 0.0)
+        Xi = np.where(np.isnan(X), mu, X)
+        sd = Xi.std(0, ddof=0)
+        sd = np.where(sd > 1e-12, sd, 1.0)
+        Z = (Xi - mu) / sd
+        K = Z @ Z.T / Z.shape[1]
+        K = K / (np.trace(K) / K.shape[0])
+        w, Q = np.linalg.eigh(0.5 * (K + K.T))
+        w = np.clip(w, 1e-6, None)
+        K = (Q * w) @ Q.T
+        return K / (np.trace(K) / K.shape[0])
+
+    maf_min = float(maf_min)
+    if not np.isfinite(maf_min) or not 0.0 <= maf_min <= 0.5:
+        raise ValueError("maf_min must be finite and in [0, 0.5]")
+    finite = np.isfinite(X)
+    finite_count = finite.sum(axis=0)
+    finite_sum = np.where(finite, X, 0.0).sum(axis=0)
+    means = np.divide(
+        finite_sum,
+        finite_count,
+        out=np.full(X.shape[1], np.nan, float),
+        where=finite_count > 0,
+    )
+    allele_frequency = means / 2.0
+    maf = np.minimum(allele_frequency, 1.0 - allele_frequency)
+    retained = (
+        (finite_count > 0)
+        & np.isfinite(allele_frequency)
+        & (maf >= maf_min)
+    )
+    n_used = int(retained.sum())
+    if n_used == 0:
+        raise ValueError(
+            "zero variants survive the analysis-sample GRM filter "
+            f"(n_variants_input={X.shape[1]}, maf_min={maf_min:g})"
+        )
+    selected = X[:, retained]
+    selected_means = means[retained]
+    selected = np.where(np.isfinite(selected), selected, selected_means)
+    sd = selected.std(axis=0, ddof=0)
     sd = np.where(sd > 1e-12, sd, 1.0)
-    Z = (Xi - mu) / sd
-    K = Z @ Z.T / Z.shape[1]
-    K = K / (np.trace(K) / K.shape[0])
+    Z = (selected - selected_means) / sd
+    K = Z @ Z.T / n_used
+    trace_scale = np.trace(K) / K.shape[0]
+    if not np.isfinite(trace_scale) or trace_scale <= 0.0:
+        raise ValueError(
+            "surviving analysis-sample GRM variants have zero standardized "
+            f"variance (n_variants_used={n_used}, maf_min={maf_min:g})"
+        )
+    K = K / trace_scale
     w, Q = np.linalg.eigh(0.5 * (K + K.T))
     w = np.clip(w, 1e-6, None)
     K = (Q * w) @ Q.T
-    return K / (np.trace(K) / K.shape[0])
+    K = K / (np.trace(K) / K.shape[0])
+    mask_bytes = np.ascontiguousarray(retained.astype(np.uint8)).tobytes()
+    provenance = {
+        "n_variants_input": int(X.shape[1]),
+        "n_variants_used": n_used,
+        "maf_min": maf_min,
+        "maf_boundary": "inclusive_greater_than_or_equal",
+        "missing_value_policy": "analysis_sample_finite_mean_imputation",
+        "retained_variant_mask_encoding": "uint8_input_variant_order",
+        "retained_variant_mask": retained.astype(np.uint8).tolist(),
+        "retained_variant_mask_sha256": hashlib.sha256(mask_bytes).hexdigest(),
+    }
+    return (K, provenance) if return_provenance else K
 
 
 def whiten_multi(kernels: dict[str, np.ndarray], y: np.ndarray, X: np.ndarray = None, seed: int = 42):
@@ -999,18 +1075,31 @@ def _load_subgenome(
     return SubgenomeData(X=X, gene_snp=gene_snp, samples=samples, chunk=bed)
 
 
-def _build_grm(sd: SubgenomeData, sample_idx: np.ndarray, method: str, maf_min: float) -> np.ndarray:
+def _build_grm(
+    sd: SubgenomeData,
+    sample_idx: np.ndarray,
+    method: str,
+    maf_min: float,
+    *,
+    return_provenance: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict]:
     """Subgenome GRM restricted to valid samples, trace-normed. ``compute_grm_maf`` reuses the
     package GRM; ``grm_from_X`` is the all-SNP PSD-clipped variant (sensitivity)."""
     n_t = sample_idx.size
     if method == "compute_grm_maf":
         from .grm import compute_grm
-        K, _ = compute_grm(sd.chunk, maf_min=maf_min)
+        K, info = compute_grm(sd.chunk, maf_min=maf_min)
         K = np.asarray(K)[np.ix_(sample_idx, sample_idx)]
-        return K / (np.trace(K) / n_t)
+        K = K / (np.trace(K) / n_t)
+        return (K, dict(info)) if return_provenance else K
     if method == "grm_from_X":
-        K = grm_from_X(sd.X)[np.ix_(sample_idx, sample_idx)]
-        return K / (np.trace(K) / n_t)
+        # Selection precedes every missingness, allele-frequency and MAF
+        # decision. Held-out FAM rows therefore cannot alter the formal null.
+        analysis_X = np.asarray(sd.X, float)[np.asarray(sample_idx, int), :]
+        K, provenance = grm_from_X(
+            analysis_X, maf_min=maf_min, return_provenance=True)
+        K = K / (np.trace(K) / n_t)
+        return (K, provenance) if return_provenance else K
     raise ValueError(f"unknown grm.method '{method}' (use compute_grm_maf | grm_from_X)")
 
 
@@ -2987,6 +3076,11 @@ def cmd_interact(args) -> int:
     t0 = time.time()
     with open(args.config) as fh:
         cfg = yaml.safe_load(fh)
+    try:
+        verified_launch = verify_formal_launch(args.config, cfg)
+    except FormalLaunchError as exc:
+        print(f"ERROR: formal launch identity check failed: {exc}")
+        return 1
     cfg = normalize_interact_config(cfg)
     validate_interact_config(cfg)
     ic = cfg["interact"]
@@ -3183,6 +3277,9 @@ def cmd_interact(args) -> int:
             inferential=not calibration_qa_only,
             checkpoint_dir=checkpoint_dir,
             checkpoint_block_size=checkpoint_block_size,
+            checkpoint_manifest_context=(
+                verified_launch.checkpoint_context
+                if verified_launch is not None else None),
         )
         r.trait = trait
         results = {"INT": r.__dict__}

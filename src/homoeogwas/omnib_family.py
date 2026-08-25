@@ -12,6 +12,7 @@ from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edg
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
+PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v1"
 
 
 @dataclass
@@ -36,6 +37,7 @@ class OmniBFamilyScores:
     null_design: np.ndarray | None = field(default=None, repr=False)
     null_kernels: dict = field(default_factory=dict, repr=False)
     projection_cache: dict = field(default_factory=dict, repr=False)
+    grm_provenance: dict = field(default_factory=dict)
 
 
 def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
@@ -141,10 +143,20 @@ def score_omnib_family(
     # exact same whitener and bootstrap response columns.
     subs = list(subdata)
     n = sample_idx.size
-    kernels = {
-        sub: I._build_grm(subdata[sub], sample_idx, grm_method, maf_min)
-        for sub in subs
-    }
+    kernels = {}
+    grm_provenance = {}
+    for sub in subs:
+        kernel, provenance = I._build_grm(
+            subdata[sub], sample_idx, grm_method, maf_min,
+            return_provenance=True)
+        kernels[sub] = kernel
+        # The full retained mask is useful to direct callers but would make a
+        # formal manifest scale with every input variant. Its deterministic
+        # hash and counts are the immutable checkpoint identity.
+        grm_provenance[sub] = {
+            key: value for key, value in provenance.items()
+            if key != "retained_variant_mask"
+        }
     C = None
     covariate_metadata = {"policy": "none"}
     if covariates:
@@ -275,7 +287,109 @@ def score_omnib_family(
         null_beta=np.asarray(beta, float),
         null_design=C_design,
         null_kernels=kernels,
+        grm_provenance=grm_provenance,
     ), expanded
+
+
+def _score_prepared_responses(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    responses: np.ndarray,
+    *,
+    n_jobs: int = 8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Score response columns through one frozen prepared omniB algorithm."""
+    from joblib import Parallel, delayed
+
+    from . import interact as I
+
+    responses = np.asarray(responses, float)
+    if responses.ndim == 1:
+        responses = responses.reshape(-1, 1)
+    if responses.ndim != 2 or responses.shape[0] != scores.W.shape[0]:
+        raise ValueError(
+            "prepared omniB responses must be sample-by-response and aligned "
+            "to the frozen null fit")
+    response_count = int(responses.shape[1])
+    if response_count == 0:
+        return (
+            np.empty((len(expanded.edges), 0), float),
+            np.empty((len(family.group_ids), 0), float),
+            np.empty((len(expanded.edges), len(OMNIB_COMPONENT_NAMES), 0), float),
+        )
+    # Whiten each response independently, then batch only column-independent
+    # contractions below. General matrix multiplication may select a reduction
+    # strategy from the block shape and thereby change the last bits.
+    whitened = np.column_stack([
+        scores.W @ responses[:, column] for column in range(response_count)])
+    whitened_blocks = []
+    for start in range(0, response_count, INDEXED_SCORE_MICROBLOCK):
+        stop = min(start + INDEXED_SCORE_MICROBLOCK, response_count)
+        width = stop - start
+        padded = np.zeros(
+            (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
+        padded[:, :width] = whitened[:, start:stop]
+        whitened_blocks.append((start, stop, padded))
+    Cw = scores.W @ scores.null_design
+    edge_p = np.full((len(expanded.edges), response_count), np.nan)
+    edge_components = np.full(
+        (len(expanded.edges), len(OMNIB_COMPONENT_NAMES), response_count),
+        np.nan,
+    )
+    valid_indices = np.flatnonzero(scores.edge_estimable)
+    for edge_index in valid_indices:
+        edge = expanded.edges[int(edge_index)]
+        cache_key = int(edge_index)
+        if cache_key not in scores.projection_cache:
+            scores.projection_cache[cache_key] = _prepare_omnib_nested_designs(
+                scores.W, Cw,
+                scores.feature_cache[(edge.sub_x, edge.gene_x)],
+                scores.feature_cache[(edge.sub_y, edge.gene_y)])
+
+    def score_block(bounds):
+        lo, hi = bounds
+        edge_indices = valid_indices[lo:hi]
+        values = np.full((edge_indices.size, response_count), np.nan)
+        component_values = np.full(
+            (edge_indices.size, len(OMNIB_COMPONENT_NAMES), response_count),
+            np.nan,
+        )
+        for local, edge_index in enumerate(edge_indices):
+            cache_key = int(edge_index)
+            prepared = scores.projection_cache[cache_key]
+            for start, stop, response_block in whitened_blocks:
+                components = _prepared_components_over_Y(
+                    response_block, prepared)[:, :stop - start]
+                component_values[local, :, start:stop] = components
+                values[local, start:stop] = np.asarray([
+                    I.acat(components[:, column])
+                    for column in range(stop - start)
+                ], float)
+        return edge_indices, values, component_values
+
+    if valid_indices.size:
+        step = max(1, valid_indices.size // (int(n_jobs) * 8))
+        blocks = [
+            (lo, min(lo + step, valid_indices.size))
+            for lo in range(0, valid_indices.size, step)
+        ]
+        for edge_indices, values, component_values in Parallel(
+            n_jobs=int(n_jobs), backend="threading"
+        )(delayed(score_block)(block) for block in blocks):
+            edge_p[edge_indices] = values
+            edge_components[edge_indices] = component_values
+
+    group_p = np.full((len(family.group_ids), response_count), np.nan)
+    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
+        selected = np.asarray(edge_indices, int)
+        if selected.size == 1:
+            group_p[group_index] = edge_p[selected[0]]
+        else:
+            for column in range(response_count):
+                group_p[group_index, column] = I.acat(
+                    edge_p[selected, column])
+    return edge_p, group_p, edge_components
 
 
 def score_omnib_null_indices(
@@ -288,8 +402,6 @@ def score_omnib_null_indices(
     n_jobs: int = 8,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Score only the requested indexed null responses using prepared features."""
-    from joblib import Parallel, delayed
-
     from . import interact as I
 
     requested = tuple(int(index) for index in indices)
@@ -311,69 +423,12 @@ def score_omnib_null_indices(
         scores.null_beta,
         scores.covariance_components,
     )
-    responses, _, _ = I.null_replicates_by_index(
+    response_list, _, _ = I.null_replicates_by_index(
         scores.null_kernels, scores.y, scores.null_design,
         indices=requested, base_seed=base_seed, null_fit=null_fit)
-    # Whiten each response independently, then batch only column-independent
-    # contractions below. General matrix multiplication may select a reduction
-    # strategy from the block shape and thereby change the last bits.
-    whitened = np.column_stack([
-        scores.W @ np.asarray(response, float) for response in responses])
-    whitened_blocks = []
-    for start in range(0, len(requested), INDEXED_SCORE_MICROBLOCK):
-        stop = min(start + INDEXED_SCORE_MICROBLOCK, len(requested))
-        width = stop - start
-        padded = np.zeros(
-            (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
-        padded[:, :width] = whitened[:, start:stop]
-        whitened_blocks.append((start, stop, padded))
-    Cw = scores.W @ scores.null_design
-    edge_p = np.full((len(expanded.edges), len(requested)), np.nan)
-    valid_indices = np.flatnonzero(scores.edge_estimable)
-
-    def score_block(bounds):
-        lo, hi = bounds
-        edge_indices = valid_indices[lo:hi]
-        values = np.full((edge_indices.size, len(requested)), np.nan)
-        for local, edge_index in enumerate(edge_indices):
-            edge = expanded.edges[int(edge_index)]
-            cache_key = int(edge_index)
-            prepared = scores.projection_cache.get(cache_key)
-            if prepared is None:
-                prepared = _prepare_omnib_nested_designs(
-                    scores.W, Cw,
-                    scores.feature_cache[(edge.sub_x, edge.gene_x)],
-                    scores.feature_cache[(edge.sub_y, edge.gene_y)])
-                scores.projection_cache[cache_key] = prepared
-            for start, stop, response_block in whitened_blocks:
-                components = _prepared_components_over_Y(
-                    response_block, prepared)[:, :stop - start]
-                values[local, start:stop] = np.asarray([
-                    I.acat(components[:, column])
-                    for column in range(stop - start)
-                ], float)
-        return edge_indices, values
-
-    if valid_indices.size:
-        step = max(1, valid_indices.size // (int(n_jobs) * 8))
-        blocks = [
-            (lo, min(lo + step, valid_indices.size))
-            for lo in range(0, valid_indices.size, step)
-        ]
-        for edge_indices, values in Parallel(
-            n_jobs=int(n_jobs), backend="threading"
-        )(delayed(score_block)(block) for block in blocks):
-            edge_p[edge_indices] = values
-
-    group_p = np.full((len(family.group_ids), len(requested)), np.nan)
-    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
-        selected = np.asarray(edge_indices, int)
-        if selected.size == 1:
-            group_p[group_index] = edge_p[selected[0]]
-        else:
-            for column in range(len(requested)):
-                group_p[group_index, column] = I.acat(
-                    edge_p[selected, column])
+    responses = np.column_stack(response_list)
+    edge_p, group_p, _ = _score_prepared_responses(
+        scores, family, expanded, responses, n_jobs=n_jobs)
     return edge_p, group_p
 
 
@@ -785,6 +840,7 @@ def _checkpoint_manifest(
     return {
         "schema": "homoeogwas-omnib-bootstrap-manifest-v1",
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "score_algorithm": PREPARED_SCORE_ALGORITHM,
         "indexed_score_microblock": INDEXED_SCORE_MICROBLOCK,
         "implementation_version": __version__,
         "family": provenance | {
@@ -806,7 +862,11 @@ def _checkpoint_manifest(
         "phenotype_analyzed": _array_identity(scores.y),
         "sample_index": _array_identity(np.asarray(sample_idx, int)),
         "covariates": covariate_identity,
-        "grm": {"method": grm_method, "maf_min": float(maf_min)},
+        "grm": {
+            "method": grm_method,
+            "maf_min": float(maf_min),
+            "subgenomes": scores.grm_provenance,
+        },
         "burden": {
             "cap": int(cap), "n_pc": int(n_pc), "maf_min": float(burden_maf),
             "min_snp": int(min_snp),
@@ -912,6 +972,14 @@ def run_group_scan_omnib(
             bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates)
+        prepared_edge, prepared_group, prepared_components = (
+            _score_prepared_responses(
+                scores, family, expanded, scores.y.reshape(-1, 1),
+                n_jobs=n_jobs))
+        scores.edge_p = prepared_edge
+        scores.group_p = prepared_group
+        scores.edge_components_obs = prepared_components[:, :, 0]
+        scores.group_estimable = np.isfinite(prepared_group[:, 0])
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(
                 scores, family, expanded, hypothesis_unit, family_scope))
@@ -966,6 +1034,7 @@ def run_group_scan_omnib(
             "manifest_id": manifest_id,
             "block_size": checkpoint_block_size,
             "score_microblock_size": INDEXED_SCORE_MICROBLOCK,
+            "score_algorithm": PREPARED_SCORE_ALGORITHM,
             "completed_ranges": [
                 [int(start), int(stop)]
                 for start, stop in store.completed_ranges()
@@ -1108,6 +1177,11 @@ def run_group_scan_omnib(
     model_diagnostics = {
         "bootstrap_fwer": fwer,
         "family_provenance": family_provenance,
+        "grm_provenance": {
+            "method": grm_method,
+            "maf_min": float(maf_min),
+            "subgenomes": scores.grm_provenance,
+        },
     }
     if checkpoint_metadata is not None:
         model_diagnostics["resampling_checkpoint"] = checkpoint_metadata
