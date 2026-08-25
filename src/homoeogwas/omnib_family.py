@@ -850,6 +850,43 @@ def omnib_fwer_consistency_flags(payload: dict) -> tuple[str, ...]:
     )
     if mapped_ids is None or mapped_ids != rejected_ids:
         flags.append("OMNIB_FWER_REJECTED_INDEX_MISMATCH")
+
+    top_sig = payload.get("sig")
+    hit_records_ok = isinstance(top_sig, list) and top_sig == fwer_sig
+    if (
+        valid_indices
+        and isinstance(fwer_sig, list)
+        and len(fwer_sig) == len(rejected_indices)
+    ):
+        for full_index, hit in zip(rejected_indices, fwer_sig, strict=True):
+            if not isinstance(hit, dict):
+                hit_records_ok = False
+                break
+            try:
+                hit_p = float(hit.get("p_interaction"))
+                hit_adjusted = float(hit.get("p_adjusted_bootstrap_minp"))
+                expected_p = float(observed[full_index])
+                expected_adjusted = float(adjusted[full_index])
+            except (TypeError, ValueError):
+                hit_records_ok = False
+                break
+            if not (
+                hit.get("hypothesis_id") == ids[full_index]
+                and np.isfinite(hit_p)
+                and np.isfinite(expected_p)
+                and hit_p == expected_p
+                and np.isfinite(hit_adjusted)
+                and np.isfinite(expected_adjusted)
+                and hit_adjusted == expected_adjusted
+                and hit.get("primary_sig") is True
+                and hit.get("p_unestimable") is False
+            ):
+                hit_records_ok = False
+                break
+    elif valid_indices:
+        hit_records_ok = False
+    if not hit_records_ok:
+        flags.append("OMNIB_FWER_HIT_RECORD_MISMATCH")
     return tuple(dict.fromkeys(flags))
 
 

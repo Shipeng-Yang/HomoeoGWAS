@@ -298,3 +298,50 @@ def test_rejected_full_indices_must_map_in_order_to_rejected_ids(monkeypatch):
     fwer["rejected_indices"] = list(reversed(fwer["rejected_indices"]))
     assert "OMNIB_FWER_REJECTED_INDEX_MISMATCH" in set(
         F.omnib_fwer_consistency_flags(payload))
+
+
+def _change_top_level_hit_p(payload):
+    payload["sig"][0]["p_interaction"] += 0.001
+
+
+def _change_fwer_hit_adjusted_p(payload):
+    payload["model_diagnostics"]["bootstrap_fwer"]["sig"][0][
+        "p_adjusted_bootstrap_minp"] += 0.001
+
+
+def _change_both_hit_copies(payload, field, value):
+    payload["sig"][0][field] = value
+    payload["model_diagnostics"]["bootstrap_fwer"]["sig"][0][field] = value
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _change_top_level_hit_p,
+        _change_fwer_hit_adjusted_p,
+        lambda payload: _change_both_hit_copies(
+            payload, "primary_sig", False),
+        lambda payload: _change_both_hit_copies(
+            payload, "p_unestimable", True),
+    ],
+)
+def test_rejected_hit_records_must_match_each_other_and_full_vectors(
+        monkeypatch, mutate):
+    payload = _forced_hit_payload(monkeypatch)
+    mutate(payload)
+    assert "OMNIB_FWER_HIT_RECORD_MISMATCH" in set(
+        F.omnib_fwer_consistency_flags(payload))
+
+
+def test_empty_rejection_records_are_valid_when_every_authority_is_empty(monkeypatch):
+    family, scores, expanded = _fixed_scores()
+    monkeypatch.setattr(
+        F, "score_omnib_family", lambda *args, **kwargs: (scores, expanded))
+    payload = asdict(run_group_scan_omnib(
+        {}, family, np.arange(4.0), np.arange(4),
+        hypothesis_unit="edge", family_scope="primary_only",
+        transform="INT", bootstrap_B=3))
+    assert payload["sig"] == []
+    assert payload["model_diagnostics"]["bootstrap_fwer"]["sig"] == []
+    assert "OMNIB_FWER_HIT_RECORD_MISMATCH" not in set(
+        F.omnib_fwer_consistency_flags(payload))
