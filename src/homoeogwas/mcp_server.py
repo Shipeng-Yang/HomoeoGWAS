@@ -130,16 +130,29 @@ def build_server():
                         subgenomes: list[str], bed_prefixes: dict[str, str],
                         snp_to_gene: dict[str, str], out_dir: str,
                         pairs: str | None = None, triads: str | None = None,
-                        perm_b: int = 200, n_jobs: int = 8,
+                        groups: str | None = None,
+                        hypothesis_unit: str | None = None,
+                        subset_order: int = 2,
+                        family_scope: str = "primary_only",
+                        perm_b: int = 2000, n_jobs: int = 8,
+                        statistic: str = "omniB",
                         dry_run: bool = False) -> dict:
-        """Run the homoeolog-pair interaction test; mode is inferred from ploidy
-        (2→pairwise needs ``pairs``, 3→triad needs ``triads``; 4+ is refused —
-        run subsets). Generates the interact YAML and runs it."""
+        """Run the unified homoeolog-group interaction workflow.
+
+        Supply one ``groups`` table with ``gene_<subgenome>`` columns. omniB
+        tests all pair edges in one family; four copies yield six edges and no
+        fourth-order coefficient. The workflow generates YAML, validates,
+        interacts, audits and summarizes. Legacy ``pairs``/``triads`` aliases
+        remain accepted.
+        """
         return _safe(
             workflow.run_interaction, phenotype=phenotype, sample_col=sample_col,
             trait=trait, subgenomes=subgenomes, bed_prefixes=bed_prefixes,
             snp_to_gene=snp_to_gene, out_dir=out_dir, pairs=pairs, triads=triads,
-            perm_b=perm_b, n_jobs=n_jobs, dry_run=dry_run)
+            groups=groups, hypothesis_unit=hypothesis_unit,
+            subset_order=subset_order, family_scope=family_scope,
+            perm_b=perm_b, n_jobs=n_jobs, statistic=statistic,
+            dry_run=dry_run)
 
     @mcp.tool()
     def make_plots(results_dir: str, formats: str = "png,pdf,svg",

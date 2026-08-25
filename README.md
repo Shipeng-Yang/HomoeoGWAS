@@ -142,31 +142,53 @@ flowchart LR
     end
 
     subgraph INT["homoeolog-interaction test"]
-        I["pair / clique<br/>burden product"] --> N["ACAT omnibus"]
+        I["SNP-to-gene +<br/>homoeolog groups"] --> N["pair-edge omniB<br/>burden · PC1 · kernel"]
+        N --> C["kinship-preserving<br/>bootstrap"]
     end
 
     S --> K
     S --> I
     R --> V["variance fingerprint<br/>per-subgenome PVE"]
     SC --> O["Manhattan · QQ · λ_GC"]
-    N --> W["interaction network<br/>pairwise / triad subsets"]
-    SC -. optional .-> D["zero-shot DL prior<br/>re-ranking"]
+    C --> W["interaction dossier<br/>edge / group family"]
+    V --> A["evidence audit"]
+    O --> A
+    W --> A
 
     classDef stage fill:#1F577B,stroke:#13384f,color:#ffffff;
     classDef out   fill:#FBFAF7,stroke:#368650,color:#2A2A2A;
     classDef star  fill:#FBEDEC,stroke:#CB3E35,color:#2A2A2A,font-weight:bold;
-    classDef opt   fill:#F3ECE2,stroke:#C0584C,color:#2A2A2A,stroke-dasharray:4 3;
-    class G,S,K,R,SC,I,N stage;
+    class G,S,K,R,SC,I,N,C stage;
     class O out;
-    class V,W star;
-    class D opt;
+    class V,W,A star;
     style MODEL fill:#F6F9FB,stroke:#1F577B,color:#1F577B;
     style INT   fill:#FCF6EE,stroke:#C0584C,color:#C0584C;
 ```
 
-The two red-bordered boxes — the **variance fingerprint** and the **interaction
-network** — are HomoeoGWAS's two distinctive outputs; everything else is standard
-GWAS machinery made subgenome-aware.
+The red-bordered boxes — the **variance fingerprint**, **interaction dossier**
+and **evidence audit** — are HomoeoGWAS's distinctive outputs.
+
+### One interaction contract across ploidies
+
+New interaction runs use one master `group_id,gene_<S>...` table and canonical
+`mode: group`. A two-copy group has one pair edge, a three-copy group has three,
+and a four-copy group has six. Edge omniB is the shared statistical primitive;
+group omniB is ACAT over the group's pair edges. All directions share one
+all-subgenome null model and one bootstrap-minP family—never separate AB/AD/BD
+runs followed by a factor correction.
+
+The generated config is
+`<out_dir>/configs/interact.generated.group.omnib.yaml`. It declares one primary
+unit: `edge` for formal homoeolog-pair discoveries, or `group` for formal
+within-group omnibus evidence. The other layer and the three omniB components
+are localization only unless `family_scope: joint` calibrates their union once.
+Legacy pairwise/triad omniB configs remain readable. Formal canonical output is
+INT-only; raw-scale sensitivity cannot inherit discovery fields.
+
+A four-copy group therefore uses six supported pair interactions. HomoeoGWAS
+never fits or claims a direct fourth-order coefficient. See the
+[interaction input contract](docs/interact_inputs.md) and the
+[strawberry example](docs/examples/strawberry_octoploid.md).
 
 ## Adding a new species
 
@@ -176,13 +198,13 @@ Any allopolyploid is supported through configuration alone:
    chromosome naming / `chrom_map`, the reference assembly path, and `ploidy`.
    The schema in `src/homoeogwas/species_config.py` validates it.
 2. `homoeogwas split --species-yaml <yaml> --vcf <in.vcf.gz> -o ...` splits the
-   markers into per-subgenome genotype sets. `K_hom` auto-selects its form for the
-   subgenome count (full Hadamard for 2–3; pairwise-mean for 4+ to stay full-rank).
-3. `homoeogwas fit --config <run.yaml>` runs the mixed-model scan; the optional
-   DL-prior step additionally needs the species reference FASTA.
+   markers into per-subgenome genotype sets.
+3. `homoeogwas fit --config <run.yaml>` runs the mixed-model scan. Interaction
+   analysis additionally needs SNP-to-gene and homoeolog mappings; four copies
+   become six pair edges in one group family, never one four-way test.
 
-No Python is edited at any step. Diploids can run the mixed model, but the
-homoeolog kernel `K_hom` is not meaningful for them.
+No Python is edited at any step. Diploids can run the mixed model, but they do
+not have a cross-subgenome homoeolog interaction.
 
 ## Tested species
 
@@ -210,6 +232,7 @@ src/homoeogwas/
 ├── gp.py               # GBLUP prediction + cross-validation
 ├── scan.py             # per-SNP scan (CPU + dual-GPU, LOCO)
 ├── diagnostics.py      # lambda_GC, QQ, retained-fraction checks
+├── audit.py            # result evidence/status audit
 ├── calibration.py      # null-simulation type-I error
 ├── sim.py              # power-vs-FDR simulation
 ├── interact.py         # homoeolog-pair interaction scan

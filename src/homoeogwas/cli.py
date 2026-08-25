@@ -968,6 +968,18 @@ def build_parser() -> argparse.ArgumentParser:
                                           "check input paths, without running")
     val.add_argument("-c", "--config", required=True, help="YAML run-config path")
 
+    aud = sub.add_parser(
+        "audit",
+        help=("audit finished fit/interact/predict result JSONs and separate "
+              "computational validity, internal discovery and replication"))
+    aud.add_argument(
+        "results",
+        help=("one result JSON or a directory containing summary_*.json, "
+              "interact_*.json and/or predict_*.json"))
+    aud.add_argument(
+        "-o", "--out-dir", default=None,
+        help="audit output directory (default: <results>/audit)")
+
     dem = sub.add_parser("demo", help="generate a tiny synthetic dataset and run "
                                       "an end-to-end fit (install self-test)")
     dem.add_argument("-o", "--out", default="demo_run",
@@ -1643,6 +1655,9 @@ def main(argv=None) -> int:
         return cmd_interact(args)
     if args.subcommand == "validate":
         return cmd_validate(args)
+    if args.subcommand == "audit":
+        from .audit import cmd_audit
+        return cmd_audit(args)
     if args.subcommand == "demo":
         return cmd_demo(args)
     if args.subcommand == "plot":

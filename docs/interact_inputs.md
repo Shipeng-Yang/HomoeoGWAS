@@ -1,12 +1,16 @@
 # Building the inputs for `homoeogwas interact`
 
-`homoeogwas interact` runs a gene-resolution homoeolog-pair / triad
-burden-product interaction test. It needs two preprocessed inputs per analysis
-that the rest of the pipeline does not produce:
+`homoeogwas interact` runs a gene-resolution homoeolog-pair / triad interaction
+test. The default statistic is **omniB**, an encoding-robust ACAT combination of
+minor-allele burden-product, PC1×PC1 and low-rank kernel-Hadamard components,
+calibrated by a kinship-preserving parametric bootstrap. The legacy
+REF-oriented burden-product + permutation path remains available by explicit
+configuration. Both need two preprocessed inputs per analysis that the rest of
+the pipeline does not produce:
 
 1. a **`snp_to_gene` NPZ** per subgenome — which SNPs belong to which gene;
-2. a **homoeolog `gene_<S>` TSV** — which genes are homoeologs across the
-   subgenomes (pairs for 2 subgenomes, triads for 3).
+2. a **master homoeolog-group TSV** — one `group_id` plus one `gene_<S>` column
+   per subgenome. Legacy pair and triad tables are adapted automatically.
 
 Two subcommands build them from standard files, so you never have to hand-craft
 either:
@@ -44,25 +48,20 @@ using a SHA-256 fingerprint. `interact` refuses a legacy/unverified NPZ or a
 mapping built from a different BIM/variant order; rerun `prep-snps` with the
 analysis BED to repair it.
 
-## Ploidy — pick the mode for your crop
+## Ploidy — one group engine, different graph sizes
 
-| ploidy / genome | subgenomes | `interact --mode` | example |
-|---|---|---|---|
-| allotetraploid AADD / AACC | 2 | `pairwise` | cotton, rapeseed |
-| allohexaploid AABBDD | 3 | `triad` | wheat |
-| allo-octoploid AABBCCDD | 4 | `pairwise`/`triad` over subsets | strawberry — run over 2-/3-subgenome subsets (see below) |
-| **diploid** | 1 | — homoeolog test N/A | rice, etc. |
+| copies in each group (`k`) | unique pair edges `C(k,2)` | default primary unit | example |
+|---:|---:|---|---|
+| 2 | 1 | `edge` | cotton, rapeseed |
+| 3 | 3 | `group` | wheat |
+| 4 | 6 | `group` | strawberry |
+| 1 | — | homoeolog test N/A | diploid rice |
 
-**Octoploid and beyond (≥4 subgenomes).** `prep-snps` and `prep-homoeologs
---from-table` are fully N-subgenome — list all four in `--subgenomes` and you
-get four NPZs and a `gene_A,gene_B,gene_C,gene_D` table. The interaction *test*
-is run as `pairwise` over the C(4,2)=6 subgenome pairs or `triad` over the
-C(4,3)=4 triples (each `interact` run names the 2–3 subgenomes in its config;
-extra `gene_<S>` columns in the table are ignored). This is deliberate, not a
-gap: a single 4-way burden product is far too sparse/low-power at realistic
-sample sizes — the same reason the variance-component side falls back to a
-pairwise-mean homoeolog kernel at 4 subgenomes. So decompose into 2-/3-way
-tests and aggregate (e.g. ACAT) across them.
+**Octoploid and beyond (≥4 subgenomes).** List all four subgenomes once. The
+canonical engine derives the six pair edges from each A/B/C/D row, scores them
+under one all-subgenome null and bootstrap stream, then ACAT-combines them for
+group primary. It does not create an `A:B:C:D` design column. Do not run six
+direction-specific analyses and repair multiplicity afterwards.
 
 **Diploids** have no homoeologs, so the cross-subgenome interaction test does not
 apply directly. Two things still work for a diploid:
@@ -243,20 +242,28 @@ Point an `interact` config at the files just built:
 
 ```yaml
 interact:
-  mode: triad
+  mode: group
   subgenomes: [A, B, C]
+  groups: interact_prep/groups_ABC.tsv
+  statistic: omniB
+  hypothesis_unit: group
+  subset_order: 2
+  family_scope: primary_only
+  primary_transform: INT
+  primary_multiplicity: bootstrap_minp
   genotype:    {A: geno/subgenome_A, B: geno/subgenome_B, C: geno/subgenome_C}
   snp_to_gene: {A: interact_prep/snp_to_gene_A.npz,
                 B: interact_prep/snp_to_gene_B.npz,
                 C: interact_prep/snp_to_gene_C.npz}
-  triads: interact_prep/triads.tsv
   phenotype: pheno.tsv
   sample_col: IID
   trait: my_trait
-  burden: {cap: 150, min_snp: 2}
-  grm: {method: grm_from_X}
-  calibration: {perm_B: 200}
-outputs: {out_dir: results_interact/my_trait}
+  burden: {cap: 150, min_snp: 3, maf_min: 0.01, n_pc: 3}
+  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}
+  calibration: {method: bootstrap, B: 2000, seed: 2026}
+outputs:
+  out_dir: results_interact/my_trait
+  full_ranking: true
 ```
 
 ```
@@ -264,8 +271,97 @@ homoeogwas interact -c interact.yaml --n-jobs 16
 ```
 
 A complete worked example on an allo-octoploid (strawberry, AABBCCDD,
-2n=8x=56) — including the 2-/3-subgenome-subset pattern for 4 subgenomes — is in
+2n=8x=56) — one group family with six derived pair edges — is in
 [`examples/strawberry_octoploid.md`](examples/strawberry_octoploid.md).
+
+### Interpreting omniB output
+
+`interact_<trait>.json` reports the combined omniB p-value. Top and significant
+units also carry:
+
+- `component_p.minor_burden`;
+- `component_p.pc1`;
+- `component_p.kernel_hadamard`;
+- `smallest_component` and `smallest_component_p`.
+
+Canonical group runs always write the full primary ranking (and also accept
+`outputs.full_ranking: true` explicitly). The file
+`interact_<trait>_ranking_<mode>_<transform>.tsv` contains these fields for
+every declared edge or group, including explicit non-estimable rows. Group
+records retain the driving edge/component as descriptive localization.
+
+The smallest component and non-primary edge/group layer are descriptive
+localization, not another multiple-testing-corrected discovery. An omniB hit
+must be called an **omnibus
+interaction** unless a burden-specific estimand and threshold were
+prespecified. To reproduce a legacy burden analysis, say so explicitly:
+
+```yaml
+interact:
+  statistic: burden
+  primary_transform: INT
+  primary_multiplicity: bonferroni
+  calibration: {method: permutation, perm_B: 2000}
+```
+
+The canonical formal CLI route emits INT only. A raw-scale sensitivity analysis
+must be a separate, explicitly noninferential run and cannot inherit INT
+rejection fields. Historical `mode: pairwise`/`pairs` and `mode: triad`/`triads`
+omniB configs remain readable and normalize internally to group mode.
+
+### Experimental conditional A×B×D test
+
+For an allohexaploid triad, `statistic: triad3` tests a distinct, explicitly
+third-order estimand:
+
+```text
+y ~ covariates + A + B + D + A:B + A:D + B:D + A:B:D
+```
+
+Only the `A:B:D` coefficient is tested. All main effects and pairwise
+interactions remain in the model, so a strong AB, AD or BD signal cannot be
+relabelled as three-way evidence. The implementation uses centered/scaled
+minor-allele burdens and a kinship-preserving parametric bootstrap:
+
+```yaml
+interact:
+  mode: triad
+  subgenomes: [A, B, D]
+  statistic: triad3
+  primary_transform: INT
+  primary_multiplicity: bootstrap_minp
+  # genotype, snp_to_gene, triads, phenotype, sample_col and trait as above
+  burden: {cap: 150, min_snp: 2, maf_min: 0.01}
+  grm: {method: grm_from_X}
+  calibration: {method: bootstrap, B: 2000, seed: 2026}
+```
+
+This path is experimental and is allowed only for exactly three subgenomes.
+Its ranking reports `p_threeway`, `target_residual_ratio` and `target_sd`.
+The kinship-preserving bootstrap min-P result is the only formal discovery
+decision. Formal inference requires `B >= 999`; `B: 2000` is recommended for
+a final run. Faster engineering checks may set
+`calibration: {method: bootstrap, B: 99, seed: 2026, qa_only: true}`. A
+QA-only run estimates the null tail but deliberately emits no formal
+`n_sig`/`sig`.
+The analytic Bonferroni count is retained only as a candidate screen and is
+reported separately as `analytic_screen_n`/`analytic_screen_sig`.
+`target_residual_ratio` measures how much of the raw three-way column remains
+after projecting out all lower-order terms; very small values flag weak
+identification. The ranking and formal hit records also report
+`target_information_max_fraction`,
+`target_information_top10_fraction` and
+`target_information_effective_n`. These outcome-independent diagnostics show
+whether the residualised three-way target is supported broadly across samples
+or almost entirely by a few rare genotype combinations. A formal hit with
+maximum sample fraction above 0.10 or information effective n below 20 is
+flagged for case-deletion review. A significant result means statistical third-order
+non-additivity conditional on the declared burden model. It does not, by
+itself, show that the three homoeolog products form a physical complex.
+
+After a run, use `homoeogwas audit <results-dir>` to produce a JSON/TSV/Markdown
+record of estimability, calibration, component interpretation and replication
+status.
 
 ---
 

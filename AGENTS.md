@@ -13,7 +13,7 @@ these rules lives in `src/homoeogwas/workflow.py`.
 HomoeoGWAS runs **subgenome-stratified linear-mixed-model GWAS** in allopolyploids
 (wheat AABBDD, cotton AADD, rapeseed AACC, hexaploid AABBCC, octoploid AABBCCDD,
 and diploids). Its signature output is the per-subgenome variance partition; it
-also offers a homoeolog-pair interaction test.
+also offers one homoeolog-group omniB interaction engine for 2+ subgenomes.
 
 ---
 
@@ -36,7 +36,8 @@ Collect only these. Everything else has a sensible default.
 
 **Homoeolog interaction** (adds prep steps):
 - per-subgenome `bed_prefixes`, phenotype/sample_col/trait/subgenomes/out_dir
-- **either** prebuilt `snp_to_gene` NPZs + a `pairs/triads` TSV,
+- **either** prebuilt `snp_to_gene` NPZs + one wide homoeolog `groups` TSV
+  (`pairs`/`triads` TSVs remain accepted as legacy aliases),
   **or** a `gff` + `subgenome_map` (to build snp_to_gene) + proteins/`diamond`
   (to build homoeolog pairs). See `docs/interact_inputs.md`.
 
@@ -49,8 +50,9 @@ Collect only these. Everything else has a sensible default.
 - Only GWAS requested → `fit` → `plot`.
 - Interaction requested and prep inputs missing → `prep-snps` and/or
   `prep-homoeologs` first, then `interact`.
-- Interaction **mode by ploidy**: 2 subgenomes → `pairwise`; 3 → `triad`;
-  **4+ → run over 2-/3-subgenome subsets, never a single 4-way test**.
+- Interaction → canonical `mode: group`, with pair edges as the common
+  primitive. Two copies yield 1 edge, three yield 3, and four yield 6. Never
+  fit or claim a direct four-way coefficient.
 - Always `validate` a generated config before a long run.
 
 ---
@@ -58,9 +60,9 @@ Collect only these. Everything else has a sensible default.
 ## 3. Canonical pipeline order
 
 ```
-VCF  → split → [build fit.yaml] → validate → fit → plot → summarize
-BED  →         [build fit.yaml] → validate → fit → plot → summarize
-interaction → prep-snps? → prep-homoeologs? → [build interact.yaml] → validate → interact → summarize
+VCF  → split → [build fit.yaml] → validate → fit → plot → audit → summarize
+BED  →         [build fit.yaml] → validate → fit → plot → audit → summarize
+interaction → prep-snps? → prep-homoeologs? → [build interact.yaml] → validate → interact → audit → summarize
 ```
 
 ---
@@ -69,7 +71,7 @@ interaction → prep-snps? → prep-homoeologs? → [build interact.yaml] → va
 
 The agent maps high-level inputs into the existing YAML schemas and writes them
 under `<out_dir>/configs/` with deterministic names (`fit.generated.yaml`,
-`interact.generated.<mode>.yaml`).
+`interact.generated.group.omnib.yaml`).
 
 **fit YAML** (the GWAS):
 ```yaml
@@ -108,19 +110,30 @@ and point the template there.
 **interact YAML**:
 ```yaml
 interact:
-  mode: triad                 # pairwise (2) | triad (3) — inferred from ploidy
-  subgenomes: [A, B, C]
-  genotype:    {A: <prefixA>, B: <prefixB>, C: <prefixC>}
-  snp_to_gene: {A: <npzA>, B: <npzB>, C: <npzC>}
-  triads: <triads.tsv>        # or `pairs: <pairs.tsv>` for pairwise
+  mode: group
+  subgenomes: [A, B, D]
+  groups: <groups.tsv>        # group_id,gene_A,gene_B,gene_D
+  statistic: omniB            # encoding-robust primary; legacy burden must be explicit
+  hypothesis_unit: group      # edge for pair discovery; group for group omnibus
+  subset_order: 2             # all unique pair edges
+  family_scope: primary_only  # or joint: one calibration over edge+group union
+  primary_transform: INT
+  primary_multiplicity: bootstrap_minp
+  genotype:    {A: <prefixA>, B: <prefixB>, D: <prefixD>}
+  snp_to_gene: {A: <npzA>, B: <npzB>, D: <npzD>}
   phenotype: <phenotype>
   sample_col: <sample_col>
   trait: <trait>
-  burden: {cap: 150, min_snp: 2}
-  grm: {method: grm_from_X}
-  calibration: {perm_B: 200}
-outputs: {out_dir: <out_dir>}
+  burden: {cap: 150, min_snp: 3, maf_min: 0.01, n_pc: 3}
+  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}
+  calibration: {method: bootstrap, B: 2000, seed: 2026}
+outputs: {out_dir: <out_dir>, full_ranking: true}
 ```
+
+`omniB` combines minor-allele burden, PC1 and kernel-Hadamard interaction
+evidence. The combined p is primary; component p-values localize the evidence
+but are not separate discoveries. A frozen legacy analysis may instead declare
+`statistic: burden` and `calibration: {method: permutation, perm_B: 2000}`.
 
 **subgenome map TSV** (for split / prep): columns `chrom, subgenome[, base_group]`,
 where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
@@ -139,8 +152,9 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
 3. **subgenome map** columns are `chrom, subgenome[, base_group]`.
 4. **DIAMOND 2.2.0 deadlocks** on `makedb`; use a 2.1.x binary via `--diamond`.
    Protein FASTAs must have `.`/`*` stop/gap characters stripped.
-5. **Never run a 4-way interaction.** For 4+ subgenomes, decompose into
-   `pairwise`/`triad` subsets and aggregate (e.g. ACAT).
+5. **Never run a 4-way interaction.** A four-copy group omniB aggregates its
+   six pair edges. Never run AB/AD/BD (or other directions) as independent
+   alpha families and then multiply adjusted p-values after the run.
 6. **Validate before expensive runs.** Record every generated config under
    `<out_dir>/configs/`.
 7. **Bind interaction mappings to their BED.** Current `prep-snps` NPZs record
@@ -160,6 +174,7 @@ homoeogwas split --species-yaml {species_yaml} --vcf {vcf} \
 homoeogwas validate -c {outdir}/configs/fit.generated.yaml
 homoeogwas fit      -c {outdir}/configs/fit.generated.yaml
 homoeogwas plot     {outdir}            # regenerate figures, no recompute
+homoeogwas audit    {outdir}             # validity/evidence/replication report
 
 # interaction inputs
 homoeogwas prep-snps --gff {gff} --subgenome-map {sgmap} \
@@ -172,7 +187,8 @@ homoeogwas prep-homoeologs --mode triad --subgenomes A,B,C \
   --out {prepdir}/triads.tsv
 
 # interaction
-homoeogwas interact -c {outdir}/configs/interact.generated.triad.yaml --n-jobs {jobs}
+homoeogwas interact -c {outdir}/configs/interact.generated.group.omnib.yaml --n-jobs {jobs}
+homoeogwas audit    {outdir}
 
 # install self-test
 homoeogwas demo
@@ -193,8 +209,13 @@ Report to the user: the **per-subgenome PVE** (which subgenomes carry the
 heritability), genome-wide `λ_GC` (calibration), the strongest hits from
 sumstats, the figure paths — plus any warnings and the next recommended step.
 
-After `interact`: the ACAT omnibus p, any significant homoeolog pairs/triads,
-and the per-pair table in `<out_dir>`.
+After `interact`: name the declared primary unit (`edge` or `group`), the one
+experiment-wide bootstrap-minP family, adjusted p-values, significant units,
+the evidence-driving omniB component, complete ranking, family hashes/counts,
+and audit status. Edge primary permits “encoding-robust omnibus interaction
+evidence for a homoeolog pair”; group primary permits “encoding-robust omnibus
+pairwise interaction evidence within a homoeolog group”. Neither is a
+third-/fourth-order causal or physical mechanism.
 
 ---
 
@@ -205,5 +226,6 @@ and the per-pair table in `<out_dir>`.
 - Enforce the §5 gotcha rules *before* long runs; on a validation failure return
   a concrete repair instruction (sample-id coercion, chromosome rename, missing
   PLINK file, DIAMOND version), not a stack trace.
-- Infer interaction mode from ploidy; refuse 4-way.
-- Summarize biologically (§7), not just paths.
+- Generate canonical group omniB configs for 2+ subgenomes; refuse direct
+  four-way statistics and post-run direction-wise multiplicity patches.
+- Run `audit` on finished outputs and summarize biologically (§7), not just paths.

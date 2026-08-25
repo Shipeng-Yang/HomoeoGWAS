@@ -53,6 +53,9 @@ def test_build_interact_config_modes():
     assert cfg["interact"]["grm"] == {
         "method": "grm_from_X", "maf_min": 0.01, "scope": "all_subgenomes"}
     assert cfg["interact"]["primary_multiplicity"] == "bootstrap_minp"
+    assert cfg["interact"]["primary_transform"] == "INT"
+    assert cfg["interact"]["burden"] == {
+        "cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3}
     triad3 = workflow.build_interact_config(
         triads="tr.tsv", statistic="triad3", **common)
     assert triad3["interact"]["statistic"] == "triad3"
@@ -216,10 +219,54 @@ def test_run_interaction_dry_run(tmp_path):
         phenotype="p", sample_col="IID", trait="t", subgenomes=["A", "B", "C"],
         bed_prefixes={"A": "a", "B": "b", "C": "c"},
         snp_to_gene={"A": "na", "B": "nb", "C": "nc"},
-        out_dir=str(tmp_path), triads="tr.tsv", dry_run=True)
-    assert res["mode"] == "triad"
-    assert "interact.generated.triad" in res["config"]
-    assert [step["command"][3] for step in res["steps"]] == ["validate", "interact"]
+        out_dir=str(tmp_path), groups="tr.tsv", hypothesis_unit="edge",
+        dry_run=True)
+    assert res["mode"] == "group"
+    assert res["hypothesis_unit"] == "edge"
+    assert res["config"].endswith("interact.generated.group.omnib.yaml")
+    assert [step["command"][3] for step in res["steps"]] == [
+        "validate", "interact", "audit"]
+
+
+@pytest.mark.parametrize(
+    "subgenomes,expected", [(["A", "D"], "edge"), (["A", "B", "D"], "group")])
+def test_run_interaction_defaults_primary_unit_by_copy_count(
+        tmp_path, subgenomes, expected):
+    res = workflow.run_interaction(
+        phenotype="p", sample_col="IID", trait="t", subgenomes=subgenomes,
+        bed_prefixes={s: s.lower() for s in subgenomes},
+        snp_to_gene={s: f"n{s.lower()}" for s in subgenomes},
+        out_dir=str(tmp_path / expected), groups="groups.tsv", dry_run=True)
+    assert res["hypothesis_unit"] == expected
+
+
+def test_run_interaction_audits_then_summarizes(tmp_path, monkeypatch):
+    pheno = tmp_path / "p.tsv"
+    pd.DataFrame({"IID": ["s1", "s2"], "t": [1.0, 2.0]}).to_csv(
+        pheno, sep="\t", index=False)
+    for s in ("A", "D"):
+        _touch_bed(tmp_path / s)
+        (tmp_path / f"{s}.npz").write_text("mapping")
+    groups = tmp_path / "groups.tsv"
+    groups.write_text("group_id\tgene_A\tgene_D\ng1\ta1\td1\n")
+    calls = []
+
+    def fake_run(args, *, dry_run=False):
+        calls.append(list(args))
+        return {"command": ["homoeogwas", *args], "returncode": 0}
+
+    monkeypatch.setattr(workflow, "run_cli", fake_run)
+    monkeypatch.setattr(
+        workflow, "summarize_interaction",
+        lambda out_dir, trait: {"ok": True, "trait": trait, "primary_unit": "edge"})
+    res = workflow.run_interaction(
+        phenotype=str(pheno), sample_col="IID", trait="t",
+        subgenomes=["A", "D"],
+        bed_prefixes={s: str(tmp_path / s) for s in ("A", "D")},
+        snp_to_gene={s: str(tmp_path / f"{s}.npz") for s in ("A", "D")},
+        out_dir=str(tmp_path / "out"), groups=str(groups), n_jobs=4)
+    assert [call[0] for call in calls] == ["validate", "interact", "audit"]
+    assert res["summary"]["primary_unit"] == "edge"
 
 
 def test_get_guidance_returns_spec():

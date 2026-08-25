@@ -160,7 +160,7 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
                           sample_col: str, trait: str, out_dir: str,
                           pairs: str | None = None, triads: str | None = None,
                           perm_b: int = 2000, cap: int = 150,
-                          min_snp: int = 2, statistic: str = "omniB",
+                          min_snp: int | None = None, statistic: str = "omniB",
                           groups: str | None = None,
                           hypothesis_unit: str | None = None,
                           subset_order: int = 2,
@@ -178,6 +178,8 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
         else {"method": "bootstrap", "B": perm_b, "seed": 2026}
     )
     is_canonical_omnib = statistic_key == "omnib"
+    if min_snp is None:
+        min_snp = 3 if is_canonical_omnib else 2
     if is_canonical_omnib:
         group_path = groups or (
             pairs if mode == "pairwise" else (
@@ -209,11 +211,13 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
         },
     }
     if is_canonical_omnib:
+        cfg["interact"]["burden"].update({"maf_min": 0.01, "n_pc": 3})
         cfg["interact"].update({
             "groups": str(group_path),
             "hypothesis_unit": hypothesis_unit,
             "subset_order": subset_order,
             "family_scope": family_scope,
+            "primary_transform": "INT",
             "primary_multiplicity": "bootstrap_minp",
         })
     elif statistic_key == "triad3":
@@ -279,6 +283,47 @@ def summarize_fit(out_dir: str, trait: str, top_n: int = 10) -> dict:
     return res
 
 
+def summarize_interaction(out_dir: str, trait: str) -> dict:
+    """Summarize the declared interaction family without changing its claims."""
+    out = Path(out_dir)
+    result_path = out / f"interact_{trait}.json"
+    audit_path = out / "audit" / "homoeogwas_audit.json"
+    if not result_path.exists():
+        return {"ok": False, "reason": f"no {result_path}"}
+    try:
+        payload = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "reason": f"cannot read {result_path}: {exc}"}
+    provenance = payload.get("provenance") or {}
+    primary_key = str(provenance.get("primary_transform", "INT"))
+    primary = (payload.get("results") or {}).get(primary_key) or {}
+    fwer = ((primary.get("model_diagnostics") or {}).get("bootstrap_fwer") or {})
+    unit = provenance.get("hypothesis_unit") or fwer.get(
+        "declared_hypothesis_unit")
+    summary = {
+        "ok": True,
+        "trait": payload.get("trait", trait),
+        "primary_unit": unit,
+        "family_scope": provenance.get("family_scope") or fwer.get("family_scope"),
+        "n_samples": primary.get("n"),
+        "n_planned": primary.get("n_planned", primary.get("G")),
+        "n_valid": primary.get("n_valid"),
+        "n_significant": fwer.get("n_rejected"),
+        "global_fwer_p": fwer.get("empirical_p"),
+        "bootstrap_B": fwer.get("B", primary.get("bootstrap_B")),
+        "top": list(primary.get("top") or []),
+        "result_json": str(result_path),
+    }
+    if audit_path.exists():
+        summary["audit_json"] = str(audit_path)
+        try:
+            summary["audit_status"] = json.loads(
+                audit_path.read_text()).get("overall_status")
+        except (OSError, json.JSONDecodeError):
+            summary["audit_status"] = "UNREADABLE"
+    return summary
+
+
 # ----------------------------------------------------------------------
 # high-level orchestrators (the MCP tool bodies)
 # ----------------------------------------------------------------------
@@ -295,8 +340,9 @@ def get_guidance(goal: str = "gwas") -> dict:
     hints = {
         "gwas": "VCF→split→fit→plot, or BED→fit→plot. Inputs: bed_prefixes or "
                 "vcf+species_yaml, phenotype, sample_col, trait, subgenomes.",
-        "interaction": "prep-snps→prep-homoeologs→interact. mode: 2→pairwise, "
-                       "3→triad, 4+→subsets.",
+        "interaction": "prep-snps→prep-homoeologs→group omniB. Pair edges are "
+                       "the common primitive; legacy pair/triad tables adapt "
+                       "automatically and 4 copies aggregate six edges.",
         "split": "homoeogwas split --species-yaml … -o …",
         "validate": "homoeogwas validate -c <config>",
         "troubleshoot": "string sample ids; gff/.bim chrom match; diamond 2.1.x; "
@@ -366,11 +412,19 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
                     subgenomes: Sequence[str], bed_prefixes: Mapping[str, str],
                     snp_to_gene: Mapping[str, str], out_dir: str,
                     pairs: str | None = None, triads: str | None = None,
-                    perm_b: int = 200, n_jobs: int = 8,
+                    groups: str | None = None,
+                    hypothesis_unit: str | None = None,
+                    subset_order: int = 2,
+                    family_scope: str = "primary_only",
+                    perm_b: int = 2000, n_jobs: int = 8,
+                    statistic: str = "omniB",
                     dry_run: bool = False) -> dict:
-    """Generate an interact config (mode inferred from ploidy), validate it,
-    then run. Validation checks schema, PLINK triplets, phenotype overlap, and
-    the SNP-to-gene/BIM provenance binding before the long computation."""
+    """Generate, validate, run, audit and summarize an interaction analysis.
+
+    New omniB runs always use the canonical group table and one experiment-wide
+    family. ``pairs`` and ``triads`` remain breeder-level aliases for old input
+    tables; users are never asked to write YAML.
+    """
     out = Path(out_dir)
     try:
         mode = infer_interaction_mode(subgenomes)
@@ -387,7 +441,9 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
     missing_maps = {name: values for name, values in missing_maps.items() if values}
     if missing_maps:
         return {"ok": False, "reason": f"missing subgenome mappings: {missing_maps}"}
-    table = triads if mode == "triad" else pairs
+    statistic_key = str(statistic).lower()
+    canonical = statistic_key == "omnib"
+    table = groups or (triads if mode == "triad" else pairs)
     needed = ([str(bed_prefixes[s]) + ext
                for s in subgenomes for ext in (".bed", ".bim", ".fam")]
               + [str(snp_to_gene[s]) for s in subgenomes]
@@ -399,20 +455,34 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
                                 snp_to_gene=snp_to_gene, phenotype=phenotype,
                                 sample_col=sample_col, trait=trait,
                                 out_dir=out_dir, pairs=pairs, triads=triads,
-                                perm_b=perm_b)
-    cfg_path = write_config(cfg, out / "configs" / f"interact.generated.{mode}.yaml")
+                                groups=groups,
+                                hypothesis_unit=hypothesis_unit,
+                                subset_order=subset_order,
+                                family_scope=family_scope,
+                                perm_b=perm_b, statistic=statistic)
+    public_mode = "group" if canonical else mode
+    declared_unit = cfg["interact"].get("hypothesis_unit")
+    config_name = (
+        "interact.generated.group.omnib.yaml"
+        if canonical else f"interact.generated.{mode}.{statistic_key}.yaml")
+    cfg_path = write_config(cfg, out / "configs" / config_name)
     steps = [run_cli(["validate", "-c", cfg_path], dry_run=dry_run)]
     if dry_run or steps[-1].get("returncode") == 0:
         steps.append(
             run_cli(["interact", "-c", cfg_path, "--n-jobs", str(n_jobs)],
                     dry_run=dry_run))
+    if dry_run or (len(steps) >= 2 and steps[-1].get("returncode") == 0):
+        steps.append(run_cli(["audit", out_dir], dry_run=dry_run))
     failed = next((s for s in steps if s.get("returncode") not in (None, 0)), None)
-    result = {"ok": failed is None, "config": cfg_path, "mode": mode,
+    result = {"ok": failed is None, "config": cfg_path, "mode": public_mode,
+              "hypothesis_unit": declared_unit,
               "out_dir": out_dir, "steps": steps, "dry_run": dry_run}
     if failed is not None:
         result["reason"] = (
             f"command failed with exit code {failed['returncode']}: "
             f"{' '.join(map(str, failed['command']))}")
+    if not dry_run and failed is None:
+        result["summary"] = summarize_interaction(out_dir, trait)
     return result
 
 
