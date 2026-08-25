@@ -45,8 +45,20 @@ def test_build_interact_config_modes():
                   snp_to_gene={"A": "na", "B": "nb", "C": "nc"},
                   phenotype="p", sample_col="IID", trait="t", out_dir="o")
     cfg = workflow.build_interact_config(triads="tr.tsv", **common)
-    assert cfg["interact"]["mode"] == "triad"
-    assert cfg["interact"]["triads"] == "tr.tsv"
+    assert cfg["interact"]["mode"] == "group"
+    assert cfg["interact"]["groups"] == "tr.tsv"
+    assert cfg["interact"]["hypothesis_unit"] == "group"
+    assert cfg["interact"]["subset_order"] == 2
+    assert cfg["interact"]["statistic"] == "omniB"
+    assert cfg["interact"]["calibration"]["method"] == "bootstrap"
+    assert cfg["interact"]["grm"] == {
+        "method": "grm_from_X", "maf_min": 0.01, "scope": "all_subgenomes"}
+    assert cfg["interact"]["primary_multiplicity"] == "bootstrap_minp"
+    triad3 = workflow.build_interact_config(
+        triads="tr.tsv", statistic="triad3", **common)
+    assert triad3["interact"]["statistic"] == "triad3"
+    assert triad3["interact"]["calibration"]["B"] == 2000
+    assert triad3["interact"]["primary_multiplicity"] == "bootstrap_minp"
     with pytest.raises(ValueError, match="triads TSV"):
         workflow.build_interact_config(**common)   # triad without triads
     # pairwise
@@ -54,8 +66,28 @@ def test_build_interact_config_modes():
         subgenomes=["A", "B"], bed_prefixes={"A": "a", "B": "b"},
         snp_to_gene={"A": "na", "B": "nb"}, phenotype="p", sample_col="IID",
         trait="t", out_dir="o", pairs="pr.tsv")
-    assert pw["interact"]["mode"] == "pairwise"
-    assert pw["interact"]["pairs"] == "pr.tsv"
+    assert pw["interact"]["mode"] == "group"
+    assert pw["interact"]["groups"] == "pr.tsv"
+    assert pw["interact"]["hypothesis_unit"] == "edge"
+    with pytest.raises(ValueError, match="requires exactly three"):
+        workflow.build_interact_config(
+            subgenomes=["A", "B"], bed_prefixes={"A": "a", "B": "b"},
+            snp_to_gene={"A": "na", "B": "nb"}, phenotype="p",
+            sample_col="IID", trait="t", out_dir="o", pairs="pr.tsv",
+            statistic="triad3")
+
+
+def test_build_interact_config_accepts_explicit_canonical_group_options():
+    cfg = workflow.build_interact_config(
+        subgenomes=["A", "B", "D"],
+        bed_prefixes={"A": "a", "B": "b", "D": "d"},
+        snp_to_gene={"A": "na", "B": "nb", "D": "nd"},
+        phenotype="p", sample_col="IID", trait="t", out_dir="o",
+        groups="groups.tsv", hypothesis_unit="edge", subset_order=2,
+        family_scope="primary_only")
+    assert cfg["interact"]["mode"] == "group"
+    assert cfg["interact"]["groups"] == "groups.tsv"
+    assert cfg["interact"]["hypothesis_unit"] == "edge"
 
 
 def test_check_sample_ids(tmp_path):

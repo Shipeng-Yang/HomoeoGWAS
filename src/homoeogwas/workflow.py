@@ -159,26 +159,61 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
                           snp_to_gene: Mapping[str, str], phenotype: str,
                           sample_col: str, trait: str, out_dir: str,
                           pairs: str | None = None, triads: str | None = None,
-                          perm_b: int = 200, cap: int = 150,
-                          min_snp: int = 2) -> dict:
+                          perm_b: int = 2000, cap: int = 150,
+                          min_snp: int = 2, statistic: str = "omniB",
+                          groups: str | None = None,
+                          hypothesis_unit: str | None = None,
+                          subset_order: int = 2,
+                          family_scope: str = "primary_only") -> dict:
     """Assemble a ``homoeogwas interact`` config dict from high-level inputs."""
     mode = infer_interaction_mode(subgenomes)
+    statistic_key = str(statistic).lower()
+    if statistic_key not in {"omnib", "burden", "triad3"}:
+        raise ValueError("statistic must be omniB, burden, or experimental triad3")
+    if statistic_key == "triad3" and mode != "triad":
+        raise ValueError("statistic=triad3 requires exactly three subgenomes")
+    calibration = (
+        {"method": "permutation", "perm_B": perm_b}
+        if statistic_key == "burden"
+        else {"method": "bootstrap", "B": perm_b, "seed": 2026}
+    )
+    is_canonical_omnib = statistic_key == "omnib"
+    if is_canonical_omnib:
+        group_path = groups or (pairs if mode == "pairwise" else triads)
+        if not group_path:
+            legacy_name = "pairs" if mode == "pairwise" else "triads"
+            raise ValueError(f"{mode} mode needs a {legacy_name} TSV (gene_<subgenome> columns)")
+        if hypothesis_unit is None:
+            hypothesis_unit = "edge" if mode == "pairwise" else "group"
     cfg = {
         "interact": {
-            "mode": mode, "subgenomes": list(subgenomes),
+            "mode": "group" if is_canonical_omnib else mode,
+            "statistic": "omniB" if statistic_key == "omnib" else statistic_key,
+            "subgenomes": list(subgenomes),
             "genotype": {s: str(bed_prefixes[s]) for s in subgenomes},
             "snp_to_gene": {s: str(snp_to_gene[s]) for s in subgenomes},
             "phenotype": phenotype, "sample_col": sample_col, "trait": trait,
             "burden": {"cap": cap, "min_snp": min_snp},
-            "grm": {"method": "grm_from_X"},
-            "calibration": {"perm_B": perm_b}},
+            "grm": {"method": "grm_from_X", "maf_min": 0.01,
+                    "scope": "all_subgenomes"},
+            "calibration": calibration},
         "outputs": {"out_dir": out_dir},
     }
-    if mode == "triad":
+    if is_canonical_omnib:
+        cfg["interact"].update({
+            "groups": str(group_path),
+            "hypothesis_unit": hypothesis_unit,
+            "subset_order": subset_order,
+            "family_scope": family_scope,
+            "primary_multiplicity": "bootstrap_minp",
+        })
+    elif statistic_key == "triad3":
+        cfg["interact"]["primary_multiplicity"] = "bootstrap_minp"
+    if not is_canonical_omnib and mode == "triad":
         if not triads:
             raise ValueError("triad mode needs a triads TSV (gene_A/B/C)")
         cfg["interact"]["triads"] = triads
-    else:
+    elif not is_canonical_omnib:
         if not pairs:
             raise ValueError("pairwise mode needs a pairs TSV (gene_A/B)")
         cfg["interact"]["pairs"] = pairs

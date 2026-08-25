@@ -39,6 +39,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from .interaction_config import normalize_interact_config
+
 
 def _acat_tan_terms(p: np.ndarray) -> np.ndarray:
     """Cauchy terms tan((0.5-p)*pi) with precision-safe branches at the extremes (Liu & Xie 2020).
@@ -2256,6 +2258,7 @@ def _load_pair_weights(path: str, subs: list[str]) -> dict:
 
 def validate_interact_config(cfg: dict) -> None:
     """Validate the interaction schema without opening large genotype matrices."""
+    cfg = normalize_interact_config(cfg)
     if not isinstance(cfg, dict) or not isinstance(cfg.get("interact"), dict):
         raise SystemExit("ERR: interaction config needs a top-level `interact` mapping")
     ic = cfg["interact"]
@@ -2266,11 +2269,28 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit(f"ERR: interact.subgenomes has duplicates: {subs}")
     mode = str(ic.get("mode", "pairwise")).lower()
     expected_n = {"pairwise": 2, "triad": 3}
-    if mode not in expected_n:
+    if mode == "group":
+        if str(ic.get("statistic", "omniB")).lower() != "omnib":
+            raise SystemExit(
+                "ERR: interact.mode=group is currently defined only for statistic=omniB")
+        if len(subs) < 2:
+            raise SystemExit("ERR: interact mode=group needs at least two subgenomes")
+        hypothesis_unit = str(ic.get("hypothesis_unit", "")).lower()
+        if hypothesis_unit not in {"edge", "group"}:
+            raise SystemExit("ERR: interact.hypothesis_unit must be edge or group")
+        if ic.get("subset_order") != 2:
+            raise SystemExit(
+                "ERR: interact.subset_order=2 is required for hypothesis_unit=edge/group")
+        family_scope = str(ic.get("family_scope", "primary_only")).lower()
+        if family_scope == "joint":
+            raise SystemExit("ERR: interact.family_scope=joint is not implemented yet")
+        if family_scope != "primary_only":
+            raise SystemExit("ERR: interact.family_scope must be primary_only")
+    elif mode not in expected_n:
         raise SystemExit(
-            "ERR: interact.mode must be pairwise (2 subgenomes) or triad "
-            "(3 subgenomes); for 4+ run separate 2-/3-subgenome subsets")
-    if len(subs) != expected_n[mode]:
+            "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
+            "(3 subgenomes); for 4+ use canonical group mode over 2-/3-subgenome subsets")
+    if mode in expected_n and len(subs) != expected_n[mode]:
         raise SystemExit(
             f"ERR: interact mode={mode} needs exactly {expected_n[mode]} "
             f"subgenomes; got {subs}")
@@ -2296,7 +2316,128 @@ def validate_interact_config(cfg: dict) -> None:
                 "ERR: interact.multi_trait must be a non-empty list of unique trait names")
         if mode != "pairwise":
             raise SystemExit("ERR: interact.multi_trait is supported only in pairwise mode")
-    table_key = "pairs" if mode == "pairwise" else "triads"
+    statistic = str(ic.get("statistic", "omniB")).lower()
+    if statistic not in {"omnib", "burden", "triad3"}:
+        raise SystemExit(
+            "ERR: interact.statistic must be omniB, burden, or experimental triad3; "
+            f"got {ic.get('statistic')!r}")
+    if statistic == "triad3" and mode != "triad":
+        raise SystemExit(
+            "ERR: interact.statistic=triad3 requires mode=triad and exactly "
+            "three subgenomes")
+    primary_transform = str(ic.get("primary_transform", "INT")).upper()
+    if primary_transform not in {"INT", "RAW"}:
+        raise SystemExit(
+            "ERR: interact.primary_transform must be INT or raw; "
+            f"got {ic.get('primary_transform')!r}")
+    primary_weighting = str(ic.get("primary_weighting", "unweighted")).lower()
+    if primary_weighting not in {"unweighted", "weighted"}:
+        raise SystemExit(
+            "ERR: interact.primary_weighting must be unweighted or weighted; "
+            f"got {ic.get('primary_weighting')!r}")
+    if primary_weighting == "weighted" and not ic.get("weights"):
+        raise SystemExit(
+            "ERR: interact.primary_weighting=weighted requires interact.weights")
+    if primary_weighting == "weighted" and statistic in {"omnib", "triad3"}:
+        raise SystemExit(
+            f"ERR: weighted primary inference is not implemented for statistic={statistic}")
+    if primary_weighting == "weighted" and ic.get("multi_trait"):
+        raise SystemExit(
+            "ERR: weighted primary inference is not implemented for multi_trait")
+    if statistic in {"omnib", "triad3"} and ic.get("weights"):
+        raise SystemExit(
+            f"ERR: interact.weights is not used by statistic={statistic}; use burden or "
+            "remove the weights file")
+    default_multiplicity = (
+        "bootstrap_minp" if statistic == "triad3" else "bonferroni")
+    primary_multiplicity = str(
+        ic.get("primary_multiplicity", default_multiplicity)
+    ).lower()
+    if primary_multiplicity not in {
+        "bonferroni", "permutation_minp", "bootstrap_minp"
+    }:
+        raise SystemExit(
+            "ERR: interact.primary_multiplicity must be bonferroni, "
+            "bootstrap_minp, or "
+            f"permutation_minp; got {ic.get('primary_multiplicity')!r}")
+    if statistic == "triad3" and primary_multiplicity != "bootstrap_minp":
+        raise SystemExit(
+            "ERR: statistic=triad3 requires "
+            "interact.primary_multiplicity=bootstrap_minp; analytic "
+            "Bonferroni is descriptive only")
+    bootstrap_minp_supported = (
+        statistic == "triad3"
+        or (statistic == "omnib" and mode in {"pairwise", "group"})
+    )
+    if primary_multiplicity == "bootstrap_minp" and not bootstrap_minp_supported:
+        raise SystemExit(
+            "ERR: interact.primary_multiplicity=bootstrap_minp is defined for "
+            "statistic=triad3 or group/pairwise statistic=omniB")
+    if primary_multiplicity == "permutation_minp":
+        if statistic != "burden" or mode != "pairwise" or ic.get("multi_trait"):
+            raise SystemExit(
+                "ERR: permutation_minp is defined only for a single-trait "
+                "pairwise burden scan")
+        if primary_weighting == "weighted":
+            raise SystemExit(
+                "ERR: weighted permutation_minp is not implemented")
+    calibration = ic.get("calibration", {})
+    if not isinstance(calibration, dict):
+        raise SystemExit("ERR: interact.calibration must be a mapping")
+    calibration_method = str(calibration.get(
+        "method", "bootstrap" if statistic in {"omnib", "triad3"} else "permutation"
+    )).lower()
+    qa_only = calibration.get("qa_only", False)
+    if not isinstance(qa_only, bool):
+        raise SystemExit(
+            "ERR: interact.calibration.qa_only must be true or false")
+    if (statistic, calibration_method) not in {
+        ("omnib", "bootstrap"),
+        ("triad3", "bootstrap"),
+        ("burden", "permutation"),
+    }:
+        raise SystemExit(
+            "ERR: supported statistic/calibration pairs are "
+            "omniB+bootstrap, triad3+bootstrap, and burden+permutation; got "
+            f"{statistic}+{calibration_method}")
+    replicate_key = "B" if statistic in {"omnib", "triad3"} else "perm_B"
+    replicate_value = calibration.get(
+        replicate_key,
+        calibration.get("perm_B" if replicate_key == "B" else "B", 2000),
+    )
+    if (
+        isinstance(replicate_value, bool)
+        or not isinstance(replicate_value, int)
+        or replicate_value < 0
+    ):
+        raise SystemExit(
+            f"ERR: interact.calibration.{replicate_key} must be an integer >= 0; "
+            f"got {replicate_value!r}")
+    if (
+        statistic == "triad3"
+        or (statistic == "omnib" and mode in {"pairwise", "group"}
+            and primary_multiplicity == "bootstrap_minp")
+        or (statistic == "burden" and mode == "pairwise"
+            and primary_multiplicity == "permutation_minp")
+    ):
+        required_b = (
+            19 if qa_only else (
+                TRIAD3_FORMAL_BOOTSTRAP_MIN_B
+                if statistic == "triad3"
+                else (PAIRWISE_OMNIB_FORMAL_BOOTSTRAP_MIN_B
+                      if statistic == "omnib"
+                      else PAIRWISE_BURDEN_FORMAL_PERMUTATION_MIN_B)))
+        if replicate_value < required_b:
+            purpose = "QA-only" if qa_only else "formal inferential"
+            analysis = (
+                "triad3" if statistic == "triad3" else
+                ("pairwise omniB" if statistic == "omnib"
+                 else "pairwise burden permutation-minP"))
+            raise SystemExit(
+                f"ERR: {purpose} {analysis} requires "
+                f"interact.calibration.{replicate_key} >= {required_b}")
+    table_key = ("groups" if mode == "group"
+                 else ("pairs" if mode == "pairwise" else "triads"))
     if not ic.get(table_key):
         raise SystemExit(f"ERR: interact mode={mode} requires interact.{table_key}")
     burden = ic.get("burden", {})
@@ -2323,6 +2464,9 @@ def preflight_interact(cfg: dict) -> list[str]:
 
     from .io import plink_path, read_delimited
 
+    cfg = normalize_interact_config(cfg)
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("interact"), dict):
+        return ["interaction config needs a top-level `interact` mapping"]
     ic = cfg["interact"]
     subs = list(ic["subgenomes"])
     mode = str(ic.get("mode", "pairwise")).lower()
@@ -2365,8 +2509,13 @@ def preflight_interact(cfg: dict) -> list[str]:
                     problems.append(
                         f"sample order mismatch between genotype {first} and {s}")
 
-    table_key = "pairs" if mode == "pairwise" else "triads"
-    table = Path(ic[table_key])
+    table_key = ("groups" if mode == "group"
+                 else ("pairs" if mode == "pairwise" else "triads"))
+    table_value = ic.get(table_key)
+    if not table_value:
+        problems.append(f"interact.{table_key} is required")
+        return problems
+    table = Path(table_value)
     if not table.exists():
         problems.append(f"{table_key} table missing: {table}")
     else:
@@ -2546,6 +2695,7 @@ def cmd_interact(args) -> int:
     t0 = time.time()
     with open(args.config) as fh:
         cfg = yaml.safe_load(fh)
+    cfg = normalize_interact_config(cfg)
     validate_interact_config(cfg)
     problems = preflight_interact(cfg)
     if problems:
@@ -2556,7 +2706,7 @@ def cmd_interact(args) -> int:
     ic = cfg["interact"]
     subs = list(ic["subgenomes"])
     mode = str(ic.get("mode", "pairwise")).lower()
-    group_modes = ("triad",)
+    group_modes = ("group", "triad")
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
