@@ -108,3 +108,22 @@ def test_formal_triad3_rejects_raw_as_sensitivity_only():
     cfg["interact"].pop("subset_order")
     with pytest.raises(SystemExit, match="raw is sensitivity-only"):
         validate_interact_config(cfg)
+
+
+def test_legacy_pairwise_burden_still_accepts_raw_primary():
+    cfg = {
+        "interact": {
+            "mode": "pairwise",
+            "subgenomes": ["A", "D"],
+            "pairs": "pairs.tsv",
+            "statistic": "burden",
+            "primary_transform": "RAW",
+            "genotype": {"A": "a", "D": "d"},
+            "snp_to_gene": {"A": "na", "D": "nd"},
+            "phenotype": "p.tsv",
+            "sample_col": "IID",
+            "trait": "trait",
+            "calibration": {"method": "permutation", "perm_B": 2000},
+        }
+    }
+    validate_interact_config(cfg)
