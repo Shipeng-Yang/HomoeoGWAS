@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from . import omnib_family as _family_score
 from .interaction_config import normalize_interact_config
 
 
@@ -1560,6 +1561,13 @@ def run_clique_scan_omnib(
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
         tail_excess=tail_excess)
+
+
+OmniBFamilyScores = _family_score.OmniBFamilyScores
+_score_omnib_family = _family_score.score_omnib_family
+_omnib_components_over_Y = _family_score.omnib_components_over_Y
+run_pair_scan_omnib = _family_score.run_pair_scan_omnib
+run_clique_scan_omnib = _family_score.run_clique_scan_omnib
 
 
 def run_clique_scan(
