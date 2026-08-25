@@ -88,3 +88,23 @@ def test_group_validation_accepts_three_subgenomes_and_rejects_joint_scope():
     validate_interact_config(_canonical_config())
     with pytest.raises(SystemExit, match="family_scope=joint"):
         validate_interact_config(_canonical_config(family_scope="joint"))
+
+
+def test_group_omnib_rejects_raw_as_sensitivity_only():
+    with pytest.raises(SystemExit, match="raw is sensitivity-only"):
+        validate_interact_config(_canonical_config(primary_transform="RAW"))
+
+
+def test_formal_triad3_rejects_raw_as_sensitivity_only():
+    cfg = _canonical_config(
+        mode="triad",
+        statistic="triad3",
+        triads="triads.tsv",
+        primary_transform="raw",
+        primary_multiplicity="bootstrap_minp",
+    )
+    cfg["interact"].pop("groups")
+    cfg["interact"].pop("hypothesis_unit")
+    cfg["interact"].pop("subset_order")
+    with pytest.raises(SystemExit, match="raw is sensitivity-only"):
+        validate_interact_config(cfg)

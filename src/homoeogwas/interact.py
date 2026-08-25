@@ -2330,6 +2330,12 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit(
             "ERR: interact.primary_transform must be INT or raw; "
             f"got {ic.get('primary_transform')!r}")
+    if primary_transform == "RAW" and (
+        (mode == "group" and statistic == "omnib") or statistic == "triad3"
+    ):
+        raise SystemExit(
+            "ERR: interact.primary_transform must be INT for canonical group omniB "
+            "and triad3; raw is sensitivity-only")
     primary_weighting = str(ic.get("primary_weighting", "unweighted")).lower()
     if primary_weighting not in {"unweighted", "weighted"}:
         raise SystemExit(
