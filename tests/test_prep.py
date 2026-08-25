@@ -169,6 +169,67 @@ def test_homoeologs_from_table_wide(tmp_path):
     assert len(df) == 2 and set(df["gene_C"]) == {"gC1", "gC2"}
 
 
+def test_prep_homoeologs_group_cli_writes_four_copy_canonical_table(tmp_path):
+    subs = ["A", "B", "C", "D"]
+    for sub in subs:
+        pd.DataFrame({
+            "gene_id": [f"g{sub}1", f"g{sub}2"],
+            "chrom": [f"chr{sub}", f"chr{sub}"],
+            "n_snp": [3, 3],
+            "callable": [1, 1],
+        }).to_csv(tmp_path / f"genes_{sub}.tsv", sep="\t", index=False)
+    table = tmp_path / "groups.tsv"
+    pd.DataFrame({
+        "group": ["og1", "og2"],
+        **{sub: [f"g{sub}1", f"g{sub}2"] for sub in subs},
+    }).to_csv(table, sep="\t", index=False)
+    output = tmp_path / "quartets.tsv"
+
+    from homoeogwas.cli import main
+    assert main([
+        "prep-homoeologs", "--mode", "group",
+        "--subgenomes", ",".join(subs),
+        "--genes", str(tmp_path / "genes_{S}.tsv"),
+        "--out", str(output), "--from-table", str(table),
+        "--table-format", "wide",
+    ]) == 0
+    result = pd.read_csv(output, sep="\t", dtype=str)
+    assert list(result.columns) == [
+        "group_id", "gene_A", "gene_B", "gene_C", "gene_D"]
+    assert result["group_id"].tolist() == ["og1", "og2"]
+
+
+def test_group_diamond_requires_consistent_all_pair_clique(tmp_path, monkeypatch):
+    subs = ["A", "B", "C", "D"]
+    proteins = {}
+    universe = {}
+    for sub in subs:
+        path = tmp_path / f"{sub}.faa"
+        path.write_text(f">g{sub}1\nMA\n>g{sub}2\nMT\n")
+        proteins[sub] = str(path)
+        universe[sub] = {f"g{sub}1": 3, f"g{sub}2": 3}
+
+    def fake_which(_):
+        return "/fake/diamond"
+
+    def fake_rbh(faa_a, faa_b, diamond, threads, tmp):
+        a = Path(faa_a).stem
+        b = Path(faa_b).stem
+        mapping = {f"g{a}1": f"g{b}1", f"g{a}2": f"g{b}2"}
+        if (a, b) == ("C", "D"):
+            mapping[f"g{a}2"] = f"g{b}1"  # break only the second 4-clique
+        return mapping
+
+    monkeypatch.setattr(prep.shutil, "which", fake_which)
+    monkeypatch.setattr(prep, "_diamond_rbh", fake_rbh)
+    result = prep.homoeologs_diamond(
+        proteins, subs, universe, diamond="/fake/diamond", mode="group")
+    assert list(result.columns) == [
+        "group_id", "gene_A", "gene_B", "gene_C", "gene_D"]
+    assert result[[f"gene_{s}" for s in subs]].to_dict("records") == [{
+        "gene_A": "gA1", "gene_B": "gB1", "gene_C": "gC1", "gene_D": "gD1"}]
+
+
 def test_pairs_table_compatible_with_interact_loader(tmp_path):
     uni = _genes_universe(tmp_path)
     tbl = tmp_path / "ortho.tsv"

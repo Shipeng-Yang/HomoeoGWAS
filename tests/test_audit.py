@@ -1,8 +1,12 @@
 import hashlib
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
-from homoeogwas.audit import audit_result, run_audit
-from homoeogwas.cli import main, validate_config
+import pytest
+
+from homoeogwas.audit import audit_result, cmd_audit, run_audit
+from homoeogwas.cli import main
 
 
 def _write(path, payload):
@@ -144,6 +148,224 @@ def test_audit_canonical_group_refuses_low_resolution_or_wrong_method(tmp_path):
     assert "OMNIB_BOOTSTRAP_MONTE_CARLO_RESOLUTION" in codes
     assert "OMNIB_FWER_METHOD_MISMATCH" in codes
     assert record.discovery_count is None
+
+
+@pytest.mark.parametrize("field", [
+    "n_sig", "sig", "minp_boot_rejected", "inferential",
+    "formal_discovery_layer", "rejected", "rejected_hypothesis_ids",
+])
+def test_audit_canonical_group_rejects_raw_second_authority(tmp_path, field):
+    payload = _canonical_group_omnib_payload()
+    sibling = {
+        "statistic": "omniB",
+        "n_sig": None,
+        "sig": None,
+        "minp_boot_rejected": None,
+        "model_diagnostics": {"bootstrap_fwer": {
+            "inferential": False,
+            "formal_discovery_layer": False,
+            "rejected": None,
+            "n_rejected": None,
+            "rejected_hypothesis_ids": None,
+        }},
+    }
+    if field in {"inferential", "formal_discovery_layer", "rejected"}:
+        sibling["model_diagnostics"]["bootstrap_fwer"][field] = True
+    elif field == "rejected_hypothesis_ids":
+        sibling["model_diagnostics"]["bootstrap_fwer"][field] = ["raw:rogue"]
+    elif field == "sig":
+        sibling[field] = [{"hypothesis_id": "raw:rogue", "p": 1e-9}]
+    elif field == "n_sig":
+        sibling[field] = 1
+    else:
+        sibling[field] = True
+    payload["results"]["raw"] = sibling
+
+    record = audit_result(_write(tmp_path / f"raw_{field}.json", payload))
+    flags = {flag.code: flag.severity for flag in record.flags}
+    assert flags["OMNIB_FWER_UNCALIBRATED_SECOND_PRIMARY_LAYER"] == "error"
+    assert record.status == "ANALYSIS_INVALID"
+    assert record.discovery_count is None
+
+
+def test_audit_canonical_group_accepts_nonprimary_noninferential_diagnostics(
+        tmp_path):
+    payload = _canonical_group_omnib_payload()
+    payload["results"]["raw"] = {
+        "statistic": "omniB",
+        "n_sig": None,
+        "sig": None,
+        "minp_boot_rejected": None,
+        "model_diagnostics": {"bootstrap_fwer": {
+            "inferential": False,
+            "formal_discovery_layer": False,
+            "rejected": None,
+            "n_rejected": None,
+            "sig": None,
+            "rejected_indices": None,
+            "rejected_hypothesis_ids": None,
+            "qa_diagnostics": {"role": "noninferential_engineering"},
+        }},
+    }
+    record = audit_result(_write(tmp_path / "qa_raw.json", payload))
+    assert record.status == "NO_FAMILYWISE_DISCOVERY"
+    assert record.discovery_count == 0
+    assert "OMNIB_FWER_UNCALIBRATED_SECOND_PRIMARY_LAYER" not in {
+        flag.code for flag in record.flags}
+
+
+def test_audit_canonical_group_accepts_primary_qa_only_serialization(tmp_path):
+    payload = _canonical_group_omnib_payload()
+    primary = payload["results"]["INT"]
+    fwer = primary["model_diagnostics"]["bootstrap_fwer"]
+    primary.update(
+        bootstrap_B=3,
+        n_sig=None,
+        sig=None,
+        minp_boot_rejected=None,
+        minp_boot_emp=None,
+        minp_boot_threshold=None,
+    )
+    fwer.update(
+        B=3,
+        inferential=False,
+        formal_discovery_layer=False,
+        adjusted_p=[None] * len(fwer["hypothesis_ids"]),
+        threshold=None,
+        threshold_comparator=None,
+        rejected=None,
+        rejected_indices=None,
+        rejected_hypothesis_ids=None,
+        n_rejected=None,
+        empirical_p=None,
+        sig=None,
+        qa_diagnostics={
+            "role": "noninferential_do_not_threshold",
+            "empirical_p": 0.2,
+            "threshold": 0.01,
+            "threshold_comparator": "strict_less_than",
+            "adjusted_p": [1.0] * len(fwer["hypothesis_ids"]),
+        },
+    )
+    record = audit_result(_write(tmp_path / "qa_primary.json", payload))
+    assert record.status != "ANALYSIS_INVALID"
+    assert record.discovery_count is None
+    assert "OMNIB_QA_ONLY" in {flag.code for flag in record.flags}
+
+
+@pytest.mark.parametrize("bad", [4.9, "4", True, None])
+def test_audit_canonical_group_rejects_noninteger_family_counts(tmp_path, bad):
+    payload = _canonical_group_omnib_payload()
+    payload["provenance"]["n_groups_raw"] = bad
+    payload["results"]["INT"]["model_diagnostics"]["family_provenance"][
+        "n_groups_raw"] = bad
+    record = audit_result(_write(tmp_path / "bad_count.json", payload))
+    assert record.status == "ANALYSIS_INVALID"
+    assert "OMNIB_FAMILY_COUNTS_INVALID" in {f.code for f in record.flags}
+
+
+@pytest.mark.parametrize("bad", [2000.9, "2000", True, 0, None])
+def test_audit_canonical_group_rejects_invalid_bootstrap_B(tmp_path, bad):
+    payload = _canonical_group_omnib_payload()
+    primary = payload["results"]["INT"]
+    primary["bootstrap_B"] = bad
+    primary["model_diagnostics"]["bootstrap_fwer"]["B"] = bad
+    record = audit_result(_write(tmp_path / "bad_b.json", payload))
+    assert record.status == "ANALYSIS_INVALID"
+    assert "OMNIB_FWER_BOOTSTRAP_B_INVALID" in {f.code for f in record.flags}
+
+
+@pytest.mark.parametrize("vector", ["observed_p", "adjusted_p"])
+@pytest.mark.parametrize("bad", ["bad", True, float("nan"), -0.01, 1.01])
+def test_audit_canonical_group_rejects_invalid_probability_vectors(
+        tmp_path, vector, bad):
+    payload = _canonical_group_omnib_payload()
+    payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"][
+        vector][0] = bad
+    record = audit_result(_write(tmp_path / f"bad_{vector}.json", payload))
+    assert record.status == "ANALYSIS_INVALID"
+    expected = f"OMNIB_FWER_{vector.upper()}_INVALID"
+    assert expected in {f.code for f in record.flags}
+
+
+@pytest.mark.parametrize("bad_ids", [["group:h0", "group:h0"],
+                                      ["group:h0", 2]])
+def test_audit_canonical_group_rejects_invalid_hypothesis_ids(tmp_path, bad_ids):
+    payload = _canonical_group_omnib_payload(n_groups=2)
+    fwer = payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"]
+    fwer["hypothesis_ids"] = bad_ids
+    fwer["family_order_sha256"] = hashlib.sha256(
+        "\x00".join(map(str, bad_ids)).encode()).hexdigest()
+    record = audit_result(_write(tmp_path / "bad_ids.json", payload))
+    assert record.status == "ANALYSIS_INVALID"
+    assert "OMNIB_FWER_HYPOTHESIS_IDS_INVALID" in {f.code for f in record.flags}
+
+
+def test_cmd_audit_malformed_vectors_returns_controlled_nonzero(tmp_path):
+    payload = _canonical_group_omnib_payload()
+    payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"][
+        "adjusted_p"][0] = "bad"
+    _write(tmp_path / "interact_trait.json", payload)
+    assert cmd_audit(SimpleNamespace(results=str(tmp_path), out_dir=None)) == 1
+
+
+def _make_positive_canonical_hit(payload, *, unit):
+    primary = payload["results"]["INT"]
+    fwer = primary["model_diagnostics"]["bootstrap_fwer"]
+    hit = {
+        "hypothesis_id": f"{unit}:h0",
+        "p": 0.001,
+        "p_interaction": 0.001,
+        "p_adjusted_bootstrap_minp": 0.02,
+        "primary_sig": True,
+        "p_unestimable": False,
+    }
+    if unit == "group":
+        hit.update(group_id="h0", driving_edge="A:B|a|b",
+                   driving_component="pc1")
+    else:
+        hit.update(edge_id="A:B|a|b", smallest_component="kernel_hadamard")
+    primary.update(n_sig=1, sig=[hit], top=[hit], minp_boot_emp=0.02,
+                   minp_boot_threshold=0.01, minp_boot_rejected=True)
+    fwer.update(
+        observed_p=[0.001, *fwer["observed_p"][1:]],
+        adjusted_p=[0.02, *fwer["adjusted_p"][1:]],
+        rejected=True,
+        rejected_indices=[0],
+        rejected_hypothesis_ids=[f"{unit}:h0"],
+        n_rejected=1,
+        empirical_p=0.02,
+        sig=[hit],
+    )
+
+
+def test_audit_canonical_group_hit_renders_identity_and_driver(tmp_path):
+    payload = _canonical_group_omnib_payload(hypothesis_unit="group")
+    _make_positive_canonical_hit(payload, unit="group")
+    result = _write(tmp_path / "interact_trait.json", payload)
+    record = audit_result(result)
+    assert record.discovery_count == 1
+    assert record.status == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+    component_flags = [f.message for f in record.flags
+                       if f.code == "COMPONENT_SPECIFIC_EVIDENCE"]
+    assert component_flags and "group:h0" in component_flags[0]
+    assert "pc1" in component_flags[0]
+    audit = run_audit(result, tmp_path / "audit")
+    markdown = Path(audit["outputs"]["markdown"]).read_text()
+    assert "group:h0" in markdown and "driving component=pc1" in markdown
+    assert "`None`" not in markdown
+
+
+def test_audit_canonical_edge_hit_renders_identity_and_driver(tmp_path):
+    payload = _canonical_group_omnib_payload(hypothesis_unit="edge")
+    _make_positive_canonical_hit(payload, unit="edge")
+    result = _write(tmp_path / "interact_trait.json", payload)
+    record = audit_result(result)
+    assert record.discovery_count == 1
+    markdown = Path(run_audit(result, tmp_path / "audit")["outputs"][
+        "markdown"]).read_text()
+    assert "edge:h0" in markdown
+    assert "smallest component=kernel_hadamard" in markdown
 
 
 def _omnib_payload(*, components=True, n_sig=1):

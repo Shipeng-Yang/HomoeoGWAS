@@ -297,9 +297,15 @@ def summarize_interaction(out_dir: str, trait: str) -> dict:
     provenance = payload.get("provenance") or {}
     primary_key = str(provenance.get("primary_transform", "INT"))
     primary = (payload.get("results") or {}).get(primary_key) or {}
-    fwer = ((primary.get("model_diagnostics") or {}).get("bootstrap_fwer") or {})
+    diagnostics = primary.get("model_diagnostics") or {}
+    fwer = diagnostics.get("bootstrap_fwer") or {}
+    family = diagnostics.get("family_provenance") or {}
     unit = provenance.get("hypothesis_unit") or fwer.get(
         "declared_hypothesis_unit")
+    ranking = out / f"interact_{trait}_ranking_group_{primary_key}.tsv"
+    top_descriptive = list(primary.get("top") or [])
+    significant = None if fwer.get("inferential") is False else fwer.get("sig")
+    driver_records = significant if isinstance(significant, list) else top_descriptive
     summary = {
         "ok": True,
         "trait": payload.get("trait", trait),
@@ -311,7 +317,28 @@ def summarize_interaction(out_dir: str, trait: str) -> dict:
         "n_significant": fwer.get("n_rejected"),
         "global_fwer_p": fwer.get("empirical_p"),
         "bootstrap_B": fwer.get("B", primary.get("bootstrap_B")),
-        "top": list(primary.get("top") or []),
+        "n_groups_raw": family.get(
+            "n_groups_raw", provenance.get("n_groups_raw")),
+        "n_unique_edges": family.get(
+            "n_unique_edges", provenance.get("n_unique_edges")),
+        "group_family_sha256": family.get(
+            "group_family_sha256", provenance.get("group_family_sha256")),
+        "edge_family_sha256": family.get(
+            "edge_family_sha256", provenance.get("edge_family_sha256")),
+        "lambda_gc": primary.get("lambda_gc_obs"),
+        "significant": significant,
+        "evidence_drivers": [
+            {
+                "hypothesis_id": record.get("hypothesis_id"),
+                "component": record.get("driving_component")
+                or record.get("smallest_component"),
+            }
+            for record in driver_records if isinstance(record, dict)
+        ],
+        "top": top_descriptive,
+        "top_descriptive": top_descriptive,
+        "top_descriptive_role": "descriptive_raw_p_ranking",
+        "ranking_tsv": str(ranking) if ranking.exists() else None,
         "result_json": str(result_path),
     }
     if audit_path.exists():

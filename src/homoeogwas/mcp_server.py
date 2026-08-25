@@ -22,6 +22,32 @@ def _safe(fn, **kw) -> dict:
         return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
 
 
+def _prep_homoeologs_command(
+        subgenomes: list[str], genes_template: str, out: str, *,
+        from_table: str | None = None, table_format: str = "long",
+        proteins: dict[str, str] | None = None,
+        subgenome_map: str | None = None, diamond: str | None = None,
+        restrict_base_group: bool = True) -> tuple[str, list[str]]:
+    """Build the MCP preparation command without requiring the MCP dependency."""
+    mode = workflow.infer_interaction_mode(subgenomes)
+    args = ["prep-homoeologs", "--mode", mode,
+            "--subgenomes", ",".join(subgenomes),
+            "--genes", genes_template, "--out", out]
+    if from_table:
+        args += ["--from-table", from_table, "--table-format", table_format]
+    elif proteins:
+        args += ["--method", "diamond-rbh"]
+        for subgenome, path in proteins.items():
+            args += ["--proteins", f"{subgenome}={path}"]
+        if restrict_base_group and subgenome_map:
+            args += ["--restrict-base-group", "--subgenome-map", subgenome_map]
+        if diamond:
+            args += ["--diamond", diamond]
+    else:
+        raise ValueError("provide from_table or proteins")
+    return mode, args
+
+
 def build_server():
     """Construct the FastMCP server (imported lazily so core installs stay lean)."""
     try:
@@ -93,34 +119,24 @@ def build_server():
     @mcp.tool()
     def prep_homoeologs(subgenomes: list[str], genes_template: str, out: str,
                         from_table: str | None = None,
+                        table_format: str = "long",
                         proteins: dict[str, str] | None = None,
                         subgenome_map: str | None = None,
                         diamond: str | None = None,
                         restrict_base_group: bool = True,
                         dry_run: bool = False) -> dict:
-        """Build the gene_<S> pair/triad table for ``interact`` — from a user
+        """Build a wide gene_<S> homoeolog-group table for ``interact`` — from a user
         orthology table (``from_table``) or DIAMOND reciprocal best hits
         (``proteins`` + a 2.1.x ``diamond`` binary; 2.2.0 deadlocks).
         ``genes_template`` is the genes_{S}.tsv path from prep_snps."""
         try:
-            mode = workflow.infer_interaction_mode(subgenomes)
+            mode, args = _prep_homoeologs_command(
+                subgenomes, genes_template, out, from_table=from_table,
+                table_format=table_format, proteins=proteins,
+                subgenome_map=subgenome_map, diamond=diamond,
+                restrict_base_group=restrict_base_group)
         except ValueError as e:
             return {"ok": False, "reason": str(e)}
-        args = ["prep-homoeologs", "--mode", mode,
-                "--subgenomes", ",".join(subgenomes),
-                "--genes", genes_template, "--out", out]
-        if from_table:
-            args += ["--from-table", from_table]
-        elif proteins:
-            args += ["--method", "diamond-rbh"]
-            for s, p in proteins.items():
-                args += ["--proteins", f"{s}={p}"]
-            if restrict_base_group and subgenome_map:
-                args += ["--restrict-base-group", "--subgenome-map", subgenome_map]
-            if diamond:
-                args += ["--diamond", diamond]
-        else:
-            return {"ok": False, "reason": "provide from_table or proteins"}
         step = _safe(workflow.run_cli, args=args, dry_run=dry_run)
         return {"ok": step.get("returncode") in (None, 0), "mode": mode,
                 "out": out, "step": step}

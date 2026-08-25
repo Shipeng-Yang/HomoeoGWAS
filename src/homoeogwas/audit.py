@@ -10,6 +10,7 @@ import csv
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,25 @@ def _integer(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _strict_integer(value: Any, *, minimum: int = 0) -> int | None:
+    """Return a serialized integer count without coercing floats/strings/bools."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= minimum:
+        return value
+    return None
+
+
+def _probability(value: Any, *, nullable: bool = False) -> bool:
+    """Whether value is a finite JSON probability, explicitly excluding bool."""
+    if value is None:
+        return nullable
+    return (
+        isinstance(value, Real)
+        and not isinstance(value, (bool, np.bool_))
+        and np.isfinite(value)
+        and 0.0 <= float(value) <= 1.0
+    )
 
 
 def _add(flags: list[AuditFlag], code: str, severity: str, message: str) -> None:
@@ -186,13 +206,17 @@ def _canonical_omnib_contract_codes(
     elif any(family.get(key) != provenance.get(key) for key in required_hashes):
         codes.append("OMNIB_FAMILY_PROVENANCE_MISMATCH")
 
-    n_groups = _integer(family.get("n_groups_raw"))
-    n_edges = _integer(family.get("n_unique_edges"))
-    top_groups = _integer(provenance.get("n_groups_raw"))
-    top_edges = _integer(provenance.get("n_unique_edges"))
+    raw_counts = (
+        family.get("n_groups_raw"), family.get("n_unique_edges"),
+        provenance.get("n_groups_raw"), provenance.get("n_unique_edges"),
+    )
+    n_groups, n_edges, top_groups, top_edges = (
+        _strict_integer(value, minimum=1) for value in raw_counts)
     if any(value is None or value < 1 for value in (
             n_groups, n_edges, top_groups, top_edges)):
-        codes.append("OMNIB_FAMILY_COUNTS_MISSING")
+        if any(value is None for value in raw_counts):
+            codes.append("OMNIB_FAMILY_COUNTS_MISSING")
+        codes.append("OMNIB_FAMILY_COUNTS_INVALID")
 
     unit = provenance.get("hypothesis_unit")
     if unit not in {"edge", "group"}:
@@ -215,9 +239,9 @@ def _canonical_omnib_contract_codes(
         n_groups == top_groups
         and n_edges == top_edges
         and expected is not None
-        and fwer.get("n_hypotheses") == expected
-        and _integer(primary.get("G")) == expected
-        and _integer(primary.get("n_planned")) == expected
+        and _strict_integer(fwer.get("n_hypotheses"), minimum=1) == expected
+        and _strict_integer(primary.get("G"), minimum=1) == expected
+        and _strict_integer(primary.get("n_planned"), minimum=1) == expected
     )
     if not counts_agree:
         codes.append("OMNIB_FWER_HYPOTHESIS_COUNT_MISMATCH")
@@ -231,6 +255,123 @@ def _canonical_omnib_contract_codes(
     if provenance.get("primary_transform") != "INT":
         codes.append("OMNIB_PRIMARY_TRANSFORM_MISMATCH")
     return tuple(dict.fromkeys(codes))
+
+
+def _canonical_omnib_serialization_codes(primary: dict) -> tuple[str, ...]:
+    """Validate untrusted scalar/vector types before the shared math checker."""
+    codes: list[str] = []
+    diagnostics = primary.get("model_diagnostics") or {}
+    fwer = diagnostics.get("bootstrap_fwer") or {}
+    if not isinstance(fwer, dict):
+        return ("OMNIB_FWER_OBJECT_MISSING",)
+
+    primary_b = _strict_integer(primary.get("bootstrap_B"), minimum=1)
+    fwer_b = _strict_integer(fwer.get("B"), minimum=1)
+    if primary_b is None or fwer_b is None or primary_b != fwer_b:
+        codes.append("OMNIB_FWER_BOOTSTRAP_B_INVALID")
+
+    primary_counts = ("G", "n_planned", "n_valid", "n_unestimable")
+    if any(_strict_integer(primary.get(key), minimum=(1 if key in {
+            "G", "n_planned"} else 0)) is None for key in primary_counts):
+        codes.append("OMNIB_FWER_COUNTS_INVALID")
+    if fwer.get("inferential") is True and _strict_integer(
+            primary.get("n_sig"), minimum=0) is None:
+        codes.append("OMNIB_FWER_COUNTS_INVALID")
+    inferential = fwer.get("inferential")
+    count_fields = [
+        ("n_hypotheses", 1), ("n_calibrated", 0), ("n_unestimable", 0)]
+    if inferential is True:
+        count_fields.append(("n_rejected", 0))
+    for key, minimum in count_fields:
+        if _strict_integer(fwer.get(key), minimum=minimum) is None:
+            codes.append("OMNIB_FWER_COUNTS_INVALID")
+            break
+
+    ids = fwer.get("hypothesis_ids")
+    ids_valid = (
+        isinstance(ids, list)
+        and all(isinstance(value, str) for value in ids)
+        and len(ids) == len(set(ids))
+    )
+    if not ids_valid:
+        codes.append("OMNIB_FWER_HYPOTHESIS_IDS_INVALID")
+
+    observed = fwer.get("observed_p")
+    adjusted = fwer.get("adjusted_p")
+    if not isinstance(observed, list) or not (
+            ids_valid and len(observed) == len(ids)):
+        codes.append("OMNIB_FWER_VECTOR_LENGTH_MISMATCH")
+    elif not all(_probability(value, nullable=True) for value in observed):
+        codes.append("OMNIB_FWER_OBSERVED_P_INVALID")
+    if not isinstance(adjusted, list) or not (
+            ids_valid and len(adjusted) == len(ids)):
+        codes.append("OMNIB_FWER_VECTOR_LENGTH_MISMATCH")
+    elif not all(_probability(value, nullable=True) for value in adjusted):
+        codes.append("OMNIB_FWER_ADJUSTED_P_INVALID")
+
+    if not _probability(fwer.get("alpha"), nullable=False):
+        codes.append("OMNIB_FWER_PROBABILITY_SCALAR_INVALID")
+    if inferential is True:
+        if any(not _probability(fwer.get(key), nullable=False)
+               for key in ("empirical_p", "threshold")):
+            codes.append("OMNIB_FWER_PROBABILITY_SCALAR_INVALID")
+    elif inferential is False:
+        qa = fwer.get("qa_diagnostics")
+        qa_adjusted = qa.get("adjusted_p") if isinstance(qa, dict) else None
+        qa_valid = (
+            isinstance(qa, dict)
+            and qa.get("role") == "noninferential_do_not_threshold"
+            and _probability(qa.get("empirical_p"), nullable=False)
+            and _probability(qa.get("threshold"), nullable=False)
+            and isinstance(qa_adjusted, list)
+            and ids_valid
+            and len(qa_adjusted) == len(ids)
+            and all(_probability(value, nullable=True) for value in qa_adjusted)
+        )
+        if not qa_valid:
+            codes.append("OMNIB_FWER_QA_DIAGNOSTICS_INVALID")
+    else:
+        codes.append("OMNIB_FWER_AUTHORITY_MODE_INVALID")
+    return tuple(dict.fromkeys(codes))
+
+
+def _nonprimary_authority_codes(payload: dict, primary_key: str) -> tuple[str, ...]:
+    """Reject any formal discovery authority outside the selected transform."""
+    results = payload.get("results") or {}
+    if not isinstance(results, dict):
+        return ()
+    for key, result in results.items():
+        if key == primary_key or not isinstance(result, dict):
+            continue
+        fwer = ((result.get("model_diagnostics") or {}).get(
+            "bootstrap_fwer") or {})
+        top_authority = any(result.get(field) is not None for field in (
+            "n_sig", "sig", "minp_boot_rejected"))
+        fwer_authority = not isinstance(fwer, dict) or any((
+            fwer.get("inferential") is not False,
+            fwer.get("formal_discovery_layer") is not False,
+            *(fwer.get(field) is not None for field in (
+                "rejected", "n_rejected", "sig", "rejected_indices",
+                "rejected_hypothesis_ids")),
+        ))
+        if top_authority or fwer_authority:
+            return ("OMNIB_FWER_UNCALIBRATED_SECOND_PRIMARY_LAYER",)
+    return ()
+
+
+def _hit_identity(hit: dict) -> Any:
+    for key in ("hypothesis_id", "group_id", "edge_id", "pair", "triad"):
+        if hit.get(key) is not None:
+            return hit[key]
+    return "UNIDENTIFIED"
+
+
+def _hit_component(hit: dict) -> tuple[Any, str | None]:
+    if hit.get("driving_component") is not None:
+        return hit["driving_component"], "driving component"
+    if hit.get("smallest_component") is not None:
+        return hit["smallest_component"], "smallest component"
+    return None, None
 
 
 def _interact_record(path: Path, payload: dict) -> AuditRecord:
@@ -286,12 +427,25 @@ def _interact_record(path: Path, payload: dict) -> AuditRecord:
         formal_fwer = (
             (primary.get("model_diagnostics") or {}).get("bootstrap_fwer") or {})
         is_canonical_group = payload.get("mode") == "group"
+        serialization_codes: tuple[str, ...] = ()
+        cross_layer_codes: tuple[str, ...] = ()
+        if is_canonical_group:
+            serialization_codes = _canonical_omnib_serialization_codes(primary)
+            cross_layer_codes = _nonprimary_authority_codes(payload, primary_key)
+            for code in (*serialization_codes, *cross_layer_codes):
+                _add(
+                    flags, code, "error",
+                    "The canonical omniB artifact has invalid serialized family "
+                    "values or a formal discovery authority outside its INT primary layer.")
         consistency_codes: tuple[str, ...] = ()
         if (
             formal_fwer.get("formal_discovery_layer") is True
             or is_canonical_group
-        ):
-            consistency_codes = omnib_fwer_consistency_flags(primary)
+        ) and not serialization_codes:
+            try:
+                consistency_codes = omnib_fwer_consistency_flags(primary)
+            except (TypeError, ValueError, OverflowError):
+                consistency_codes = ("OMNIB_FWER_SERIALIZATION_INVALID",)
             for code in consistency_codes:
                 _add(
                     flags, code, "error" if is_canonical_group else "review",
@@ -313,12 +467,14 @@ def _interact_record(path: Path, payload: dict) -> AuditRecord:
                  "omniB component p-values were not recorded; the signal cannot be localized "
                  "to minor-burden, PC1 or kernel-Hadamard evidence from this artifact.")
         for hit in top[:5]:
-            driver = hit.get("smallest_component")
+            driver, _ = _hit_component(hit)
             if driver and driver != "minor_burden":
                 _add(flags, "COMPONENT_SPECIFIC_EVIDENCE", "info",
-                     f"Top unit {hit.get('pair')} is most strongly supported by {driver}; "
+                     f"Top unit {_hit_identity(hit)} is most strongly supported by {driver}; "
                      "do not relabel the omnibus hit as a burden-product interaction.")
-        boot_b = _integer(primary.get("bootstrap_B"))
+        boot_b = (
+            _strict_integer(primary.get("bootstrap_B"), minimum=1)
+            if is_canonical_group else _integer(primary.get("bootstrap_B")))
         if not boot_b:
             _add(flags, "BOOTSTRAP_NOT_RUN", "review",
                  "omniB kinship-preserving bootstrap calibration was not run.")
@@ -350,7 +506,9 @@ def _interact_record(path: Path, payload: dict) -> AuditRecord:
                 and boot_b >= PAIRWISE_OMNIB_FORMAL_BOOTSTRAP_MIN_B
                 and decision_ok
                 and not consistency_codes
-                and not contract_codes)
+                and not contract_codes
+                and not serialization_codes
+                and not cross_layer_codes)
             if inferential is False:
                 _add(flags, "OMNIB_QA_ONLY", "info",
                      "The omniB bootstrap was marked QA-only; no "
@@ -743,10 +901,14 @@ def _write_markdown(path: Path, overall: str, records: list[AuditRecord]) -> Non
         if record.top:
             lines.extend(["", "Top reported units (descriptive):", ""])
             for hit in record.top:
-                unit = hit.get("pair") or hit.get("triad")
-                p = _finite(hit.get("p"))
-                driver = hit.get("smallest_component")
-                suffix = f"; smallest component={driver}" if driver else ""
+                unit = _hit_identity(hit)
+                p = _finite(hit.get("p_interaction"))
+                if p is None:
+                    p = _finite(hit.get("p"))
+                driver, driver_label = _hit_component(hit)
+                suffix = (
+                    f"; {driver_label}={driver}"
+                    if driver is not None and driver_label else "")
                 lines.append(f"- `{unit}`: p={p if p is not None else 'NA'}{suffix}")
         lines.append("")
     path.write_text("\n".join(lines))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,18 @@ def test_infer_interaction_mode():
     assert workflow.infer_interaction_mode(["A", "B"]) == "pairwise"
     assert workflow.infer_interaction_mode(["A", "B", "C"]) == "triad"
     assert workflow.infer_interaction_mode(["A", "B", "C", "D"]) == "group"
+
+
+def test_mcp_prep_homoeologs_four_copy_command_targets_group_wide_table():
+    from homoeogwas.mcp_server import _prep_homoeologs_command
+
+    mode, args = _prep_homoeologs_command(
+        ["A", "B", "C", "D"], "genes_{S}.tsv", "quartets.tsv",
+        from_table="curated.tsv", table_format="wide")
+    assert mode == "group"
+    assert args[:3] == ["prep-homoeologs", "--mode", "group"]
+    assert args[args.index("--subgenomes") + 1] == "A,B,C,D"
+    assert args[args.index("--table-format") + 1] == "wide"
 
 
 def test_build_fit_config_shape():
@@ -267,6 +280,73 @@ def test_run_interaction_audits_then_summarizes(tmp_path, monkeypatch):
         out_dir=str(tmp_path / "out"), groups=str(groups), n_jobs=4)
     assert [call[0] for call in calls] == ["validate", "interact", "audit"]
     assert res["summary"]["primary_unit"] == "edge"
+
+
+def test_summarize_interaction_reports_authoritative_family_and_paths(tmp_path):
+    group_hash = "a" * 64
+    edge_hash = "b" * 64
+    hit = {
+        "hypothesis_id": "group:g1",
+        "group_id": "g1",
+        "p_interaction": 0.001,
+        "p_adjusted_bootstrap_minp": 0.02,
+        "driving_component": "pc1",
+    }
+    family = {
+        "n_groups_raw": 10,
+        "n_unique_edges": 30,
+        "group_family_sha256": group_hash,
+        "edge_family_sha256": edge_hash,
+    }
+    payload = {
+        "trait": "height",
+        "provenance": {
+            "primary_transform": "INT",
+            "hypothesis_unit": "group",
+            "family_scope": "primary_only",
+            **family,
+        },
+        "results": {"INT": {
+            "n": 120,
+            "G": 10,
+            "n_valid": 9,
+            "lambda_gc_obs": 1.03,
+            "top": [{"group_id": "g2", "p_interaction": 0.03,
+                     "driving_component": "minor_burden"}],
+            "model_diagnostics": {
+                "family_provenance": family,
+                "bootstrap_fwer": {
+                    "declared_hypothesis_unit": "group",
+                    "family_scope": "primary_only",
+                    "n_rejected": 1,
+                    "empirical_p": 0.02,
+                    "B": 2000,
+                    "sig": [hit],
+                },
+            },
+        }},
+    }
+    (tmp_path / "interact_height.json").write_text(json.dumps(payload))
+    ranking = tmp_path / "interact_height_ranking_group_INT.tsv"
+    ranking.write_text("hypothesis_id\tp_interaction\n")
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    (audit_dir / "homoeogwas_audit.json").write_text(json.dumps({
+        "overall_status": "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"}))
+
+    summary = workflow.summarize_interaction(str(tmp_path), "height")
+    assert summary["n_groups_raw"] == 10
+    assert summary["n_unique_edges"] == 30
+    assert summary["group_family_sha256"] == group_hash
+    assert summary["edge_family_sha256"] == edge_hash
+    assert summary["significant"] == [hit]
+    assert summary["significant"][0]["p_adjusted_bootstrap_minp"] == 0.02
+    assert summary["lambda_gc"] == 1.03
+    assert summary["ranking_tsv"] == str(ranking)
+    assert summary["audit_json"] == str(audit_dir / "homoeogwas_audit.json")
+    assert summary["audit_status"] == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+    assert summary["top_descriptive"][0]["group_id"] == "g2"
+    assert summary["top_descriptive_role"] == "descriptive_raw_p_ranking"
 
 
 def test_get_guidance_returns_spec():

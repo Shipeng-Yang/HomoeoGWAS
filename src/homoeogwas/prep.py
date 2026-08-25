@@ -290,7 +290,8 @@ def homoeologs_from_table(table: str, table_format: str, subs: list[str],
                           uni: dict[str, dict], *, gene_col: str = "gene",
                           group_col: str = "group", min_snp_pair: int = 1,
                           callable_map: dict | None = None,
-                          drop_missing: bool = False) -> pd.DataFrame:
+                          drop_missing: bool = False,
+                          include_group_id: bool = False) -> pd.DataFrame:
     """Assemble gene_<S> rows from a user orthology table.
 
     ``long``: two columns (gene, group). ``wide``: a group column plus one
@@ -336,12 +337,14 @@ def homoeologs_from_table(table: str, table_format: str, subs: list[str],
         print(f"  note: {n_ignored} table gene id(s) not in any genes_<S>.tsv "
               "(ignored; pass --drop-missing to silence)")
     return _assemble_rows(groups, subs, uni, min_snp_pair=min_snp_pair,
-                          callable_map=callable_map, drop_missing=drop_missing)
+                          callable_map=callable_map, drop_missing=drop_missing,
+                          include_group_id=include_group_id)
 
 
 def _assemble_rows(groups: dict, subs: list[str], uni: dict[str, dict], *,
                    min_snp_pair: int = 1, callable_map: dict | None = None,
-                   drop_missing: bool) -> pd.DataFrame:
+                   drop_missing: bool,
+                   include_group_id: bool = False) -> pd.DataFrame:
     """One row per group, one TRUE homoeolog per subgenome, then callability gate.
 
     Homology and callability are kept strictly separate:
@@ -383,7 +386,10 @@ def _assemble_rows(groups: dict, subs: list[str], uni: dict[str, dict], *,
             if any(not _is_callable(s, chosen[s]) for s in subs):
                 status = "dropped_callability"
         if status == "tested":
-            rows.append({f"gene_{s}": chosen[s] for s in subs})
+            row = {f"gene_{s}": chosen[s] for s in subs}
+            if include_group_id:
+                row = {"group_id": str(grp), **row}
+            rows.append(row)
         elif status == "ambiguous_1tomany":
             n_amb += 1
         elif status == "dropped_callability":
@@ -398,7 +404,9 @@ def _assemble_rows(groups: dict, subs: list[str], uni: dict[str, dict], *,
                       **{f"gene_{s}": disp[s] for s in subs},
                       **{f"n_snp_{s}": int(uni[s].get(disp[s] or "", 0))
                          for s in subs}})
-    out = pd.DataFrame(rows, columns=[f"gene_{s}" for s in subs])
+    columns = (["group_id"] if include_group_id else []) + [
+        f"gene_{s}" for s in subs]
+    out = pd.DataFrame(rows, columns=columns)
     out.attrs["n_groups"] = len(groups)
     out.attrs["n_tested"] = len(rows)
     out.attrs["n_dropped_ambiguous"] = n_amb
@@ -440,7 +448,7 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
                        min_snp_pair: int = 1, callable_map: dict | None = None,
                        gene_base_group: dict[str, str] | None = None
                        ) -> pd.DataFrame:
-    """Build triad/pair rows from DIAMOND reciprocal best hits across subgenomes.
+    """Build pair/triad/group rows from DIAMOND reciprocal best hits.
 
     Pairwise = the RBH set of the two subgenomes. Triad = genes linked by RBH
     across all three subgenome pairs consistently (A↔B, B↔C, A↔C agree). When
@@ -472,7 +480,8 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
         in_npz = (g in callable_map[s]) if callable_map is not None else True
         return in_npz and int(uni[s].get(g, 0)) >= min_snp_pair
 
-    def _finish(true_rows: list, sub_order: list) -> pd.DataFrame:
+    def _finish(true_rows: list, sub_order: list, *,
+                include_group_id: bool = False) -> pd.DataFrame:
         """``true_rows`` = list of dicts {gene_<S>} that are valid homoeolog
         groups (RBH-consistent, same base group, all genes exist). Apply the
         callability gate (drop, never substitute) and record an audit."""
@@ -487,7 +496,9 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
             audit.append({**r, "status": status,
                           **{f"n_snp_{s}": int(uni[s].get(r[f"gene_{s}"], 0))
                              for s in sub_order}})
-        out = pd.DataFrame(rows, columns=[f"gene_{s}" for s in sub_order])
+        columns = (["group_id"] if include_group_id else []) + [
+            f"gene_{s}" for s in sub_order]
+        out = pd.DataFrame(rows, columns=columns)
         out.attrs["n_groups"] = len(true_rows)
         out.attrs["n_tested"] = len(rows)
         out.attrs["n_dropped_callability"] = n_uncall
@@ -507,6 +518,42 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
                          if a in uni[sx] and b in uni[sy] and g2s.get(a) == sx
                          and g2s.get(b) == sy and _same_group(a, b)]
             return _finish(true_rows, [sx, sy])
+        if mode == "group":
+            pair_maps: dict[tuple[str, str], dict[str, str]] = {}
+            for left_index, left in enumerate(subs):
+                for right in subs[left_index + 1:]:
+                    pair_maps[(left, right)] = _diamond_rbh(
+                        proteins[left], proteins[right], diamond, threads, tmp)
+            anchor = subs[0]
+            true_rows = []
+            first_map = pair_maps[(anchor, subs[1])]
+            for anchor_gene in sorted(first_map):
+                genes = {anchor: anchor_gene}
+                for sub in subs[1:]:
+                    gene = pair_maps[(anchor, sub)].get(anchor_gene)
+                    if gene is None:
+                        break
+                    genes[sub] = gene
+                if len(genes) != len(subs):
+                    continue
+                clique_ok = all(
+                    pair_maps[(left, right)].get(genes[left]) == genes[right]
+                    for left_index, left in enumerate(subs)
+                    for right in subs[left_index + 1:]
+                )
+                if not clique_ok or not all(
+                        genes[sub] in uni[sub] and g2s.get(genes[sub]) == sub
+                        for sub in subs):
+                    continue
+                if not _same_group(*(genes[sub] for sub in subs)):
+                    continue
+                true_rows.append({
+                    "group_id": f"group_{len(true_rows) + 1:06d}",
+                    **{f"gene_{sub}": genes[sub] for sub in subs},
+                })
+            return _finish(true_rows, subs, include_group_id=True)
+        if mode != "triad":
+            raise SystemExit(f"ERR: unknown homoeolog mode {mode!r}")
         a, b, c = subs
         ab = _diamond_rbh(proteins[a], proteins[b], diamond, threads, tmp)
         bc = _diamond_rbh(proteins[b], proteins[c], diamond, threads, tmp)
@@ -554,9 +601,10 @@ def add_prep_subparsers(sub) -> None:
     ps.add_argument("--min-snp", type=int, default=1)
     ps.add_argument("--out-dir", required=True)
 
-    ph = sub.add_parser("prep-homoeologs", help="assemble the gene_<S> triad/"
-                                                "pair TSV for `interact`")
-    ph.add_argument("--mode", choices=["triad", "pairwise"], default="triad")
+    ph = sub.add_parser("prep-homoeologs", help="assemble a wide gene_<S> "
+                                                "homoeolog TSV for `interact`")
+    ph.add_argument("--mode", choices=["triad", "pairwise", "group"],
+                    default="triad")
     ph.add_argument("--subgenomes", required=True, help="comma list, e.g. A,B,C")
     ph.add_argument("--genes", required=True,
                     help="genes_{S}.tsv template from prep-snps (use {S})")
@@ -614,6 +662,8 @@ def cmd_prep_homoeologs(args) -> int:
         raise SystemExit("ERR: --mode triad needs 3 subgenomes")
     if args.mode == "pairwise" and len(subs) != 2:
         raise SystemExit("ERR: --mode pairwise needs 2 subgenomes")
+    if args.mode == "group" and len(subs) < 2:
+        raise SystemExit("ERR: --mode group needs at least 2 subgenomes")
     uni = _load_gene_universe(args.genes, subs)
     callable_map = _load_callable(args.genes, subs)   # = burden-NPZ membership
     print(f"=== homoeogwas prep-homoeologs (mode={args.mode}) "
@@ -625,7 +675,8 @@ def cmd_prep_homoeologs(args) -> int:
                                    group_col=args.group_col,
                                    min_snp_pair=min_snp_pair,
                                    callable_map=callable_map,
-                                   drop_missing=args.drop_missing)
+                                   drop_missing=args.drop_missing,
+                                   include_group_id=args.mode == "group")
         src = f"table:{args.table_format}"
     elif args.method == "diamond-rbh":
         proteins = _parse_kv(args.proteins)
