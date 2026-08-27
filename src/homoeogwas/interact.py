@@ -739,8 +739,26 @@ def pc_scores_std(Z: np.ndarray, n_pc: int = 1) -> np.ndarray:
     Split out from :func:`gene_pc_scores` so callers holding a pre-standardized SNP block (e.g. the
     benchmark's ``scols_safe`` columns) reuse the same encoding-invariant scores. Directions below the
     numerical-rank tolerance are dropped so unit-scaling never amplifies arbitrary noise."""
+    Z = np.asarray(Z, float)
+    if not np.all(np.isfinite(Z)):
+        raise ValueError("standardized gene block contains non-finite values before PCA")
     k = int(min(n_pc, Z.shape[1], max(1, Z.shape[0] - 1)))
-    U, S, _Vt = np.linalg.svd(Z, full_matrices=False)
+    try:
+        U, S, _Vt = np.linalg.svd(Z, full_matrices=False)
+    except np.linalg.LinAlgError:
+        # NumPy normally calls divide-and-conquer GESDD, which can very rarely
+        # fail on a finite, highly collinear real gene block. Classical GESVD
+        # is slower but more robust and is used only for that exceptional
+        # block; returning zeros/NA would silently change the omniB estimand.
+        from scipy.linalg import svd
+
+        try:
+            U, S, _Vt = svd(
+                Z, full_matrices=False, check_finite=True, lapack_driver="gesvd")
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(
+                f"gene-block PCA failed with both gesdd and gesvd "
+                f"(shape={Z.shape})") from exc
     tol = max(Z.shape) * np.finfo(float).eps * (S[0] if S.size else 0.0)
     rank = int(np.sum(S > tol))
     if rank == 0:

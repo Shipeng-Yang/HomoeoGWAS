@@ -101,6 +101,136 @@ def test_gene_pc_scores_invariant_to_ref_alt_flip():
     assert not np.allclose(b0, b1, atol=1e-6)
 
 
+def _separated_spectrum_block(rng, n=90, m=7):
+    """Finite block whose leading singular directions are unambiguous across drivers."""
+    left, _ = np.linalg.qr(rng.normal(size=(n, m)))
+    right, _ = np.linalg.qr(rng.normal(size=(m, m)))
+    singular_values = np.geomspace(12.0, 0.25, num=m)
+    return left @ np.diag(singular_values) @ right.T
+
+
+def test_pc_scores_uses_gesvd_fallback_with_frozen_options(monkeypatch):
+    import scipy.linalg
+
+    rng = np.random.default_rng(301)
+    Z = _separated_spectrum_block(rng)
+    expected = I.pc_scores_std(Z, n_pc=3)
+    scipy_svd = scipy.linalg.svd
+    calls = []
+
+    def _fail_gesdd(*args, **kwargs):
+        raise np.linalg.LinAlgError("synthetic gesdd non-convergence")
+
+    def _record_gesvd(a, **kwargs):
+        calls.append((a, kwargs))
+        return scipy_svd(a, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "svd", _fail_gesdd)
+    monkeypatch.setattr(scipy.linalg, "svd", _record_gesvd)
+    observed = I.pc_scores_std(Z, n_pc=3)
+
+    assert len(calls) == 1
+    assert calls[0][0] is Z
+    assert calls[0][1] == {
+        "full_matrices": False,
+        "check_finite": True,
+        "lapack_driver": "gesvd",
+    }
+    np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(observed.mean(axis=0), 0.0, atol=1e-14)
+    np.testing.assert_allclose(observed.std(axis=0), 1.0, atol=1e-14)
+
+
+def test_pc_scores_gesvd_fallback_handles_finite_rank_deficiency(monkeypatch):
+    rng = np.random.default_rng(302)
+    a, b = rng.normal(size=(2, 80))
+    Z = np.column_stack([a, b, a + b, 2.0 * a, np.zeros_like(a)])
+    expected = I.pc_scores_std(Z, n_pc=5)
+
+    def _fail_gesdd(*args, **kwargs):
+        raise np.linalg.LinAlgError("synthetic gesdd non-convergence")
+
+    monkeypatch.setattr(np.linalg, "svd", _fail_gesdd)
+    observed = I.pc_scores_std(Z, n_pc=5)
+
+    assert observed.shape == (80, 2)
+    assert np.isfinite(observed).all()
+    np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(observed.mean(axis=0), 0.0, atol=1e-14)
+    np.testing.assert_allclose(observed.std(axis=0), 1.0, atol=1e-14)
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_pc_scores_rejects_nonfinite_before_either_svd(monkeypatch, bad_value):
+    import scipy.linalg
+
+    Z = np.ones((12, 3), dtype=float)
+    Z[4, 1] = bad_value
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("an SVD driver was called for non-finite input")
+
+    monkeypatch.setattr(np.linalg, "svd", _forbidden)
+    monkeypatch.setattr(scipy.linalg, "svd", _forbidden)
+    with pytest.raises(ValueError, match="standardized gene block contains non-finite"):
+        I.pc_scores_std(Z, n_pc=2)
+
+
+def test_pc_scores_normal_path_never_calls_scipy_svd(monkeypatch):
+    import scipy.linalg
+
+    Z = _separated_spectrum_block(np.random.default_rng(303))
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("SciPy SVD must remain exceptional-path-only")
+
+    monkeypatch.setattr(scipy.linalg, "svd", _forbidden)
+    observed = I.pc_scores_std(Z, n_pc=3)
+    assert observed.shape == (90, 3)
+
+
+def test_pc_scores_does_not_mask_non_linalg_primary_error(monkeypatch):
+    import scipy.linalg
+
+    Z = _separated_spectrum_block(np.random.default_rng(304))
+
+    def _programming_error(*args, **kwargs):
+        raise TypeError("synthetic programming error")
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("SciPy SVD must not handle non-LinAlgError failures")
+
+    monkeypatch.setattr(np.linalg, "svd", _programming_error)
+    monkeypatch.setattr(scipy.linalg, "svd", _forbidden)
+    with pytest.raises(TypeError, match="synthetic programming error"):
+        I.pc_scores_std(Z, n_pc=3)
+
+
+def test_pc_scores_both_svd_drivers_fail_informatively(monkeypatch):
+    import scipy.linalg
+
+    Z = np.ones((25, 4), dtype=float)
+    gesvd_error = np.linalg.LinAlgError("synthetic gesvd non-convergence")
+
+    def _fail_gesdd(*args, **kwargs):
+        raise np.linalg.LinAlgError("synthetic gesdd non-convergence")
+
+    def _fail_gesvd(*args, **kwargs):
+        raise gesvd_error
+
+    def _forbid_matrix_rank(*args, **kwargs):
+        raise AssertionError("failure diagnostics must not run a third SVD")
+
+    monkeypatch.setattr(np.linalg, "svd", _fail_gesdd)
+    monkeypatch.setattr(np.linalg, "matrix_rank", _forbid_matrix_rank)
+    monkeypatch.setattr(scipy.linalg, "svd", _fail_gesvd)
+    with pytest.raises(
+            ValueError,
+            match=r"gene-block PCA failed with both gesdd and gesvd \(shape=\(25, 4\)\)") as err:
+        I.pc_scores_std(Z, n_pc=3)
+    assert err.value.__cause__ is gesvd_error
+
+
 def test_pc_and_kernel_interaction_invariant_burden_not():
     # inject a coherent burden-product signal, then flip half of each gene's SNPs: the burden-product
     # p moves, but PC1xPC1 and the low-rank kernel-interaction p are invariant to numerical precision.
