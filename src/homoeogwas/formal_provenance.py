@@ -18,7 +18,14 @@ import scipy
 
 from . import __version__
 
-PRE_RUN_MANIFEST_SCHEMA = "homoeogwas-wheat-f2143-edge-pre-run-manifest-v2"
+PRE_RUN_MANIFEST_SCHEMA = "homoeogwas-group-omnib-pre-run-manifest-v1"
+LEGACY_PRE_RUN_MANIFEST_SCHEMA = (
+    "homoeogwas-wheat-f2143-edge-pre-run-manifest-v2"
+)
+SUPPORTED_PRE_RUN_MANIFEST_SCHEMAS = (
+    PRE_RUN_MANIFEST_SCHEMA,
+    LEGACY_PRE_RUN_MANIFEST_SCHEMA,
+)
 BLAS_THREAD_VARIABLES = (
     "OPENBLAS_NUM_THREADS",
     "OMP_NUM_THREADS",
@@ -200,7 +207,11 @@ def verify_formal_launch(
     raw_config_sha256 = sha256_file(config_path)
     manifest_sha256 = hashlib.sha256(manifest_body).hexdigest()
     schema = manifest.get("schema")
-    _require_equal("pre-run manifest schema", PRE_RUN_MANIFEST_SCHEMA, schema)
+    if schema not in SUPPORTED_PRE_RUN_MANIFEST_SCHEMAS:
+        raise FormalLaunchError(
+            "formal pre-run manifest schema mismatch: expected one of "
+            f"{SUPPORTED_PRE_RUN_MANIFEST_SCHEMAS!r}, observed {schema!r}; "
+            "regenerate the preparation bundle from this clean executable source")
     expected_config_sha = (manifest.get("config") or {}).get("sha256")
     if expected_config_sha != raw_config_sha256:
         raise FormalLaunchError(
@@ -252,7 +263,7 @@ def verify_formal_launch(
         },
         "pre_run_manifest_schema": {
             "passed": True,
-            "expected": PRE_RUN_MANIFEST_SCHEMA,
+            "expected": list(SUPPORTED_PRE_RUN_MANIFEST_SCHEMAS),
             "actual": schema,
         },
         "source_identity": {

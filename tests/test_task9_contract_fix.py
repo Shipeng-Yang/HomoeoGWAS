@@ -325,7 +325,9 @@ def test_build_grm_refuses_zero_surviving_analysis_variants():
         )
 
 
-def _write_formal_identity_fixture(tmp_path, *, source=None, runtime=None):
+def _write_formal_identity_fixture(
+    tmp_path, *, source=None, runtime=None, manifest_schema=None,
+):
     from homoeogwas.formal_provenance import PRE_RUN_MANIFEST_SCHEMA
 
     source = source or {
@@ -362,7 +364,7 @@ def _write_formal_identity_fixture(tmp_path, *, source=None, runtime=None):
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
     manifest = {
-        "schema": PRE_RUN_MANIFEST_SCHEMA,
+        "schema": manifest_schema or PRE_RUN_MANIFEST_SCHEMA,
         "config": {"sha256": config_sha},
         "source_identity": source,
         "runtime_fingerprint": runtime,
@@ -370,6 +372,32 @@ def _write_formal_identity_fixture(tmp_path, *, source=None, runtime=None):
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     return config_path, cfg, manifest_path, source, runtime
+
+
+@pytest.mark.parametrize(
+    "manifest_schema",
+    [
+        "homoeogwas-group-omnib-pre-run-manifest-v1",
+        "homoeogwas-wheat-f2143-edge-pre-run-manifest-v2",
+    ],
+)
+def test_formal_launch_accepts_generic_and_legacy_manifest_schemas(
+    tmp_path, monkeypatch, manifest_schema,
+):
+    """Formal provenance must be species-neutral without orphaning wheat."""
+    from homoeogwas import formal_provenance as P
+
+    config_path, cfg, _manifest, source, runtime = (
+        _write_formal_identity_fixture(
+            tmp_path, manifest_schema=manifest_schema))
+    monkeypatch.setattr(P, "capture_source_identity", lambda: source)
+    monkeypatch.setattr(P, "runtime_fingerprint", lambda _policy: runtime)
+    for name in runtime["blas_thread_policy"]:
+        monkeypatch.setenv(name, "1")
+
+    verified = P.verify_formal_launch(config_path, cfg)
+    assert verified.checkpoint_context["pre_run_manifest_schema"] == (
+        manifest_schema)
 
 
 def test_formal_checkpoint_without_pre_run_manifest_fails_closed(tmp_path):
