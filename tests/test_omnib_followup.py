@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
+import yaml
 
+from homoeogwas.followup import (
+    FollowupError,
+    load_followup_inputs,
+    prepare_formal_replay,
+)
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import SubgenomeData
 from homoeogwas.omnib_family import score_omnib_family, score_omnib_subset
+from homoeogwas.workflow import build_interact_config
 
 
 def _toy_group_inputs(subgenomes, *, n=48, n_groups=3, snps_per_gene=6):
@@ -76,3 +84,158 @@ def test_subset_scorer_validates_keep_and_minimum_sample_count():
             y[:11], n_jobs=1)
     with pytest.raises(ValueError, match="at least 10"):
         score_omnib_subset(scores, family, expanded, np.arange(9), y[:9], n_jobs=1)
+
+
+def _write_canonical_result_fixture(tmp_path, *, significant=(1, 0)):
+    cfg = build_interact_config(
+        subgenomes=("A", "C"),
+        bed_prefixes={"A": "geno/A", "C": "geno/C"},
+        snp_to_gene={"A": "maps/A.npz", "C": "maps/C.npz"},
+        phenotype="phenotype.tsv", sample_col="sample", trait="flowering_time",
+        out_dir=str(tmp_path), groups="groups.tsv", hypothesis_unit="edge",
+        subset_order=2, family_scope="primary_only", perm_b=2000,
+        statistic="omniB")
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "interact.generated.group.omnib.yaml"
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    ranking = pd.DataFrame({
+        "rank": [0, 1],
+        "hypothesis_id": ["edge:AC:gA1:gC1", "edge:AC:gA2:gC2"],
+        "family_id": ["edge", "edge"],
+        "hypothesis_unit": ["edge", "edge"],
+        "group_id": ["group1", "group2"],
+        "edge_id": ["AC:gA1:gC1", "AC:gA2:gC2"],
+        "group_ids": ["group1", "group2"],
+        "direction": ["AC", "AC"],
+        "sub_x": ["A", "A"], "sub_y": ["C", "C"],
+        "gene_A": ["gA1", "gA2"], "gene_C": ["gC1", "gC2"],
+        "p_interaction": [1e-6, 0.2],
+        "p_adjusted_bootstrap_minp": [0.01, 1.0],
+        "primary_sig": list(significant), "p_unestimable": [0, 0],
+        "driving_edge": ["AC:gA1:gC1", "AC:gA2:gC2"],
+        "driving_component": ["pc1", "minor_burden"],
+        "driving_component_p": [3e-7, 0.1],
+    })
+    ranking_path = tmp_path / "interact_flowering_time_ranking_group_INT.tsv"
+    ranking.to_csv(ranking_path, sep="\t", index=False)
+    return config_path, ranking_path
+
+
+def test_loader_selects_only_formal_primary_hits(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(1, 0))
+
+    loaded = load_followup_inputs(tmp_path)
+
+    assert loaded.formal_hits["hypothesis_id"].tolist() == ["edge:AC:gA1:gC1"]
+    assert loaded.hypothesis_unit == "edge"
+    assert loaded.subgenomes == ("A", "C")
+
+
+def test_loader_returns_no_discovery_without_candidates(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+
+    loaded = load_followup_inputs(tmp_path)
+
+    assert loaded.formal_hits.empty
+
+
+def test_loader_refuses_legacy_ranking_as_canonical(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    cfg = {
+        "interact": {
+            "mode": "pairwise", "subgenomes": ["A", "C"],
+            "pairs": "pairs.tsv", "statistic": "omniB",
+        },
+        "outputs": {"out_dir": str(tmp_path)},
+    }
+    path = config_dir / "interact.legacy.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    pd.DataFrame({"primary_sig": [1]}).to_csv(
+        tmp_path / "interact_trait_ranking_pairwise_INT.tsv", sep="\t", index=False)
+
+    with pytest.raises(FollowupError, match="legacy.*migration"):
+        load_followup_inputs(tmp_path, config=path)
+
+
+def _write_replay_fixture(tmp_path, subdata, family, y, *, corrupt_p=False):
+    groups = tmp_path / "groups.tsv"
+    pd.DataFrame({
+        "group_id": family.group_ids,
+        **{
+            f"gene_{sub}": [genes[index] for genes in family.genes]
+            for index, sub in enumerate(family.subgenomes)
+        },
+    }).to_csv(groups, sep="\t", index=False)
+    phenotype = tmp_path / "phenotype.tsv"
+    pd.DataFrame({
+        "sample": subdata[family.subgenomes[0]].samples,
+        "flowering_time": y,
+    }).to_csv(phenotype, sep="\t", index=False)
+    cfg = build_interact_config(
+        subgenomes=family.subgenomes,
+        bed_prefixes={sub: f"geno/{sub}" for sub in family.subgenomes},
+        snp_to_gene={sub: f"maps/{sub}.npz" for sub in family.subgenomes},
+        phenotype=str(phenotype), sample_col="sample", trait="flowering_time",
+        out_dir=str(tmp_path), groups=str(groups), hypothesis_unit="edge",
+        subset_order=2, family_scope="primary_only", perm_b=2000,
+        statistic="omniB")
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = config_dir / "interact.generated.group.omnib.yaml"
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    scores, expanded = score_omnib_family(
+        subdata, family, y, np.arange(len(y)), bootstrap_B=0,
+        bootstrap_seed=2026, n_jobs=1, grm_method="grm_from_X")
+    edge = expanded.edges[0]
+    component = int(np.nanargmin(scores.edge_components_obs[0]))
+    p_value = float(scores.edge_p[0, 0]) + (0.1 if corrupt_p else 0.0)
+    ranking = pd.DataFrame({
+        "rank": [0], "hypothesis_id": [f"edge:{edge.edge_id}"],
+        "family_id": ["edge"], "hypothesis_unit": ["edge"],
+        "group_id": [edge.source_group_ids[0]], "edge_id": [edge.edge_id],
+        "group_ids": [edge.source_group_ids[0]], "direction": [edge.direction],
+        "sub_x": [edge.sub_x], "sub_y": [edge.sub_y],
+        **{
+            f"gene_{sub}": [edge.gene_x if sub == edge.sub_x else edge.gene_y]
+            for sub in family.subgenomes
+        },
+        "p_interaction": [p_value], "p_adjusted_bootstrap_minp": [0.01],
+        "primary_sig": [1], "p_unestimable": [0],
+        "driving_edge": [edge.edge_id],
+        "driving_component": [["minor_burden", "pc1", "kernel_hadamard"][component]],
+        "driving_component_p": [scores.edge_components_obs[0, component]],
+    })
+    ranking.to_csv(
+        tmp_path / "interact_flowering_time_ranking_group_INT.tsv",
+        sep="\t", index=False)
+    return config_path
+
+
+def test_prepare_formal_replay_matches_frozen_edge(monkeypatch, tmp_path):
+    subdata, family, y, _ = _toy_group_inputs(("A", "C"))
+    _write_replay_fixture(tmp_path, subdata, family, y)
+    loaded = load_followup_inputs(tmp_path)
+    monkeypatch.setattr(
+        "homoeogwas.followup._load_verified_subgenomes",
+        lambda interact, subgenomes, config_dir: subdata)
+
+    prepared = prepare_formal_replay(loaded, n_jobs=1)
+
+    assert prepared.replay["hypothesis_id"].tolist() == [
+        loaded.formal_hits.iloc[0]["hypothesis_id"]]
+    assert prepared.formal_replay_max_abs_error < 1e-10
+    assert prepared.analyzed_samples == tuple(subdata["A"].samples)
+
+
+def test_prepare_formal_replay_stops_on_p_mismatch(monkeypatch, tmp_path):
+    subdata, family, y, _ = _toy_group_inputs(("A", "C"))
+    _write_replay_fixture(tmp_path, subdata, family, y, corrupt_p=True)
+    loaded = load_followup_inputs(tmp_path)
+    monkeypatch.setattr(
+        "homoeogwas.followup._load_verified_subgenomes",
+        lambda interact, subgenomes, config_dir: subdata)
+
+    with pytest.raises(FollowupError, match="formal p reproduction failed"):
+        prepare_formal_replay(loaded, n_jobs=1)
