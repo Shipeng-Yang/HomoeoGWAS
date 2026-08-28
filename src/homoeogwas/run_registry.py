@@ -374,3 +374,231 @@ def resume_decision(
             f"run {run.id!r}: output identity mismatch; use a new out_dir "
             "instead of overwriting an existing analysis")
     return "SKIP" if existing_state.get("status") == "COMPLETE" else "RUN"
+
+
+def _atomic_text(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        Path(temp_name).replace(path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _summary_fields(summary: Mapping[str, Any] | None) -> dict:
+    summary = dict(summary or {})
+    return {
+        "n_significant": summary.get("n_significant"),
+        "audit_status": summary.get("audit_status"),
+        "primary_unit": summary.get("primary_unit"),
+        "n_planned": summary.get("n_planned"),
+        "n_valid": summary.get("n_valid"),
+    }
+
+
+def _record_for_run(
+    run: RegistryRun,
+    *,
+    status: str,
+    identity: str | None,
+    summary: Mapping[str, Any] | None = None,
+    reason: str | None = None,
+) -> dict:
+    output = run.result_root if run.kind == "historical" else run.out_dir
+    return {
+        "run_id": run.id,
+        "kind": run.kind,
+        "species": run.species,
+        "panel": run.panel,
+        "trait": run.trait,
+        "subgenomes": list(run.subgenomes),
+        "identity": identity,
+        "status": status,
+        "output_root": str(output) if output else None,
+        "analysis_shape": run.analysis_shape,
+        **_summary_fields(summary),
+        "reason": reason,
+        "next_action": (
+            "migrate and rerun canonically" if status == "HISTORICAL"
+            else ("inspect failure and repair inputs" if status == "FAILED"
+                  else ("follow-up formal discoveries" if
+                        (_summary_fields(summary)["n_significant"] or 0) > 0
+                        else "none"))
+        ),
+    }
+
+
+def write_registry_indexes(
+    registry: RunRegistry,
+    records: list[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Write deterministic JSON, TSV and breeder-readable Markdown indexes."""
+    import pandas as pd
+    import yaml
+
+    out = registry.index_dir
+    out.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "registry_version": registry.registry_version,
+        "name": registry.name,
+        "source": str(registry.source_path),
+        "runs": [dict(record) for record in records],
+    }
+    json_path = _atomic_text(
+        out / "run_index.json",
+        json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+    columns = [
+        "run_id", "kind", "species", "panel", "trait", "subgenomes",
+        "status", "identity", "output_root", "analysis_shape",
+        "primary_unit", "n_planned", "n_valid", "n_significant",
+        "audit_status", "reason", "next_action",
+    ]
+    table = pd.DataFrame.from_records(records)
+    for column in columns:
+        if column not in table:
+            table[column] = None
+    table = table[columns].copy()
+    table["subgenomes"] = table["subgenomes"].map(
+        lambda value: ",".join(value) if isinstance(value, list) else value)
+    tsv_path = out / "run_index.tsv"
+    table.to_csv(tsv_path, sep="\t", index=False, na_rep="NA")
+    header = (
+        "| Run | Species | Trait | Copies | Status | Significant | Audit | Next action |\n"
+        "|---|---|---|---|---|---:|---|---|\n")
+    rows = []
+    for record in records:
+        significant = record.get("n_significant")
+        rows.append(
+            f"| {record['run_id']} | {record['species']} | "
+            f"{record.get('trait') or 'NA'} | {','.join(record['subgenomes'])} | "
+            f"{record['status']} | {significant if significant is not None else 'NA'} | "
+            f"{record.get('audit_status') or 'NA'} | {record['next_action']} |")
+    markdown_path = _atomic_text(
+        out / "run_index.md",
+        f"# {registry.name}\n\n" + header + "\n".join(rows) + "\n")
+    resolved = {
+        "registry_version": registry.registry_version,
+        "name": registry.name,
+        "index_dir": str(registry.index_dir),
+        "runs": [
+            {
+                "id": run.id,
+                "kind": run.kind,
+                "species": run.species,
+                "panel": run.panel,
+                "subgenomes": list(run.subgenomes),
+                "out_dir": str(run.out_dir) if run.out_dir else None,
+                "result_root": str(run.result_root) if run.result_root else None,
+            }
+            for run in registry.runs
+        ],
+    }
+    resolved_path = _atomic_text(
+        out / "registry.resolved.yaml",
+        yaml.safe_dump(resolved, sort_keys=False, allow_unicode=True))
+    return {
+        "json": str(json_path),
+        "tsv": str(tsv_path),
+        "markdown": str(markdown_path),
+        "resolved": str(resolved_path),
+    }
+
+
+def execute_registry(
+    path: str | Path,
+    *,
+    only=(),
+    resume: bool = True,
+    fail_fast: bool = False,
+    dry_run: bool = False,
+    gwas_runner=None,
+    interaction_runner=None,
+) -> dict:
+    """Execute independent registered workflows and write a cross-run index."""
+    from . import workflow
+
+    registry = load_registry(path)
+    gwas_runner = gwas_runner or workflow.run_gwas
+    interaction_runner = interaction_runner or workflow.run_interaction
+    selected = {str(value) for value in only}
+    unknown = sorted(selected - {run.id for run in registry.runs})
+    if unknown:
+        raise RegistryError(f"--only contains unknown run IDs: {', '.join(unknown)}")
+    records: list[dict] = []
+    for run in registry.runs:
+        if selected and run.id not in selected:
+            continue
+        if run.kind == "historical":
+            records.append(_record_for_run(
+                run, status="HISTORICAL", identity=run_identity_sha256(run),
+                summary=run.expected))
+            continue
+        identity = run_identity_sha256(run)
+        state = load_run_state(run.out_dir)
+        try:
+            decision = resume_decision(run, state, resume=resume)
+        except RegistryError as exc:
+            record = _record_for_run(
+                run, status="BLOCKED_IDENTITY_MISMATCH", identity=identity,
+                reason=str(exc))
+            records.append(record)
+            if fail_fast:
+                break
+            continue
+        if decision == "SKIP":
+            records.append(_record_for_run(
+                run, status="SKIPPED_COMPLETE", identity=identity,
+                summary=state.get("summary")))
+            continue
+        write_run_state(run.out_dir, {
+            "run_id": run.id, "status": "PLANNED", "identity": identity})
+        write_run_state(run.out_dir, {
+            "run_id": run.id, "status": "RUNNING", "identity": identity})
+        if run.kind == "gwas":
+            result = gwas_runner(
+                phenotype=str(run.phenotype), sample_col=run.sample_col,
+                trait=run.trait, subgenomes=run.subgenomes,
+                out_dir=str(run.out_dir),
+                bed_prefixes={key: str(value) for key, value in run.bed_prefixes.items()},
+                include_hadamard=run.include_hadamard, loco=run.loco,
+                run_plots=run.run_plots, dry_run=dry_run)
+        else:
+            result = interaction_runner(
+                phenotype=str(run.phenotype), sample_col=run.sample_col,
+                trait=run.trait, subgenomes=run.subgenomes,
+                bed_prefixes={key: str(value) for key, value in run.bed_prefixes.items()},
+                snp_to_gene={key: str(value) for key, value in run.snp_to_gene.items()},
+                out_dir=str(run.out_dir), groups=str(run.groups),
+                hypothesis_unit=run.hypothesis_unit,
+                subset_order=2, family_scope=run.family_scope,
+                perm_b=run.bootstrap_B, n_jobs=run.n_jobs,
+                statistic="omniB", dry_run=dry_run)
+        summary = result.get("summary") or {}
+        if result.get("ok"):
+            status = "DRY_RUN" if dry_run else "COMPLETE"
+            reason = None
+        else:
+            status = "FAILED"
+            reason = result.get("reason") or "workflow returned ok=false"
+        write_run_state(run.out_dir, {
+            "run_id": run.id, "status": status, "identity": identity,
+            "summary": summary, "reason": reason,
+        })
+        records.append(_record_for_run(
+            run, status=status, identity=identity, summary=summary, reason=reason))
+        if status == "FAILED" and fail_fast:
+            break
+    indexes = write_registry_indexes(registry, records)
+    failed_statuses = {"FAILED", "BLOCKED_IDENTITY_MISMATCH"}
+    return {
+        "ok": not any(record["status"] in failed_statuses for record in records),
+        "registry": str(registry.source_path),
+        "runs": records,
+        "indexes": indexes,
+        "dry_run": dry_run,
+    }

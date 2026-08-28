@@ -8,6 +8,7 @@ import yaml
 
 from homoeogwas.run_registry import (
     RegistryError,
+    execute_registry,
     load_registry,
     load_run_state,
     resume_decision,
@@ -147,3 +148,111 @@ def test_run_state_roundtrip(tmp_path):
 
     assert written == out / "registry_run.json"
     assert load_run_state(out) == {"status": "RUNNING", "identity": "abc"}
+
+
+def _materialize_registry_inputs(tmp_path: Path, subgenomes=("A", "C")) -> Path:
+    for label in subgenomes:
+        prefix = tmp_path / f"geno/{label}/all"
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        Path(str(prefix) + ".bed").write_bytes(b"BED")
+        Path(str(prefix) + ".bim").write_text(f"1\trs{label}\t0\t1\tA\tG\n")
+        Path(str(prefix) + ".fam").write_text("F S1 0 0 0 -9\n")
+        mapping = tmp_path / f"maps/{label}.npz"
+        mapping.parent.mkdir(parents=True, exist_ok=True)
+        mapping.write_bytes(f"map-{label}".encode())
+    (tmp_path / "phenotype.tsv").write_text("sample\tflowering_time\nS1\t10\n")
+    header = "group_id\t" + "\t".join(f"gene_{s}" for s in subgenomes) + "\n"
+    row = "g1\t" + "\t".join(f"g{s}" for s in subgenomes) + "\n"
+    (tmp_path / "groups.tsv").write_text(header + row)
+    return _write_registry(tmp_path, [_interaction("r1", subgenomes)])
+
+
+def test_interaction_dispatch_forces_canonical_group_omnib(tmp_path):
+    path = _materialize_registry_inputs(tmp_path, ("A", "B", "D"))
+    calls = []
+
+    result = execute_registry(
+        path, dry_run=True,
+        interaction_runner=lambda **kwargs: calls.append(kwargs) or {
+            "ok": True, "summary": {"n_significant": 0}})
+
+    assert result["ok"]
+    assert calls[0]["statistic"] == "omniB"
+    assert calls[0]["groups"].endswith("groups.tsv")
+    assert calls[0]["hypothesis_unit"] == "group"
+    assert calls[0]["subset_order"] == 2
+    assert calls[0]["dry_run"] is True
+
+
+def test_four_copy_dispatch_has_no_four_way_option(tmp_path):
+    path = _materialize_registry_inputs(tmp_path, ("A", "B", "C", "D"))
+    calls = []
+
+    execute_registry(
+        path, dry_run=True,
+        interaction_runner=lambda **kwargs: calls.append(kwargs) or {
+            "ok": True, "summary": {}})
+
+    assert set(calls[0]) >= {"groups", "family_scope", "subset_order"}
+    assert not any("four" in key or "4way" in key for key in calls[0])
+
+
+def test_historical_entry_is_indexed_without_dispatch(tmp_path):
+    root = tmp_path / "historical-result"
+    root.mkdir()
+    run = {
+        "id": "old",
+        "kind": "historical",
+        "species": "Triticum aestivum",
+        "panel": "Watkins",
+        "subgenomes": ["A", "B", "D"],
+        "result_root": "historical-result",
+        "analysis_shape": "legacy_route_b_group",
+    }
+    path = _write_registry(tmp_path, [run])
+
+    result = execute_registry(
+        path,
+        interaction_runner=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("historical entry was dispatched")))
+
+    assert result["runs"][0]["status"] == "HISTORICAL"
+    assert Path(result["indexes"]["json"]).exists()
+    assert Path(result["indexes"]["tsv"]).exists()
+    assert Path(result["indexes"]["markdown"]).exists()
+
+
+def test_matching_complete_run_is_skipped_on_resume(tmp_path):
+    path = _materialize_registry_inputs(tmp_path)
+    run = load_registry(path).runs[0]
+    write_run_state(run.out_dir, {
+        "run_id": run.id,
+        "status": "COMPLETE",
+        "identity": run_identity_sha256(run),
+        "summary": {"n_significant": 2},
+    })
+
+    result = execute_registry(
+        path, resume=True,
+        interaction_runner=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("complete run was dispatched")))
+
+    assert result["runs"][0]["status"] == "SKIPPED_COMPLETE"
+    assert result["runs"][0]["n_significant"] == 2
+
+
+def test_registry_continues_after_independent_failure(tmp_path):
+    first = _interaction("first")
+    second = _interaction("second")
+    _materialized_run(tmp_path)
+    path = _write_registry(tmp_path, [first, second])
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs["out_dir"])
+        return {"ok": len(calls) == 2, "reason": "first failed", "summary": {}}
+
+    result = execute_registry(path, interaction_runner=runner)
+
+    assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
+    assert result["ok"] is False
