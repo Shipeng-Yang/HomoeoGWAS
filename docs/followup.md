@@ -31,10 +31,12 @@ planned/valid counts, edge/group family hashes, bootstrap threshold, rejected ID
 and adjusted P values must agree. Editing or truncating a ranking therefore cannot create a
 follow-up candidate.
 
-Each output directory is one immutable generation, bound to the formal config/ranking/result/audit
-hashes, evidence-source hashes and follow-up options. A matching completed generation is reused.
-A non-empty unbound, mismatched or partial directory is refused with an instruction to choose a
-new `--out-dir`; stale candidate/environment tables are never mixed into a new dossier.
+Each output directory is one immutable, exclusive-writer generation, bound to the formal
+config/ranking/result/audit hashes, evidence-source hashes and follow-up options. Completion records
+the byte size and SHA-256 of every dossier output; a matching generation is reused only after the
+entire output inventory is reverified. A non-empty unbound, mismatched, partial or modified
+directory is refused with an instruction to choose a new `--out-dir`; stale candidate/environment
+tables are never mixed into a new dossier.
 
 ## Stability analyses
 

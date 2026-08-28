@@ -245,8 +245,10 @@ def _validate_formal_contract(
             f"ranking hypothesis units {sorted(units)} do not match "
             f"the declared family {sorted(expected_units)}")
     p_values = pd.to_numeric(ranking["p_interaction"], errors="coerce")
-    unestimable = pd.to_numeric(
-        ranking["p_unestimable"], errors="coerce").fillna(1).astype(int)
+    unestimable_raw = pd.to_numeric(ranking["p_unestimable"], errors="coerce")
+    if unestimable_raw.isna().any() or not unestimable_raw.isin([0, 1]).all():
+        raise FollowupError("formal p_unestimable values must be exactly binary 0/1")
+    unestimable = unestimable_raw.astype(int)
     valid_p = p_values[unestimable == 0]
     if valid_p.isna().any() or not valid_p.is_monotonic_increasing:
         raise FollowupError(
@@ -310,10 +312,10 @@ def _validate_formal_contract(
     threshold = fwer.get("threshold")
     if not isinstance(threshold, (int, float)) or not np.isfinite(threshold):
         raise FollowupError("formal bootstrap-minP threshold is missing or invalid")
-    labels = pd.to_numeric(
-        ranking["primary_sig"], errors="coerce").fillna(-1).astype(int)
-    if not labels.isin([0, 1]).all():
-        raise FollowupError("formal discovery labels must be binary")
+    labels_raw = pd.to_numeric(ranking["primary_sig"], errors="coerce")
+    if labels_raw.isna().any() or not labels_raw.isin([0, 1]).all():
+        raise FollowupError("formal primary_sig discovery labels must be binary 0/1")
+    labels = labels_raw.astype(int)
     expected_labels = ((unestimable == 0) & (p_values < float(threshold))).astype(int)
     if not np.array_equal(labels.to_numpy(), expected_labels.to_numpy()):
         raise FollowupError(
@@ -344,7 +346,13 @@ def _validate_formal_contract(
                     f"formal rejected-unit {column} differs between ranking and result JSON")
 
     audit = _read_json_object(audit_path, "formal audit")
-    if str(audit.get("overall_status", "")).upper() in {"INVALID", "FAILED"}:
+    audit_status = str(audit.get("overall_status", "")).strip().upper()
+    eligible_audit_statuses = {
+        "AUDIT_COMPLETE",
+        "INTERNAL_DISCOVERY_REPLICATION_REQUIRED",
+        "REVIEW_REQUIRED",
+    }
+    if audit_status not in eligible_audit_statuses:
         raise FollowupError(
             f"formal audit status is not follow-up eligible: "
             f"{audit.get('overall_status')}")
@@ -992,25 +1000,100 @@ def _open_followup_generation(
         if existing.get("identity") != identity:
             raise FollowupError(
                 "follow-up output identity mismatch; choose a new --out-dir")
-        if existing.get("status") == "COMPLETE" and summary_path.exists():
+        if existing.get("status") == "COMPLETE":
+            inventory = existing.get("output_inventory")
+            if not isinstance(inventory, list) or not inventory:
+                raise FollowupError(
+                    "completed follow-up identity has no output hash inventory")
+            declared = {}
+            for record in inventory:
+                if not isinstance(record, dict) or set(record) != {
+                    "path", "size", "sha256"
+                }:
+                    raise FollowupError(
+                        "completed follow-up output inventory is malformed")
+                relative = Path(str(record["path"]))
+                if relative.is_absolute() or len(relative.parts) != 1:
+                    raise FollowupError(
+                        "completed follow-up output inventory path is unsafe")
+                if relative.name in declared:
+                    raise FollowupError(
+                        "completed follow-up output inventory has duplicate paths")
+                size = record["size"]
+                digest = record["sha256"]
+                if (
+                    isinstance(size, bool) or not isinstance(size, int) or size < 0
+                    or not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest)
+                ):
+                    raise FollowupError(
+                        "completed follow-up output inventory is malformed")
+                declared[relative.name] = record
+            observed_entries = [
+                path for path in out.iterdir()
+                if path.name != "followup_identity.json"
+            ]
+            if any(not path.is_file() for path in observed_entries):
+                raise FollowupError(
+                    "completed follow-up output directory contains undeclared entries")
+            observed_names = {path.name for path in observed_entries}
+            if set(declared) != observed_names:
+                raise FollowupError(
+                    "completed follow-up output inventory does not match the directory")
+            for name, record in declared.items():
+                path = out / name
+                if (
+                    path.stat().st_size != record["size"]
+                    or _sha256_file(path) != record["sha256"]
+                ):
+                    raise FollowupError(
+                        f"completed follow-up output hash mismatch: {name}")
             return _read_json_object(summary_path, "completed follow-up summary")
         raise FollowupError(
             "matching follow-up output is incomplete; preserve it for diagnosis "
             "and choose a new --out-dir")
     out.mkdir(parents=True, exist_ok=True)
-    _atomic_text(
-        identity_path,
-        json.dumps({
-            "identity": identity, "status": "RUNNING", "payload": payload,
-        }, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+    body = json.dumps({
+        "identity": identity, "status": "RUNNING", "payload": payload,
+    }, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    try:
+        descriptor = os.open(
+            identity_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise FollowupError(
+            "follow-up output generation already has an active writer") from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    unexpected = [
+        path.name for path in out.iterdir()
+        if path.name != "followup_identity.json"
+    ]
+    if unexpected:
+        raise FollowupError(
+            "follow-up output changed while claiming its generation: "
+            + ", ".join(sorted(unexpected)))
     return None
 
 
 def _complete_followup_generation(out: Path, identity: str, payload: dict) -> None:
+    inventory = [
+        {
+            "path": path.name,
+            "size": int(path.stat().st_size),
+            "sha256": _sha256_file(path),
+        }
+        for path in sorted(out.iterdir(), key=lambda value: value.name)
+        if path.is_file() and path.name != "followup_identity.json"
+    ]
+    if not inventory:
+        raise FollowupError("cannot complete a follow-up generation without outputs")
     _atomic_text(
         out / "followup_identity.json",
         json.dumps({
             "identity": identity, "status": "COMPLETE", "payload": payload,
+            "output_inventory": inventory,
         }, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
 
 

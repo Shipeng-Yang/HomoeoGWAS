@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -51,6 +52,18 @@ def _write_registry(tmp_path: Path, runs: list[dict]) -> Path:
     return path
 
 
+def _artifact_record(root: Path, role: str, relative: str) -> dict:
+    import hashlib
+
+    path = root / relative
+    return {
+        "role": role,
+        "path": relative,
+        "size": path.stat().st_size,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
 def test_load_registry_resolves_paths_and_keeps_species_as_metadata(tmp_path):
     registry = load_registry(_write_registry(tmp_path, [_interaction("r1")]))
 
@@ -75,6 +88,25 @@ def test_registry_rejects_duplicate_ids(tmp_path):
 
     with pytest.raises(RegistryError, match="duplicate run id"):
         load_registry(_write_registry(tmp_path, [run, run]))
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("registry_version", True),
+    ("name", 17),
+])
+def test_registry_rejects_wrong_root_scalar_types(tmp_path, field, value):
+    payload = {
+        "registry_version": 1,
+        "name": "test-registry",
+        "index_dir": "registry-index",
+        "runs": [_interaction("r1")],
+    }
+    payload[field] = value
+    path = tmp_path / "registry.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    with pytest.raises(RegistryError, match=field):
+        load_registry(path)
 
 
 def test_registry_rejects_unknown_run_fields(tmp_path):
@@ -217,10 +249,14 @@ def test_four_copy_dispatch_has_no_four_way_option(tmp_path):
 def test_historical_entry_is_indexed_without_dispatch(tmp_path):
     root = tmp_path / "historical-result"
     root.mkdir()
-    (root / "interact_trait.json").write_text('{"command":"interact"}\n')
+    result_path = root / "interact_trait.json"
+    result_path.write_text('{"command":"interact"}\n')
     (root / "audit").mkdir()
-    (root / "audit" / "historical.audit.json").write_text(
-        '{"status":"PASS"}\n')
+    audit_path = root / "audit" / "historical.audit.json"
+    audit_path.write_text(json.dumps({
+        "overall_status": "AUDIT_COMPLETE", "n_results": 1,
+        "records": [{"source": str(result_path.resolve())}],
+    }))
     run = {
         "id": "old",
         "kind": "historical",
@@ -229,6 +265,10 @@ def test_historical_entry_is_indexed_without_dispatch(tmp_path):
         "subgenomes": ["A", "B", "D"],
         "result_root": "historical-result",
         "analysis_shape": "legacy_route_b_group",
+        "artifact_inventory": [
+            _artifact_record(root, "result", "interact_trait.json"),
+            _artifact_record(root, "audit", "audit/historical.audit.json"),
+        ],
     }
     path = _write_registry(tmp_path, [run])
 
@@ -243,11 +283,74 @@ def test_historical_entry_is_indexed_without_dispatch(tmp_path):
     assert Path(result["indexes"]["markdown"]).exists()
 
 
+def test_historical_entry_rejects_changed_declared_artifact(tmp_path):
+    root = tmp_path / "historical-result"
+    root.mkdir()
+    result_path = root / "interact_trait.json"
+    result_path.write_text('{"command":"interact"}\n')
+    (root / "audit").mkdir()
+    audit_path = root / "audit" / "historical.audit.json"
+    audit_path.write_text(json.dumps({
+        "overall_status": "AUDIT_COMPLETE", "n_results": 1,
+        "records": [{"source": str(result_path.resolve())}],
+    }))
+    inventory = [
+        _artifact_record(root, "result", "interact_trait.json"),
+        _artifact_record(root, "audit", "audit/historical.audit.json"),
+    ]
+    result_path.write_text('{"command":"interact", "changed":true}\n')
+    run = {
+        "id": "old", "kind": "historical", "species": "wheat",
+        "panel": "Watkins", "subgenomes": ["A", "B", "D"],
+        "result_root": "historical-result", "analysis_shape": "legacy",
+        "artifact_inventory": inventory,
+    }
+
+    result = execute_registry(_write_registry(tmp_path, [run]))
+
+    assert result["runs"][0]["status"] == "FAILED_HISTORICAL_AUDIT"
+    assert "artifact" in result["runs"][0]["reason"]
+
+
+def test_historical_entry_rejects_invalid_audit_status(tmp_path):
+    root = tmp_path / "historical-result"
+    root.mkdir()
+    result_path = root / "interact_trait.json"
+    result_path.write_text('{"command":"interact"}\n')
+    (root / "audit").mkdir()
+    audit_path = root / "audit" / "historical.audit.json"
+    audit_path.write_text(json.dumps({
+        "overall_status": "ANALYSIS_INVALID", "n_results": 1,
+        "records": [{"source": str(result_path.resolve())}],
+    }))
+    run = {
+        "id": "old", "kind": "historical", "species": "wheat",
+        "panel": "Watkins", "subgenomes": ["A", "B", "D"],
+        "result_root": "historical-result", "analysis_shape": "legacy",
+        "artifact_inventory": [
+            _artifact_record(root, "result", "interact_trait.json"),
+            _artifact_record(root, "audit", "audit/historical.audit.json"),
+        ],
+    }
+
+    result = execute_registry(_write_registry(tmp_path, [run]))
+
+    assert result["runs"][0]["status"] == "FAILED_HISTORICAL_AUDIT"
+    assert "ANALYSIS_INVALID" in result["runs"][0]["reason"]
+
+
 def test_missing_historical_artifacts_fail_closed(tmp_path):
     run = {
         "id": "old", "kind": "historical", "species": "Triticum aestivum",
         "panel": "Watkins", "subgenomes": ["A", "B", "D"],
         "result_root": "missing-result", "analysis_shape": "legacy_route_b_group",
+        "artifact_inventory": [{
+            "role": "result", "path": "interact_trait.json", "size": 1,
+            "sha256": "0" * 64,
+        }, {
+            "role": "audit", "path": "audit/historical.audit.json", "size": 1,
+            "sha256": "0" * 64,
+        }],
     }
 
     result = execute_registry(_write_registry(tmp_path, [run]))
@@ -323,6 +426,46 @@ def test_registry_records_missing_identity_inputs_without_aborting(tmp_path):
     assert not result["ok"]
     assert result["runs"][0]["status"] == "FAILED_IDENTITY_INPUT"
     assert "missing" in result["runs"][0]["reason"]
+
+
+def test_registry_corrupt_state_isolated_to_one_run(tmp_path):
+    first = _interaction("first")
+    second = _interaction("second")
+    _materialized_run(tmp_path)
+    path = _write_registry(tmp_path, [first, second])
+    first_out = tmp_path / "results" / "first"
+    first_out.mkdir(parents=True)
+    (first_out / "registry_run.json").write_text("not-json\n")
+
+    result = execute_registry(
+        path, interaction_runner=lambda **kwargs: {
+            "ok": True, "summary": {"n_significant": 0}})
+
+    assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
+    assert "cannot read registry state" in result["runs"][0]["reason"]
+
+
+def test_registry_state_write_failure_isolated_to_one_run(tmp_path, monkeypatch):
+    first = _interaction("first")
+    second = _interaction("second")
+    _materialized_run(tmp_path)
+    path = _write_registry(tmp_path, [first, second])
+    from homoeogwas import run_registry
+
+    real_write = run_registry.write_run_state
+
+    def flaky_write(out_dir, payload):
+        if Path(out_dir).name == "first":
+            raise OSError("simulated state filesystem failure")
+        return real_write(out_dir, payload)
+
+    monkeypatch.setattr(run_registry, "write_run_state", flaky_write)
+    result = execute_registry(
+        path, interaction_runner=lambda **kwargs: {
+            "ok": True, "summary": {"n_significant": 0}})
+
+    assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
+    assert "state filesystem failure" in result["runs"][0]["reason"]
 
 
 def test_registry_cli_validate_and_dry_run(tmp_path, capsys):

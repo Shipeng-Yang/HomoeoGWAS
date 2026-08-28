@@ -42,10 +42,12 @@ read-only numerical/provenance fixtures. These entries are not dispatched or sil
 current canonical analyses. A canonical rerun uses a separate `kind: interaction` entry and a
 new output root.
 
-Historical status is fail-closed: each result root must contain readable `interact_*.json` and
-`audit/*.json` artifacts. Their sizes and SHA-256 hashes enter the registry identity, and declared
-expected discovery/planned/valid counts are checked when present. A missing, unreadable or changed
-fixture becomes `FAILED_HISTORICAL_AUDIT`, not an apparently successful historical record.
+Historical status is fail-closed: each entry declares every `interact_*.json` and `audit/*.json`
+artifact under `artifact_inventory`, including its relative path, role, byte size and SHA-256.
+The observed directory must match that frozen inventory exactly. The audit must have a recognized
+non-invalid status and bind the declared result by source path or embedded output hash; declared
+expected discovery/planned/valid counts are checked when present. A missing, unreadable, changed or
+unbound fixture becomes `FAILED_HISTORICAL_AUDIT`, not an apparently successful historical record.
 
 ## Repair messages
 

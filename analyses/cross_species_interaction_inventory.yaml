@@ -30,6 +30,9 @@ runs:
     subgenomes: [A, C]
     result_root: ../results/experimental/rapeseed_flowering_group_omnib_f17404_v1
     analysis_shape: canonical_group_omnib_edge_primary
+    artifact_inventory:
+      - {role: result, path: interact_flowering_time.json, size: 1776516, sha256: 6c7be35f1d962a413c969945ea777f9c354b9a48a5ef460c28f1a720bca3759c}
+      - {role: audit, path: audit/homoeogwas_audit.json, size: 7528, sha256: 4a89c963eaf986eb29a0adda43c19ff3b6df0b2d33c6563b163aa76a3fcd22a1}
     expected:
       n_significant: 2
       primary_unit: edge
@@ -50,6 +53,9 @@ runs:
     subgenomes: [A, B, D]
     result_root: ../results/experimental/wheat_watkins_triad3_route_b_omnib_env_adjusted_v1
     analysis_shape: legacy_route_b_group_omnib
+    artifact_inventory:
+      - {role: result, path: interact_days_to_emerg_env_adjusted.json, size: 236641, sha256: 59afe62be14cafdcb10c48701c125581bfb7eff3b8589ae9505e2ea974a022b9}
+      - {role: audit, path: audit/route_b_omnib.independent.audit.json, size: 2250, sha256: 0e15f334d9f5f95979da96a385291cd5d2c06f87889712e3500bff02a150ef38}
     expected:
       n_significant: 10
       primary_unit: group
@@ -63,6 +69,9 @@ runs:
     subgenomes: [A, D]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibLen
     analysis_shape: legacy_pairwise_omnib
+    artifact_inventory:
+      - {role: result, path: interact_FibLen.json, size: 22427, sha256: 141b05273bc22b583990c738a91ddefc912b7989be8bf5aaf640e5daeb2b155b}
+      - {role: audit, path: audit/homoeogwas_audit.json, size: 5030, sha256: 7eef4969a0acf197cce9c747d74bdcacbc7cf0d5f2792bc2fd992ca42337954b}
     expected:
       n_significant: 4
       primary_unit: edge
@@ -76,6 +85,9 @@ runs:
     subgenomes: [A, D]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibElo
     analysis_shape: legacy_pairwise_omnib
+    artifact_inventory:
+      - {role: result, path: interact_FibElo.json, size: 13192, sha256: 20ae1b0d2c3eab8894df9310e5383b382ad2ead0f0b91bb2ebf78b47a26bbd3f}
+      - {role: audit, path: audit/homoeogwas_audit.json, size: 5446, sha256: 3335a6de0155ae79f98ec944ef6d2442bf55f46313e6b0e9e1ecd3c2e0f864c0}
     expected:
       n_significant: 0
       primary_unit: edge
@@ -88,6 +100,9 @@ runs:
     subgenomes: [A, B]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/hundred_seed_weight
     analysis_shape: legacy_pairwise_omnib
+    artifact_inventory:
+      - {role: result, path: interact_hundred_seed_weight.json, size: 14151, sha256: 64c4a740091ba9b8c83bfc38c949d74505a9960a70d6818bc1cd7e981f28e197}
+      - {role: audit, path: audit/homoeogwas_audit.json, size: 4680, sha256: 074555f14c6f7d0c4db004262e0b273779f971df054f65e72cfa378c194e5f70}
     expected:
       n_significant: 0
       primary_unit: edge
@@ -100,6 +115,9 @@ runs:
     subgenomes: [A, B]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/seed_length
     analysis_shape: legacy_pairwise_omnib
+    artifact_inventory:
+      - {role: result, path: interact_seed_length.json, size: 13012, sha256: acf602803598ac631aebf5ee515dfd02200391bfc3e6127c34442c59e561c0b4}
+      - {role: audit, path: audit/homoeogwas_audit.json, size: 5154, sha256: c65dc93fb134b23c614375008acafe1316dca2637a82c56386c1b8ee6845ff19}
     expected:
       n_significant: 0
       primary_unit: edge

@@ -538,6 +538,49 @@ def test_followup_rejects_changed_identity_in_completed_output(tmp_path):
         run_followup(tmp_path, n_jobs=1, environment_col="environment")
 
 
+def test_followup_rejects_invalid_formal_audit_status(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    audit_path = tmp_path / "audit" / "homoeogwas_audit.json"
+    audit = json.loads(audit_path.read_text())
+    audit["overall_status"] = "ANALYSIS_INVALID"
+    audit_path.write_text(json.dumps(audit))
+
+    with pytest.raises(FollowupError, match="audit status.*ANALYSIS_INVALID"):
+        run_followup(tmp_path, n_jobs=1)
+
+
+def test_followup_rejects_unknown_formal_audit_status(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    audit_path = tmp_path / "audit" / "homoeogwas_audit.json"
+    audit = json.loads(audit_path.read_text())
+    audit["overall_status"] = "LOOKS_FINE_TO_ME"
+    audit_path.write_text(json.dumps(audit))
+
+    with pytest.raises(FollowupError, match="audit status.*LOOKS_FINE_TO_ME"):
+        run_followup(tmp_path, n_jobs=1)
+
+
+def test_followup_rejects_tampered_completed_output(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    run_followup(tmp_path, n_jobs=1)
+    (tmp_path / "followup" / "followup_summary.json").write_text("{}\n")
+
+    with pytest.raises(FollowupError, match="output hash mismatch"):
+        run_followup(tmp_path, n_jobs=1)
+
+
+@pytest.mark.parametrize("column", ["p_unestimable", "primary_sig"])
+def test_followup_rejects_fractional_binary_formal_fields(tmp_path, column):
+    _, ranking_path = _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    ranking = pd.read_csv(ranking_path, sep="\t")
+    ranking[column] = ranking[column].astype(float)
+    ranking.loc[0, column] = 1.5
+    ranking.to_csv(ranking_path, sep="\t", index=False)
+
+    with pytest.raises(FollowupError, match=f"{column}.*binary"):
+        run_followup(tmp_path, n_jobs=1)
+
+
 def test_followup_rejects_nonempty_unbound_output_directory(tmp_path):
     _write_canonical_result_fixture(tmp_path, significant=(0, 0))
     out = tmp_path / "followup"

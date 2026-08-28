@@ -39,6 +39,7 @@ class RegistryRun:
     run_plots: bool = True
     result_root: Path | None = None
     analysis_shape: str | None = None
+    artifact_inventory: tuple[Mapping[str, Any], ...] = ()
     expected: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -57,7 +58,7 @@ _RUN_FIELDS = {
     "phenotype", "sample_col", "trait", "bed_prefixes", "snp_to_gene",
     "groups", "hypothesis_unit", "family_scope", "bootstrap_B", "n_jobs",
     "include_hadamard", "loco", "run_plots", "result_root",
-    "analysis_shape", "expected",
+    "analysis_shape", "artifact_inventory", "expected",
 }
 
 
@@ -98,6 +99,54 @@ def _boolean(raw: Mapping[str, Any], key: str, run_id: str, default: bool) -> bo
     if not isinstance(value, bool):
         raise RegistryError(f"run {run_id!r}: {key} must be true or false")
     return value
+
+
+def _parse_artifact_inventory(value: Any, run_id: str) -> tuple[dict, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value:
+        raise RegistryError(
+            f"run {run_id!r}: artifact_inventory must be a non-empty list")
+    parsed = []
+    seen = set()
+    for row, record in enumerate(value):
+        if not isinstance(record, Mapping) or set(record) != {
+            "role", "path", "size", "sha256"
+        }:
+            raise RegistryError(
+                f"run {run_id!r}: artifact_inventory[{row}] is malformed")
+        role = record["role"]
+        relative_text = record["path"]
+        size = record["size"]
+        digest = record["sha256"]
+        if role not in {"result", "audit"}:
+            raise RegistryError(
+                f"run {run_id!r}: artifact role must be result or audit")
+        if not isinstance(relative_text, str) or not relative_text.strip():
+            raise RegistryError(
+                f"run {run_id!r}: artifact path must be a non-empty string")
+        relative = Path(relative_text)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RegistryError(
+                f"run {run_id!r}: artifact path must stay below result_root")
+        normalized = relative.as_posix()
+        if normalized in seen:
+            raise RegistryError(
+                f"run {run_id!r}: duplicate artifact path {normalized!r}")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise RegistryError(
+                f"run {run_id!r}: artifact size must be a non-negative integer")
+        if (
+            not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise RegistryError(
+                f"run {run_id!r}: artifact sha256 must be 64 lowercase hex digits")
+        seen.add(normalized)
+        parsed.append({
+            "role": role, "path": normalized, "size": size, "sha256": digest,
+        })
+    return tuple(parsed)
 
 
 def _parse_run(raw: Any, base: Path, row: int) -> RegistryRun:
@@ -160,6 +209,8 @@ def _parse_run(raw: Any, base: Path, row: int) -> RegistryRun:
         run_plots=_boolean(raw, "run_plots", run_id, True),
         result_root=_resolve(base, raw.get("result_root")),
         analysis_shape=_optional_text(raw, "analysis_shape", run_id),
+        artifact_inventory=_parse_artifact_inventory(
+            raw.get("artifact_inventory"), run_id),
         expected=dict(expected_raw),
     )
     _validate_run(run)
@@ -201,14 +252,22 @@ def _validate_run(run: RegistryRun) -> None:
         raise RegistryError(f"run {run.id!r}: n_jobs must be an integer >= 1")
     if run.kind == "historical" and (
         run.result_root is None or not isinstance(run.analysis_shape, str)
-        or not run.analysis_shape.strip()
+        or not run.analysis_shape.strip() or not run.artifact_inventory
     ):
         raise RegistryError(
-            f"run {run.id!r}: historical entries require result_root and analysis_shape")
+            f"run {run.id!r}: historical entries require result_root, analysis_shape, "
+            "and artifact_inventory")
+    if run.kind != "historical" and run.artifact_inventory:
+        raise RegistryError(
+            f"run {run.id!r}: artifact_inventory is only valid for historical entries")
 
 
 def validate_registry(registry: RunRegistry) -> None:
-    if registry.registry_version != 1:
+    if (
+        isinstance(registry.registry_version, bool)
+        or not isinstance(registry.registry_version, int)
+        or registry.registry_version != 1
+    ):
         raise RegistryError(
             f"registry_version must be 1, got {registry.registry_version!r}")
     if not registry.runs:
@@ -236,15 +295,19 @@ def load_registry(path: str | Path) -> RunRegistry:
     runs_raw = raw.get("runs")
     if not isinstance(runs_raw, list):
         raise RegistryError("registry runs must be a list")
+    version = raw.get("registry_version")
+    name = raw.get("name")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise RegistryError("registry_version must be the integer 1")
+    if not isinstance(name, str) or not name.strip():
+        raise RegistryError("registry name must be a non-empty string")
     registry = RunRegistry(
-        registry_version=raw.get("registry_version"),
-        name=str(raw.get("name", "")).strip(),
+        registry_version=version,
+        name=name.strip(),
         index_dir=_resolve(base, raw.get("index_dir") or "registry-index"),
         source_path=source,
         runs=tuple(_parse_run(item, base, row) for row, item in enumerate(runs_raw)),
     )
-    if not registry.name:
-        raise RegistryError("registry name must be a non-empty string")
     validate_registry(registry)
     return registry
 
@@ -354,39 +417,108 @@ def run_identity_sha256(run: RegistryRun) -> str:
 
 
 def audit_historical_artifacts(run: RegistryRun) -> dict:
-    """Read and hash the immutable result/audit inventory of a legacy run."""
+    """Verify the declared immutable result/audit inventory of a legacy run."""
     root = run.result_root
     if root is None or not root.exists() or not root.is_dir():
         raise RegistryError(
             f"run {run.id!r}: historical result root is missing: {root}")
-    result_paths = sorted(root.glob("interact_*.json"))
-    audit_paths = sorted((root / "audit").glob("*.json"))
-    if not result_paths:
+    declared = {record["path"]: dict(record) for record in run.artifact_inventory}
+    observed = {
+        path.relative_to(root).as_posix()
+        for path in [
+            *root.glob("interact_*.json"), *((root / "audit").glob("*.json"))
+        ]
+        if path.is_file()
+    }
+    if set(declared) != observed:
         raise RegistryError(
-            f"run {run.id!r}: historical result has no interact_*.json")
-    if not audit_paths:
-        raise RegistryError(
-            f"run {run.id!r}: historical result has no audit/*.json")
+            f"run {run.id!r}: declared historical artifact inventory does not "
+            "match result/audit files")
     artifacts = []
     result_payloads = []
-    for role, paths in (("result", result_paths), ("audit", audit_paths)):
-        for path in paths:
-            try:
-                value = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
+    result_paths = []
+    audit_payloads = []
+    for relative, record in sorted(declared.items()):
+        path = root / relative
+        if not path.exists() or not path.is_file():
+            raise RegistryError(
+                f"run {run.id!r}: declared historical artifact is missing: {path}")
+        observed_size = int(path.stat().st_size)
+        observed_digest = _sha256_file(path)
+        if (
+            observed_size != record["size"]
+            or observed_digest != record["sha256"]
+        ):
+            raise RegistryError(
+                f"run {run.id!r}: historical artifact identity mismatch: {relative}")
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RegistryError(
+                f"run {run.id!r}: unreadable historical artifact {path}: {exc}") from exc
+        if not isinstance(value, Mapping):
+            raise RegistryError(
+                f"run {run.id!r}: historical artifact is not a JSON object: {path}")
+        resolved_record = {**record, "path": str(path.resolve())}
+        artifacts.append(resolved_record)
+        if record["role"] == "result":
+            result_payloads.append(value)
+            result_paths.append(path.resolve())
+        else:
+            audit_payloads.append(value)
+    if not result_payloads or not audit_payloads:
+        raise RegistryError(
+            f"run {run.id!r}: artifact inventory needs result and audit roles")
+
+    result_path_set = set(result_paths)
+    audited_sources = set()
+    custom_bound_results = set()
+    allowed_overall = {
+        "AUDIT_COMPLETE", "INTERNAL_DISCOVERY_REPLICATION_REQUIRED",
+        "REVIEW_REQUIRED",
+    }
+    for audit in audit_payloads:
+        if "overall_status" in audit:
+            status = str(audit.get("overall_status", "")).strip().upper()
+            if status not in allowed_overall:
                 raise RegistryError(
-                    f"run {run.id!r}: unreadable historical {role} {path}: {exc}") from exc
-            if not isinstance(value, Mapping):
+                    f"run {run.id!r}: historical audit status is invalid: {status}")
+            records = audit.get("records")
+            if not isinstance(records, list) or audit.get("n_results") != len(records):
                 raise RegistryError(
-                    f"run {run.id!r}: historical {role} is not a JSON object: {path}")
-            if role == "result":
-                result_payloads.append(value)
-            artifacts.append({
-                "role": role,
-                "path": str(path.resolve()),
-                "size": int(path.stat().st_size),
-                "sha256": _sha256_file(path),
-            })
+                    f"run {run.id!r}: historical audit records are malformed")
+            for audit_record in records:
+                if not isinstance(audit_record, Mapping):
+                    raise RegistryError(
+                        f"run {run.id!r}: historical audit record is malformed")
+                try:
+                    audited_sources.add(Path(str(audit_record["source"])).resolve())
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RegistryError(
+                        f"run {run.id!r}: historical audit source is invalid") from exc
+        elif str(audit.get("status", "")).strip().upper() == "PASS":
+            hashes = audit.get("output_sha256")
+            if not isinstance(hashes, Mapping):
+                raise RegistryError(
+                    f"run {run.id!r}: custom historical audit lacks output hashes")
+            declared_result_hashes = {
+                record["sha256"] for record in declared.values()
+                if record["role"] == "result"
+            }
+            bound = set(hashes.values()) & declared_result_hashes
+            if not bound:
+                raise RegistryError(
+                    f"run {run.id!r}: custom historical audit is not bound to its result")
+            custom_bound_results.update(bound)
+        else:
+            raise RegistryError(
+                f"run {run.id!r}: historical audit status is unknown or invalid")
+    if audited_sources and audited_sources != result_path_set:
+        raise RegistryError(
+            f"run {run.id!r}: historical audit sources do not bind the result inventory")
+    if not audited_sources and not custom_bound_results:
+        raise RegistryError(
+            f"run {run.id!r}: historical audits do not bind any declared result")
     primary_results = []
     for payload in result_payloads:
         results = payload.get("results") or {}
@@ -643,10 +775,11 @@ def execute_registry(
             try:
                 artifact_audit = audit_historical_artifacts(run)
                 identity = run_identity_sha256(run)
-            except RegistryError as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate registry entries
                 records.append(_record_for_run(
                     run, status="FAILED_HISTORICAL_AUDIT", identity=None,
-                    summary=run.expected, reason=str(exc)))
+                    summary=run.expected,
+                    reason=f"{type(exc).__name__}: {exc}"))
                 if fail_fast:
                     break
                 continue
@@ -657,19 +790,24 @@ def execute_registry(
             continue
         try:
             identity = run_identity_sha256(run)
-        except RegistryError as exc:
+        except Exception as exc:  # noqa: BLE001 - filesystem identity is fallible
             records.append(_record_for_run(
                 run, status="FAILED_IDENTITY_INPUT", identity=None,
-                reason=str(exc)))
+                reason=f"{type(exc).__name__}: {exc}"))
             if fail_fast:
                 break
             continue
-        state = load_run_state(run.out_dir)
         try:
+            state = load_run_state(run.out_dir)
             decision = resume_decision(run, state, resume=resume)
         except RegistryError as exc:
+            status = (
+                "BLOCKED_IDENTITY_MISMATCH"
+                if "identity mismatch" in str(exc) or "resume is disabled" in str(exc)
+                else "FAILED"
+            )
             record = _record_for_run(
-                run, status="BLOCKED_IDENTITY_MISMATCH", identity=identity,
+                run, status=status, identity=identity,
                 reason=str(exc))
             records.append(record)
             if fail_fast:
@@ -680,11 +818,11 @@ def execute_registry(
                 run, status="SKIPPED_COMPLETE", identity=identity,
                 summary=state.get("summary")))
             continue
-        write_run_state(run.out_dir, {
-            "run_id": run.id, "status": "PLANNED", "identity": identity})
-        write_run_state(run.out_dir, {
-            "run_id": run.id, "status": "RUNNING", "identity": identity})
         try:
+            write_run_state(run.out_dir, {
+                "run_id": run.id, "status": "PLANNED", "identity": identity})
+            write_run_state(run.out_dir, {
+                "run_id": run.id, "status": "RUNNING", "identity": identity})
             if run.kind == "gwas":
                 result = gwas_runner(
                     phenotype=str(run.phenotype), sample_col=run.sample_col,
@@ -709,10 +847,15 @@ def execute_registry(
                     statistic="omniB", dry_run=dry_run)
         except Exception as exc:  # noqa: BLE001 - isolate independent registry runs
             reason = f"{type(exc).__name__}: {exc}"
-            write_run_state(run.out_dir, {
-                "run_id": run.id, "status": "FAILED", "identity": identity,
-                "summary": {}, "reason": reason,
-            })
+            try:
+                write_run_state(run.out_dir, {
+                    "run_id": run.id, "status": "FAILED", "identity": identity,
+                    "summary": {}, "reason": reason,
+                })
+            except Exception as state_exc:  # noqa: BLE001 - retain index failure
+                reason += (
+                    f"; failed to record run state: {type(state_exc).__name__}: "
+                    f"{state_exc}")
             records.append(_record_for_run(
                 run, status="FAILED", identity=identity, reason=reason))
             if fail_fast:
@@ -725,10 +868,19 @@ def execute_registry(
         else:
             status = "FAILED"
             reason = result.get("reason") or "workflow returned ok=false"
-        write_run_state(run.out_dir, {
-            "run_id": run.id, "status": status, "identity": identity,
-            "summary": summary, "reason": reason,
-        })
+        try:
+            write_run_state(run.out_dir, {
+                "run_id": run.id, "status": status, "identity": identity,
+                "summary": summary, "reason": reason,
+            })
+        except Exception as exc:  # noqa: BLE001 - isolate registry entries
+            reason = f"failed to record final run state: {type(exc).__name__}: {exc}"
+            records.append(_record_for_run(
+                run, status="FAILED", identity=identity,
+                summary=summary, reason=reason))
+            if fail_fast:
+                break
+            continue
         records.append(_record_for_run(
             run, status=status, identity=identity, summary=summary, reason=reason))
         if status == "FAILED" and fail_fast:
