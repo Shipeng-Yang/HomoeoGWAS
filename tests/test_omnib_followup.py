@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,8 @@ import yaml
 
 from homoeogwas.followup import (
     FollowupError,
+    candidate_coordinates,
+    cluster_formal_units,
     deterministic_folds,
     load_followup_inputs,
     prepare_formal_replay,
@@ -317,3 +320,60 @@ def test_stability_summary_keeps_formal_adjusted_p(monkeypatch, tmp_path):
         prepared.inputs.formal_hits.iloc[0]["p_adjusted_bootstrap_minp"])
     assert 0 <= stability.iloc[0]["material_nominal_support_fraction"] <= 1
     assert stability.iloc[0]["interpretation"].startswith("candidate-only internal")
+
+
+def _two_edge_hits(*, second_copy_set=("A", "C")):
+    return pd.DataFrame({
+        "rank": [0, 1],
+        "hypothesis_id": ["edge:AC:a1:c1", "edge:AC:a2:c2"],
+        "copy_set": [("A", "C"), second_copy_set],
+        "gene_A": ["a1", "a2"], "gene_C": ["c1", "c2"],
+        "chrom_A": ["A02", "A02"], "pos_A": [100_000, 140_000],
+        "chrom_C": ["C02", "C02"], "pos_C": [200_000, 315_000],
+    })
+
+
+def test_cluster_merges_same_copy_set_by_physical_rule():
+    loci, links = cluster_formal_units(
+        _two_edge_hits(), {}, max_distance_bp=1_000_000)
+
+    assert loci["locus_id"].nunique() == 1
+    assert links.iloc[0]["merge_reason"].startswith(
+        "all_compared_copies_within")
+    assert links.iloc[0]["merge_basis"] == "physical"
+
+
+def test_cluster_keeps_different_edge_directions_separate():
+    hits = _two_edge_hits(second_copy_set=("A", "D"))
+
+    loci, links = cluster_formal_units(hits, {})
+
+    assert loci["locus_id"].nunique() == 2
+    assert not bool(links.iloc[0]["merge"])
+    assert links.iloc[0]["merge_reason"] == "different_copy_set"
+
+
+def test_cluster_reports_physical_merge_even_when_one_copy_ld_is_low():
+    pc1 = {("A", "a1", "a2"): 0.7, ("C", "c1", "c2"): 0.001}
+
+    loci, links = cluster_formal_units(_two_edge_hits(), pc1)
+
+    assert loci["locus_id"].nunique() == 1
+    assert links.iloc[0]["merge_basis"] == "physical"
+    assert links.iloc[0]["pc1_r2_C"] == pytest.approx(0.001)
+
+
+def test_candidate_coordinates_use_exact_loaded_analysis_chunk(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+    updated = {}
+    for sub, data in prepared.subdata.items():
+        updated[sub] = replace(data, chunk=SimpleNamespace(
+            chrom=np.asarray([f"{sub}01"] * data.X.shape[1], dtype=object),
+            pos=np.arange(data.X.shape[1]) * 100 + 1))
+    prepared = replace(prepared, subdata=updated)
+
+    coordinates = candidate_coordinates(prepared)
+
+    assert coordinates.iloc[0]["copy_set"] == ("A", "C")
+    assert coordinates.iloc[0]["chrom_A"] == "A01"
+    assert coordinates.iloc[0]["chrom_C"] == "C01"
