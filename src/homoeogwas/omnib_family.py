@@ -42,6 +42,16 @@ class OmniBFamilyScores:
     grm_provenance: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class OmniBSubsetScores:
+    """Candidate-sensitivity scores from one frozen prepared omniB family."""
+
+    edge_p: np.ndarray
+    group_p: np.ndarray
+    edge_components: np.ndarray
+    covariance_components: dict[str, float]
+
+
 def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
     """Return minor-burden, PC1 and kernel-Hadamard p-values by response."""
     # Delayed import avoids a module cycle while keeping the established
@@ -292,6 +302,123 @@ def score_omnib_family(
         edge_membership=edge_estimable.copy(),
         grm_provenance=grm_provenance,
     ), expanded
+
+
+def score_omnib_subset(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    keep,
+    y_raw,
+    *,
+    n_jobs: int = 8,
+) -> OmniBSubsetScores:
+    """Refit a deleted-sample null while preserving the formal genotype features.
+
+    This is an internal-sensitivity primitive. It emits raw candidate-family
+    scores only and deliberately has no bootstrap or rejection interface.
+    """
+    from joblib import Parallel, delayed
+
+    from . import interact as I
+
+    keep = np.asarray(keep, int)
+    if keep.ndim != 1 or keep.size < 10:
+        raise ValueError("omniB deletion sensitivity requires at least 10 samples")
+    if not np.array_equal(keep, np.unique(keep)):
+        raise ValueError("keep indices must be unique sorted integers")
+    n_full = int(scores.W.shape[0])
+    if keep[0] < 0 or keep[-1] >= n_full:
+        raise ValueError("keep indices are outside the prepared analysis cohort")
+    y_raw = np.asarray(y_raw, float)
+    if y_raw.ndim != 1 or y_raw.size != keep.size:
+        raise ValueError("y_raw must be one-dimensional and aligned to keep")
+    if not np.all(np.isfinite(y_raw)):
+        raise ValueError("y_raw contains non-finite values")
+    if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, np.integer)) \
+            or int(n_jobs) < 1:
+        raise ValueError("n_jobs must be an integer >= 1")
+    n_jobs = int(n_jobs)
+    if scores.covariate_block is not None:
+        raise ValueError(
+            "deletion sensitivity with fixed covariates is not yet supported")
+    if not scores.null_kernels:
+        raise ValueError("prepared omniB context does not retain its null kernels")
+
+    all_rows = np.array_equal(keep, np.arange(n_full))
+    kernels = {}
+    for sub, full in scores.null_kernels.items():
+        value = full if all_rows else np.asarray(full)[np.ix_(keep, keep)]
+        if not all_rows:
+            scale = float(np.trace(value) / keep.size)
+            if not np.isfinite(scale) or scale <= 1e-12:
+                raise ValueError(
+                    f"subgenome {sub}: deleted-sample kernel has invalid trace")
+            value = value / scale
+        kernels[sub] = value
+
+    y = I.rank_int(y_raw)
+    W, _V, _beta, covariance = I.null_lmm_fit(kernels, y, seed=42)
+    Cw = (W @ np.ones(keep.size)).reshape(-1, 1)
+    Yw = W @ y.reshape(-1, 1)
+    membership = (
+        scores.edge_membership
+        if scores.edge_membership.size == len(expanded.edges)
+        else scores.edge_estimable
+    )
+    valid_indices = np.flatnonzero(membership)
+    edge_p = np.full(len(expanded.edges), np.nan)
+    components = np.full(
+        (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan)
+
+    def score_block(bounds):
+        start, stop = bounds
+        selected = valid_indices[start:stop]
+        values = np.full(selected.size, np.nan)
+        component_values = np.full(
+            (selected.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
+        for local, edge_index in enumerate(selected):
+            edge = expanded.edges[int(edge_index)]
+            try:
+                left_full = scores.feature_cache[(edge.sub_x, edge.gene_x)]
+                right_full = scores.feature_cache[(edge.sub_y, edge.gene_y)]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"frozen omniB feature missing for {edge.edge_id}") from exc
+            left = tuple(np.asarray(value)[keep] for value in left_full)
+            right = tuple(np.asarray(value)[keep] for value in right_full)
+            result = omnib_components_over_Y(W, Yw, Cw, left, right)[:, 0]
+            component_values[local] = result
+            values[local] = I.acat(result)
+        return selected, values, component_values
+
+    if valid_indices.size:
+        step = max(1, valid_indices.size // (n_jobs * 8))
+        blocks = [
+            (start, min(start + step, valid_indices.size))
+            for start in range(0, valid_indices.size, step)
+        ]
+        for selected, values, component_values in Parallel(
+            n_jobs=n_jobs, backend="threading"
+        )(delayed(score_block)(block) for block in blocks):
+            edge_p[selected] = values
+            components[selected] = component_values
+
+    group_p = np.full(len(family.group_ids), np.nan)
+    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
+        selected = np.asarray(edge_indices, int)
+        group_p[group_index] = (
+            edge_p[selected[0]] if selected.size == 1
+            else I.acat(edge_p[selected])
+        )
+    return OmniBSubsetScores(
+        edge_p=edge_p,
+        group_p=group_p,
+        edge_components=components,
+        covariance_components={
+            str(name): float(value) for name, value in covariance.items()
+        },
+    )
 
 
 def _prepare_checkpoint_omnib(
