@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from homoeogwas.cli import main
 from homoeogwas.followup import (
     FollowupError,
     candidate_coordinates,
@@ -16,6 +17,7 @@ from homoeogwas.followup import (
     load_followup_inputs,
     prepare_formal_replay,
     run_environment_deletion,
+    run_followup,
     run_material_deletion,
     summarize_stability,
 )
@@ -65,6 +67,8 @@ def test_subset_all_rows_replays_prepared_observed(subgenomes):
         replay.edge_p, scores.edge_p[:, 0], rtol=1e-6, atol=1e-10)
     np.testing.assert_allclose(
         replay.group_p, scores.group_p[:, 0], rtol=1e-6, atol=1e-10)
+    assert np.nanmax(np.abs(replay.edge_p - scores.edge_p[:, 0])) <= 1e-10
+    assert np.nanmax(np.abs(replay.group_p - scores.group_p[:, 0])) <= 1e-10
     if len(subgenomes) == 4:
         assert len(expand_pair_edges(family).edges) == 6 * len(family.group_ids)
 
@@ -377,3 +381,55 @@ def test_candidate_coordinates_use_exact_loaded_analysis_chunk(monkeypatch, tmp_
     assert coordinates.iloc[0]["copy_set"] == ("A", "C")
     assert coordinates.iloc[0]["chrom_A"] == "A01"
     assert coordinates.iloc[0]["chrom_C"] == "C01"
+
+
+def test_run_followup_no_hit_writes_successful_stop(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+
+    result = run_followup(tmp_path, n_jobs=1)
+
+    assert result["status"] == "NO_FORMAL_DISCOVERY"
+    assert (tmp_path / "followup" / "followup_summary.json").exists()
+    assert not (tmp_path / "followup" / "candidate_evidence.tsv").exists()
+
+
+def test_run_followup_toy_writes_complete_audited_package(monkeypatch, tmp_path):
+    subdata, family, y, _ = _toy_group_inputs(("A", "C"))
+    for sub, data in subdata.items():
+        data.chunk = SimpleNamespace(
+            chrom=np.asarray([f"{sub}01"] * data.X.shape[1], dtype=object),
+            pos=np.arange(data.X.shape[1]) * 100 + 1)
+    _write_replay_fixture(tmp_path, subdata, family, y)
+    monkeypatch.setattr(
+        "homoeogwas.followup._load_verified_subgenomes",
+        lambda interact, subgenomes, config_dir: subdata)
+
+    result = run_followup(
+        tmp_path, material_folds=4, n_jobs=1, grm_blas_threads=1)
+
+    out = tmp_path / "followup"
+    assert result["status"] == "COMPLETED"
+    assert result["audit_status"] == "PASS"
+    assert (out / "formal_hit_reproduction.tsv").exists()
+    assert (out / "material_deletion.tsv").exists()
+    assert (out / "independent_loci.tsv").exists()
+    assert (out / "evidence_tiers.tsv").exists()
+    assert (out / "independent_audit.json").exists()
+    assert (out / "FOLLOWUP_SUMMARY.md").exists()
+
+
+def test_followup_cli_parses_generic_options(tmp_path, monkeypatch, capsys):
+    called = {}
+
+    def fake_run(*args, **kwargs):
+        called.update(kwargs)
+        return {"status": "COMPLETED", "audit_status": "PASS"}
+
+    monkeypatch.setattr("homoeogwas.followup.run_followup", fake_run)
+
+    assert main([
+        "follow-up", str(tmp_path), "--material-folds", "8",
+        "--n-jobs", "4", "--grm-blas-threads", "2"]) == 0
+    assert called["material_folds"] == 8
+    assert called["n_jobs"] == 4
+    assert "COMPLETED" in capsys.readouterr().out

@@ -48,7 +48,7 @@ pip install "homoeogwas[gpu]"
 
 See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. CLI
-subcommands: `fit`, `validate`, `demo`, `split`, `interact`.
+subcommands: `fit`, `validate`, `demo`, `split`, `interact`, `follow-up`.
 
 ### Freeze several species in one production registry
 
@@ -62,6 +62,23 @@ homoeogwas registry run -c analyses/cross_species_interaction_inventory.yaml --d
 
 Species are metadata. New two-, three- and four-copy interaction runs use the same pair-edge
 group omniB engine; see [the registry guide](docs/run_registry.md).
+
+### Stability and functional evidence for formal discoveries
+
+After a canonical group omniB run, one species-independent command reproduces the formal
+discoveries, performs deterministic material deletion, optionally deletes environments, merges
+redundant units into reporting regions, and joins provenance-bound annotation, expression, QTL,
+literature or functional evidence:
+
+```bash
+homoeogwas follow-up results/my_interaction \
+  --material-folds 20 --n-jobs 16 \
+  --environment-col environment \
+  --evidence analyses/my_trait.evidence.yaml
+```
+
+The deletion analyses are candidate-only internal sensitivity checks, not a new discovery family
+or independent replication. See [the follow-up guide](docs/followup.md).
 
 ## Run it by talking to an AI agent (no YAML, no coding)
 

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import tempfile
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -647,3 +651,296 @@ def cluster_formal_units(
     result["n_units_in_locus"] = result.groupby("locus_id")[
         "hypothesis_id"].transform("size")
     return result, pd.DataFrame.from_records(links)
+
+
+def _atomic_text(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        Path(temporary).replace(path)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _write_tsv(frame: pd.DataFrame, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(descriptor)
+    try:
+        frame.to_csv(
+            temporary, sep="\t", index=False, na_rep="NA",
+            float_format="%.17g")
+        Path(temporary).replace(path)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _pc1_map(prepared: PreparedFollowup, coordinates: pd.DataFrame) -> dict:
+    values = {}
+    for left in range(len(coordinates)):
+        for right in range(left + 1, len(coordinates)):
+            first, second = coordinates.iloc[left], coordinates.iloc[right]
+            copies = tuple(first["copy_set"])
+            if copies != tuple(second["copy_set"]):
+                continue
+            for sub in copies:
+                gene_left = str(first[f"gene_{sub}"])
+                gene_right = str(second[f"gene_{sub}"])
+                feature_left = prepared.scores.feature_cache.get(
+                    (sub, gene_left))
+                feature_right = prepared.scores.feature_cache.get(
+                    (sub, gene_right))
+                if feature_left is None or feature_right is None:
+                    continue
+                pc_left = np.asarray(feature_left[1], float).reshape(-1)
+                pc_right = np.asarray(feature_right[1], float).reshape(-1)
+                if np.std(pc_left) <= 1e-12 or np.std(pc_right) <= 1e-12:
+                    r2 = float("nan")
+                else:
+                    r2 = float(np.corrcoef(pc_left, pc_right)[0, 1] ** 2)
+                values[(sub, gene_left, gene_right)] = r2
+    return values
+
+
+def _candidate_genes(coordinates: pd.DataFrame) -> pd.DataFrame:
+    records = []
+    for row in coordinates.to_dict(orient="records"):
+        for sub in tuple(row["copy_set"]):
+            records.append({
+                "gene_id": str(row[f"gene_{sub}"]),
+                "subgenome": sub,
+            })
+    return pd.DataFrame.from_records(records).drop_duplicates(
+        ["gene_id", "subgenome"], keep="first").reset_index(drop=True)
+
+
+def _followup_audit(
+    prepared: PreparedFollowup,
+    material: pd.DataFrame,
+    loci: pd.DataFrame,
+    candidate_genes: pd.DataFrame,
+    tiers: pd.DataFrame,
+) -> dict:
+    fold_manifest = material[["deleted_fold", "deleted_samples"]].drop_duplicates()
+    sample_counts = Counter()
+    for value in fold_manifest["deleted_samples"]:
+        sample_counts.update(str(value).split(";"))
+    formal_ids = set(prepared.inputs.formal_hits["hypothesis_id"].astype(str))
+    tier_ids = set(tiers["hypothesis_id"].astype(str))
+    checks = {
+        "formal_hit_count": int(len(prepared.inputs.formal_hits)),
+        "formal_replay_max_abs_error": prepared.formal_replay_max_abs_error,
+        "formal_replay_allowed_abs_error": float(
+            1e-10 + 1e-6 * prepared.inputs.formal_hits[
+                "p_interaction"].abs().max()),
+        "material_deletion": {
+            "fold_count": int(material["deleted_fold"].nunique()),
+            "unique_samples": int(len(sample_counts)),
+            "samples_deleted_exactly_once": int(sum(
+                count == 1 for count in sample_counts.values())),
+            "candidate_fold_rows": int(len(material)),
+        },
+        "locus_clustering": {
+            "candidate_units": int(len(loci)),
+            "independent_loci": int(loci["locus_id"].nunique()),
+        },
+        "functional_evidence": {
+            "candidate_genes": int(len(candidate_genes)),
+            "candidate_unit_tiers": int(len(tiers)),
+            "candidate_keys_match_formal_hits": tier_ids == formal_ids,
+        },
+    }
+    expected_samples = len(prepared.analyzed_samples)
+    passed = (
+        checks["formal_replay_max_abs_error"]
+        <= checks["formal_replay_allowed_abs_error"]
+        and checks["material_deletion"]["unique_samples"] == expected_samples
+        and checks["material_deletion"]["samples_deleted_exactly_once"] == expected_samples
+        and checks["functional_evidence"]["candidate_keys_match_formal_hits"]
+    )
+    if not passed:
+        raise FollowupError(
+            "independent follow-up consistency audit failed; outputs are incomplete")
+    return {
+        "audit": "canonical_group_omnib_followup_consistency",
+        "status": "PASS",
+        **checks,
+        "scope": (
+            "Candidate-only internal sensitivity and evidence consistency; "
+            "not independent replication or causal validation."),
+    }
+
+
+def run_followup(
+    results_dir: str | Path,
+    *,
+    config: str | Path | None = None,
+    ranking: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    material_folds: int = 20,
+    environment_col: str | None = None,
+    evidence: str | Path | None = None,
+    n_jobs: int = 8,
+    grm_blas_threads: int = 8,
+) -> dict:
+    """Build a complete candidate-only stability and evidence dossier."""
+    from threadpoolctl import threadpool_limits
+
+    from .evidence import (
+        assign_evidence_tiers,
+        join_candidate_evidence,
+        load_evidence_manifest,
+    )
+
+    inputs = load_followup_inputs(results_dir, config=config, ranking=ranking)
+    out = (Path(out_dir).expanduser().resolve() if out_dir is not None
+           else inputs.results_dir / "followup")
+    out.mkdir(parents=True, exist_ok=True)
+    if inputs.formal_hits.empty:
+        summary = {
+            "analysis": "canonical_group_omnib_followup",
+            "status": "NO_FORMAL_DISCOVERY",
+            "trait": inputs.trait,
+            "formal_hits": 0,
+            "interpretation": (
+                "The formal family has no FWER discovery; candidate follow-up "
+                "was not started and no candidates were manufactured."),
+        }
+        _atomic_text(
+            out / "followup_summary.json",
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+        return summary
+
+    with threadpool_limits(limits=int(grm_blas_threads)):
+        prepared = prepare_formal_replay(inputs, n_jobs=n_jobs)
+    coordinates = candidate_coordinates(prepared)
+    loci, links = cluster_formal_units(
+        coordinates, _pc1_map(prepared, coordinates))
+    material = run_material_deletion(
+        prepared, n_folds=material_folds, n_jobs=n_jobs)
+    environment, environment_status = run_environment_deletion(
+        prepared, environment_col, n_jobs=n_jobs)
+    stability = summarize_stability(prepared, material, environment)
+    candidate_genes = _candidate_genes(coordinates)
+    if evidence is not None:
+        manifest = load_evidence_manifest(evidence)
+        evidence_frame, evidence_provenance = join_candidate_evidence(
+            candidate_genes, manifest)
+    else:
+        evidence_frame = pd.DataFrame(columns=[
+            "gene_id", "subgenome", "source", "kind", "citation",
+            "matched", "supported"])
+        evidence_provenance = {
+            "evidence_version": 1,
+            "manifest": None,
+            "sources": [],
+            "status": "NO_EVIDENCE_MANIFEST_PROVIDED",
+        }
+    tiers = assign_evidence_tiers(coordinates, evidence_frame)
+    outputs = {
+        "formal_reproduction": _write_tsv(
+            prepared.replay, out / "formal_hit_reproduction.tsv"),
+        "material_deletion": _write_tsv(
+            material, out / "material_deletion.tsv"),
+        "stability": _write_tsv(
+            stability, out / "stability_summary.tsv"),
+        "locus_links": _write_tsv(links, out / "locus_links.tsv"),
+        "independent_loci": _write_tsv(
+            loci, out / "independent_loci.tsv"),
+        "candidate_evidence": _write_tsv(
+            evidence_frame, out / "candidate_evidence.tsv"),
+        "evidence_tiers": _write_tsv(tiers, out / "evidence_tiers.tsv"),
+    }
+    if not environment.empty:
+        outputs["environment_deletion"] = _write_tsv(
+            environment, out / "environment_deletion.tsv")
+    _atomic_text(
+        out / "evidence_provenance.json",
+        json.dumps(evidence_provenance, indent=2, ensure_ascii=False) + "\n")
+    audit = _followup_audit(
+        prepared, material, loci, candidate_genes, tiers)
+    audit_path = _atomic_text(
+        out / "independent_audit.json",
+        json.dumps(audit, indent=2, ensure_ascii=False) + "\n")
+    summary = {
+        "analysis": "canonical_group_omnib_followup",
+        "status": "COMPLETED",
+        "audit_status": audit["status"],
+        "trait": inputs.trait,
+        "primary_unit": inputs.hypothesis_unit,
+        "formal_hits": int(len(inputs.formal_hits)),
+        "independent_loci": int(loci["locus_id"].nunique()),
+        "material_folds": int(material["deleted_fold"].nunique()),
+        "environment_deletion": environment_status,
+        "formal_reproduction_max_abs_error": (
+            prepared.formal_replay_max_abs_error),
+        "interpretation": (
+            "Encoding-robust omnibus pairwise interaction evidence with "
+            "candidate-only internal deletion sensitivity. This does not "
+            "establish a higher-order, physical, or causal mechanism and is "
+            "not independent replication."),
+        "outputs": {name: str(path) for name, path in outputs.items()}
+        | {"independent_audit": str(audit_path)},
+    }
+    summary_path = _atomic_text(
+        out / "followup_summary.json",
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    markdown = (
+        f"# Follow-up summary: {inputs.trait}\n\n"
+        f"- Primary unit: {inputs.hypothesis_unit}\n"
+        f"- Formal discoveries: {len(inputs.formal_hits)}\n"
+        f"- Independent reporting regions: {summary['independent_loci']}\n"
+        f"- Material folds: {summary['material_folds']}\n"
+        f"- Environment deletion: {environment_status}\n"
+        f"- Independent consistency audit: PASS\n\n"
+        "These are encoding-robust omnibus pairwise interaction candidates. "
+        "Deletion analyses are internal sensitivity only; they do not prove "
+        "higher-order interaction, physical interaction, causality, or "
+        "independent replication.\n")
+    markdown_path = _atomic_text(out / "FOLLOWUP_SUMMARY.md", markdown)
+    summary["outputs"].update({
+        "summary_json": str(summary_path),
+        "summary_markdown": str(markdown_path),
+    })
+    return summary
+
+
+def add_followup_subparser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "follow-up",
+        help="candidate-only stability and evidence follow-up for group omniB")
+    parser.add_argument("results_dir", help="completed canonical interaction result")
+    parser.add_argument("--config", default=None, help="explicit canonical config")
+    parser.add_argument("--ranking", default=None, help="explicit complete INT ranking")
+    parser.add_argument("--out-dir", default=None, help="follow-up output directory")
+    parser.add_argument("--material-folds", type=int, default=20)
+    parser.add_argument("--environment-col", default=None)
+    parser.add_argument("--evidence", default=None, help="evidence manifest YAML")
+    parser.add_argument("--n-jobs", type=int, default=8)
+    parser.add_argument("--grm-blas-threads", type=int, default=8)
+
+
+def cmd_followup(args) -> int:
+    from .evidence import EvidenceError
+
+    try:
+        result = run_followup(
+            args.results_dir, config=args.config, ranking=args.ranking,
+            out_dir=args.out_dir, material_folds=args.material_folds,
+            environment_col=args.environment_col, evidence=args.evidence,
+            n_jobs=args.n_jobs, grm_blas_threads=args.grm_blas_threads)
+    except (FollowupError, EvidenceError) as exc:
+        print(f"ERROR: follow-up: {exc}")
+        return 1
+    print(
+        f"[follow-up] {result['status']} "
+        f"audit={result.get('audit_status', 'NA')}")
+    return 0

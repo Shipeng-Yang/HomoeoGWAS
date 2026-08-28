@@ -967,6 +967,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .run_registry import add_registry_subparser
     add_registry_subparser(sub)
 
+    from .followup import add_followup_subparser
+    add_followup_subparser(sub)
+
     val = sub.add_parser("validate", help="load + validate a run config and "
                                           "check input paths, without running")
     val.add_argument("-c", "--config", required=True, help="YAML run-config path")
@@ -1681,6 +1684,9 @@ def main(argv=None) -> int:
     if args.subcommand == "registry":
         from .run_registry import cmd_registry
         return cmd_registry(args)
+    if args.subcommand == "follow-up":
+        from .followup import cmd_followup
+        return cmd_followup(args)
     if args.subcommand == "design":
         from .design_depth import cmd_design
         return cmd_design(args)
