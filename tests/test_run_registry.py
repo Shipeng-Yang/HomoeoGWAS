@@ -84,6 +84,22 @@ def test_registry_rejects_unknown_run_fields(tmp_path):
         load_registry(_write_registry(tmp_path, [run]))
 
 
+@pytest.mark.parametrize(("field", "value"), [
+    ("sample_col", 17),
+    ("trait", False),
+    ("include_hadamard", "false"),
+    ("loco", 1),
+    ("run_plots", "yes"),
+    ("hypothesis_unit", 2),
+])
+def test_registry_rejects_wrong_scalar_types(tmp_path, field, value):
+    run = _interaction("bad")
+    run[field] = value
+
+    with pytest.raises(RegistryError, match=field):
+        load_registry(_write_registry(tmp_path, [run]))
+
+
 def test_historical_run_requires_analysis_shape_and_result_root(tmp_path):
     run = {
         "id": "old",
@@ -201,6 +217,10 @@ def test_four_copy_dispatch_has_no_four_way_option(tmp_path):
 def test_historical_entry_is_indexed_without_dispatch(tmp_path):
     root = tmp_path / "historical-result"
     root.mkdir()
+    (root / "interact_trait.json").write_text('{"command":"interact"}\n')
+    (root / "audit").mkdir()
+    (root / "audit" / "historical.audit.json").write_text(
+        '{"status":"PASS"}\n')
     run = {
         "id": "old",
         "kind": "historical",
@@ -221,6 +241,20 @@ def test_historical_entry_is_indexed_without_dispatch(tmp_path):
     assert Path(result["indexes"]["json"]).exists()
     assert Path(result["indexes"]["tsv"]).exists()
     assert Path(result["indexes"]["markdown"]).exists()
+
+
+def test_missing_historical_artifacts_fail_closed(tmp_path):
+    run = {
+        "id": "old", "kind": "historical", "species": "Triticum aestivum",
+        "panel": "Watkins", "subgenomes": ["A", "B", "D"],
+        "result_root": "missing-result", "analysis_shape": "legacy_route_b_group",
+    }
+
+    result = execute_registry(_write_registry(tmp_path, [run]))
+
+    assert not result["ok"]
+    assert result["runs"][0]["status"] == "FAILED_HISTORICAL_AUDIT"
+    assert "missing" in result["runs"][0]["reason"]
 
 
 def test_matching_complete_run_is_skipped_on_resume(tmp_path):
@@ -257,6 +291,38 @@ def test_registry_continues_after_independent_failure(tmp_path):
 
     assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
     assert result["ok"] is False
+
+
+def test_registry_records_runner_exception_and_continues(tmp_path):
+    first = _interaction("first")
+    second = _interaction("second")
+    _materialized_run(tmp_path)
+    path = _write_registry(tmp_path, [first, second])
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs["out_dir"])
+        if len(calls) == 1:
+            raise OSError("simulated input read failure")
+        return {"ok": True, "summary": {"n_significant": 0}}
+
+    result = execute_registry(path, interaction_runner=runner)
+
+    assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
+    first_run = load_registry(path).runs[0]
+    state = load_run_state(first_run.out_dir)
+    assert state["status"] == "FAILED"
+    assert "simulated input read failure" in state["reason"]
+
+
+def test_registry_records_missing_identity_inputs_without_aborting(tmp_path):
+    path = _write_registry(tmp_path, [_interaction("missing")])
+
+    result = execute_registry(path)
+
+    assert not result["ok"]
+    assert result["runs"][0]["status"] == "FAILED_IDENTITY_INPUT"
+    assert "missing" in result["runs"][0]["reason"]
 
 
 def test_registry_cli_validate_and_dry_run(tmp_path, capsys):

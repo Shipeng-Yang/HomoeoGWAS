@@ -26,6 +26,15 @@ BLAS threads only for a deliberately single-job replay.
 Before any sensitivity analysis, HomoeoGWAS reloads the exact phenotype, BED-bound SNP-to-gene
 mappings and master group family and reproduces every formal interaction p-value and evidence
 driver. It refuses legacy direction-wise results, unverified mappings and changed formal inputs.
+It also binds the complete ranking to the audited result JSON: the full hypothesis inventory,
+planned/valid counts, edge/group family hashes, bootstrap threshold, rejected IDs, raw P values
+and adjusted P values must agree. Editing or truncating a ranking therefore cannot create a
+follow-up candidate.
+
+Each output directory is one immutable generation, bound to the formal config/ranking/result/audit
+hashes, evidence-source hashes and follow-up options. A matching completed generation is reused.
+A non-empty unbound, mismatched or partial directory is refused with an instruction to choose a
+new `--out-dir`; stale candidate/environment tables are never mixed into a new dossier.
 
 ## Stability analyses
 
@@ -89,6 +98,7 @@ expression; orthology/domain annotation only; or no linked external evidence.
   functional evidence.
 - `independent_audit.json`, `followup_summary.json`, `FOLLOWUP_SUMMARY.md`: completion and
   consistency checks.
+- `followup_identity.json`: immutable formal/evidence/method identity and generation status.
 
 The publishable wording is “encoding-robust omnibus pairwise interaction evidence for a
 homoeolog pair” for edge-primary analyses, or “encoding-robust omnibus pairwise interaction

@@ -64,6 +64,8 @@ _RUN_FIELDS = {
 def _resolve(base: Path, value: Any) -> Path | None:
     if value is None:
         return None
+    if not isinstance(value, (str, os.PathLike)) or not str(value).strip():
+        raise RegistryError("registry paths must be non-empty strings")
     path = Path(str(value)).expanduser()
     return (path if path.is_absolute() else base / path).resolve()
 
@@ -81,6 +83,21 @@ def _require_text(raw: Mapping[str, Any], key: str, run_id: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RegistryError(f"run {run_id!r}: {key} must be a non-empty string")
     return value.strip()
+
+
+def _optional_text(
+    raw: Mapping[str, Any], key: str, run_id: str, default: str | None = None,
+) -> str | None:
+    if key not in raw:
+        return default
+    return _require_text(raw, key, run_id)
+
+
+def _boolean(raw: Mapping[str, Any], key: str, run_id: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        raise RegistryError(f"run {run_id!r}: {key} must be true or false")
+    return value
 
 
 def _parse_run(raw: Any, base: Path, row: int) -> RegistryRun:
@@ -109,6 +126,11 @@ def _parse_run(raw: Any, base: Path, row: int) -> RegistryRun:
     if kind != "interaction" and len(set(subgenomes)) != len(subgenomes):
         raise RegistryError(f"run {run_id!r}: subgenomes must be unique")
 
+    expected_raw = raw.get("expected", {})
+    if expected_raw is None:
+        expected_raw = {}
+    if not isinstance(expected_raw, Mapping):
+        raise RegistryError(f"run {run_id!r}: expected must be a mapping")
     run = RegistryRun(
         id=run_id,
         kind=kind,
@@ -117,23 +139,28 @@ def _parse_run(raw: Any, base: Path, row: int) -> RegistryRun:
         subgenomes=subgenomes,
         out_dir=_resolve(base, raw.get("out_dir")),
         phenotype=_resolve(base, raw.get("phenotype")),
-        sample_col=raw.get("sample_col"),
-        trait=raw.get("trait"),
+        sample_col=_optional_text(raw, "sample_col", run_id),
+        trait=_optional_text(raw, "trait", run_id),
         bed_prefixes=_mapping_paths(
             base, raw.get("bed_prefixes"), f"run {run_id!r} bed_prefixes"),
         snp_to_gene=_mapping_paths(
             base, raw.get("snp_to_gene"), f"run {run_id!r} snp_to_gene"),
         groups=_resolve(base, raw.get("groups")),
-        hypothesis_unit=str(raw.get("hypothesis_unit", "group")).lower(),
-        family_scope=str(raw.get("family_scope", "primary_only")).lower(),
+        hypothesis_unit=(
+            _optional_text(raw, "hypothesis_unit", run_id, "group") or "group"
+        ).lower(),
+        family_scope=(
+            _optional_text(raw, "family_scope", run_id, "primary_only")
+            or "primary_only"
+        ).lower(),
         bootstrap_B=raw.get("bootstrap_B", 2000),
         n_jobs=raw.get("n_jobs", 8),
-        include_hadamard=raw.get("include_hadamard", False),
-        loco=raw.get("loco", False),
-        run_plots=raw.get("run_plots", True),
+        include_hadamard=_boolean(raw, "include_hadamard", run_id, False),
+        loco=_boolean(raw, "loco", run_id, False),
+        run_plots=_boolean(raw, "run_plots", run_id, True),
         result_root=_resolve(base, raw.get("result_root")),
-        analysis_shape=raw.get("analysis_shape"),
-        expected=dict(raw.get("expected") or {}),
+        analysis_shape=_optional_text(raw, "analysis_shape", run_id),
+        expected=dict(expected_raw),
     )
     _validate_run(run)
     return run
@@ -278,10 +305,12 @@ def canonical_run_identity(run: RegistryRun) -> dict:
         "out_dir": str(run.out_dir) if run.out_dir else None,
     }
     if run.kind == "historical":
+        artifact_audit = audit_historical_artifacts(run)
         payload.update({
             "result_root": str(run.result_root),
             "analysis_shape": run.analysis_shape,
             "expected": dict(run.expected),
+            "artifact_inventory": artifact_audit["artifacts"],
         })
         return payload
     payload.update({
@@ -322,6 +351,67 @@ def run_identity_sha256(run: RegistryRun) -> str:
         canonical_run_identity(run), sort_keys=True, separators=(",", ":"),
         ensure_ascii=False, allow_nan=False).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def audit_historical_artifacts(run: RegistryRun) -> dict:
+    """Read and hash the immutable result/audit inventory of a legacy run."""
+    root = run.result_root
+    if root is None or not root.exists() or not root.is_dir():
+        raise RegistryError(
+            f"run {run.id!r}: historical result root is missing: {root}")
+    result_paths = sorted(root.glob("interact_*.json"))
+    audit_paths = sorted((root / "audit").glob("*.json"))
+    if not result_paths:
+        raise RegistryError(
+            f"run {run.id!r}: historical result has no interact_*.json")
+    if not audit_paths:
+        raise RegistryError(
+            f"run {run.id!r}: historical result has no audit/*.json")
+    artifacts = []
+    result_payloads = []
+    for role, paths in (("result", result_paths), ("audit", audit_paths)):
+        for path in paths:
+            try:
+                value = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RegistryError(
+                    f"run {run.id!r}: unreadable historical {role} {path}: {exc}") from exc
+            if not isinstance(value, Mapping):
+                raise RegistryError(
+                    f"run {run.id!r}: historical {role} is not a JSON object: {path}")
+            if role == "result":
+                result_payloads.append(value)
+            artifacts.append({
+                "role": role,
+                "path": str(path.resolve()),
+                "size": int(path.stat().st_size),
+                "sha256": _sha256_file(path),
+            })
+    primary_results = []
+    for payload in result_payloads:
+        results = payload.get("results") or {}
+        preferred = str((payload.get("provenance") or {}).get(
+            "primary_transform", "INT"))
+        primary = results.get(preferred) or results.get("INT")
+        if isinstance(primary, Mapping):
+            primary_results.append(primary)
+    expected_fields = {
+        "n_significant": "n_sig",
+        "n_planned": "n_planned",
+        "n_valid": "n_valid",
+    }
+    for expected_key, result_key in expected_fields.items():
+        if expected_key not in run.expected:
+            continue
+        observed = {
+            value for primary in primary_results
+            if (value := primary.get(result_key)) is not None
+        }
+        if observed != {run.expected[expected_key]}:
+            raise RegistryError(
+                f"run {run.id!r}: historical {expected_key} expected "
+                f"{run.expected[expected_key]!r}, observed {sorted(observed)!r}")
+    return {"status": "PASS", "artifacts": artifacts}
 
 
 def load_run_state(out_dir: Path) -> dict | None:
@@ -391,6 +481,22 @@ def _atomic_text(path: Path, body: str) -> Path:
     return path
 
 
+def _atomic_tsv(path: Path, table) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            table.to_csv(handle, sep="\t", index=False, na_rep="NA")
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(temp_name).replace(path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return path
+
+
 def _summary_fields(summary: Mapping[str, Any] | None) -> dict:
     summary = dict(summary or {})
     return {
@@ -426,7 +532,7 @@ def _record_for_run(
         "reason": reason,
         "next_action": (
             "migrate and rerun canonically" if status == "HISTORICAL"
-            else ("inspect failure and repair inputs" if status == "FAILED"
+            else ("inspect failure and repair inputs" if status.startswith("FAILED")
                   else ("follow-up formal discoveries" if
                         (_summary_fields(summary)["n_significant"] or 0) > 0
                         else "none"))
@@ -466,8 +572,7 @@ def write_registry_indexes(
     table = table[columns].copy()
     table["subgenomes"] = table["subgenomes"].map(
         lambda value: ",".join(value) if isinstance(value, list) else value)
-    tsv_path = out / "run_index.tsv"
-    table.to_csv(tsv_path, sep="\t", index=False, na_rep="NA")
+    tsv_path = _atomic_tsv(out / "run_index.tsv", table)
     header = (
         "| Run | Species | Trait | Copies | Status | Significant | Audit | Next action |\n"
         "|---|---|---|---|---|---:|---|---|\n")
@@ -535,11 +640,30 @@ def execute_registry(
         if selected and run.id not in selected:
             continue
         if run.kind == "historical":
+            try:
+                artifact_audit = audit_historical_artifacts(run)
+                identity = run_identity_sha256(run)
+            except RegistryError as exc:
+                records.append(_record_for_run(
+                    run, status="FAILED_HISTORICAL_AUDIT", identity=None,
+                    summary=run.expected, reason=str(exc)))
+                if fail_fast:
+                    break
+                continue
             records.append(_record_for_run(
-                run, status="HISTORICAL", identity=run_identity_sha256(run),
-                summary=run.expected))
+                run, status="HISTORICAL", identity=identity,
+                summary=run.expected,
+                reason=f"artifact audit {artifact_audit['status']}"))
             continue
-        identity = run_identity_sha256(run)
+        try:
+            identity = run_identity_sha256(run)
+        except RegistryError as exc:
+            records.append(_record_for_run(
+                run, status="FAILED_IDENTITY_INPUT", identity=None,
+                reason=str(exc)))
+            if fail_fast:
+                break
+            continue
         state = load_run_state(run.out_dir)
         try:
             decision = resume_decision(run, state, resume=resume)
@@ -560,25 +684,40 @@ def execute_registry(
             "run_id": run.id, "status": "PLANNED", "identity": identity})
         write_run_state(run.out_dir, {
             "run_id": run.id, "status": "RUNNING", "identity": identity})
-        if run.kind == "gwas":
-            result = gwas_runner(
-                phenotype=str(run.phenotype), sample_col=run.sample_col,
-                trait=run.trait, subgenomes=run.subgenomes,
-                out_dir=str(run.out_dir),
-                bed_prefixes={key: str(value) for key, value in run.bed_prefixes.items()},
-                include_hadamard=run.include_hadamard, loco=run.loco,
-                run_plots=run.run_plots, dry_run=dry_run)
-        else:
-            result = interaction_runner(
-                phenotype=str(run.phenotype), sample_col=run.sample_col,
-                trait=run.trait, subgenomes=run.subgenomes,
-                bed_prefixes={key: str(value) for key, value in run.bed_prefixes.items()},
-                snp_to_gene={key: str(value) for key, value in run.snp_to_gene.items()},
-                out_dir=str(run.out_dir), groups=str(run.groups),
-                hypothesis_unit=run.hypothesis_unit,
-                subset_order=2, family_scope=run.family_scope,
-                perm_b=run.bootstrap_B, n_jobs=run.n_jobs,
-                statistic="omniB", dry_run=dry_run)
+        try:
+            if run.kind == "gwas":
+                result = gwas_runner(
+                    phenotype=str(run.phenotype), sample_col=run.sample_col,
+                    trait=run.trait, subgenomes=run.subgenomes,
+                    out_dir=str(run.out_dir),
+                    bed_prefixes={
+                        key: str(value) for key, value in run.bed_prefixes.items()},
+                    include_hadamard=run.include_hadamard, loco=run.loco,
+                    run_plots=run.run_plots, dry_run=dry_run)
+            else:
+                result = interaction_runner(
+                    phenotype=str(run.phenotype), sample_col=run.sample_col,
+                    trait=run.trait, subgenomes=run.subgenomes,
+                    bed_prefixes={
+                        key: str(value) for key, value in run.bed_prefixes.items()},
+                    snp_to_gene={
+                        key: str(value) for key, value in run.snp_to_gene.items()},
+                    out_dir=str(run.out_dir), groups=str(run.groups),
+                    hypothesis_unit=run.hypothesis_unit,
+                    subset_order=2, family_scope=run.family_scope,
+                    perm_b=run.bootstrap_B, n_jobs=run.n_jobs,
+                    statistic="omniB", dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 - isolate independent registry runs
+            reason = f"{type(exc).__name__}: {exc}"
+            write_run_state(run.out_dir, {
+                "run_id": run.id, "status": "FAILED", "identity": identity,
+                "summary": {}, "reason": reason,
+            })
+            records.append(_record_for_run(
+                run, status="FAILED", identity=identity, reason=reason))
+            if fail_fast:
+                break
+            continue
         summary = result.get("summary") or {}
         if result.get("ok"):
             status = "DRY_RUN" if dry_run else "COMPLETE"
@@ -595,7 +734,9 @@ def execute_registry(
         if status == "FAILED" and fail_fast:
             break
     indexes = write_registry_indexes(registry, records)
-    failed_statuses = {"FAILED", "BLOCKED_IDENTITY_MISMATCH"}
+    failed_statuses = {
+        "FAILED", "FAILED_HISTORICAL_AUDIT", "FAILED_IDENTITY_INPUT",
+        "BLOCKED_IDENTITY_MISMATCH"}
     return {
         "ok": not any(record["status"] in failed_statuses for record in records),
         "registry": str(registry.source_path),

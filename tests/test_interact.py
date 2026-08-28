@@ -6,6 +6,7 @@ others; a pure-noise null produces no Bonferroni hits. These guard the engine be
 DL-weighting and multi-trait extensions are layered on.
 """
 import copy
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -1173,6 +1174,8 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
         "grm_scope": "all_subgenomes",
     } == provenance
     assert list(payload["results"]) == ["INT"]
+    assert payload["provenance"]["config_sha256"] == hashlib.sha256(
+        config.read_bytes()).hexdigest()
     assert payload["results"]["INT"]["model_diagnostics"][
         "bootstrap_fwer"]["family_id"] == "group"
 

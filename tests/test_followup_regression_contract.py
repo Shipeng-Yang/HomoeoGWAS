@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from homoeogwas.followup import run_followup
+from homoeogwas.followup import load_followup_inputs, run_followup
 from homoeogwas.run_registry import load_registry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,27 @@ RAPESEED_EVIDENCE = (
 RUN_LOCAL_REGRESSION = os.environ.get(
     "HOMOEOGWAS_RUN_LOCAL_REGRESSION", ""
 ).strip() == "1"
+
+
+@pytest.mark.skipif(
+    not RAPESEED_RESULT.exists(), reason="local formal rapeseed result unavailable")
+def test_rapeseed_full_family_and_discoveries_are_provenance_bound():
+    inputs = load_followup_inputs(RAPESEED_RESULT)
+
+    assert inputs.formal_contract["n_planned"] == 17_404
+    assert inputs.formal_contract["n_valid"] == 17_404
+    assert inputs.formal_contract["n_significant"] == 2
+    assert inputs.formal_contract["primary_family"] == "edge"
+    assert inputs.formal_contract["edge_family_sha256"] == (
+        "d45a69f2656cecf2d28698810d8b46ec70591ee913fc1cd790785fce72dc7e25")
+    assert inputs.formal_contract["group_family_sha256"] == (
+        "ca6e29d59e48422f586dd5a786dd0da65bb16f566aee2520689176c1b716869f")
+    assert inputs.formal_hits["hypothesis_id"].tolist() == [
+        "edge:AC:BnaA02g19610D:BnaC02g22960D",
+        "edge:AC:BnaA02g19700D:BnaC02g23040D",
+    ]
+    assert inputs.formal_hits["p_adjusted_bootstrap_minp"].tolist() == pytest.approx([
+        0.00849575212393803, 0.020989505247376312])
 
 
 def test_cross_species_inventory_keeps_unmigrated_runs_historical():
@@ -56,6 +77,11 @@ def test_rapeseed_followup_matches_frozen_contract(tmp_path):
     assert result["status"] == "COMPLETED"
     assert audit["status"] == "PASS"
     assert audit["formal_hit_count"] == 2
+    assert audit["formal_contract"]["n_planned"] == 17_404
+    assert audit["formal_contract"]["n_valid"] == 17_404
+    assert audit["formal_contract"]["primary_family"] == "edge"
+    assert len(audit["formal_contract"]["edge_family_sha256"]) == 64
+    assert len(audit["formal_contract"]["group_family_sha256"]) == 64
     assert audit["formal_replay_max_abs_error"] <= audit[
         "formal_replay_allowed_abs_error"]
     assert audit["material_deletion"]["samples_deleted_exactly_once"] == 926

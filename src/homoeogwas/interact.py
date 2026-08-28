@@ -29,8 +29,8 @@ Config (YAML)::
 """
 from __future__ import annotations
 
-import itertools
 import hashlib
+import itertools
 import json
 import time
 from dataclasses import dataclass, field
@@ -3510,7 +3510,6 @@ def cmd_interact(args) -> int:
     weights_path = ic.get("weights")
     weights_sha = None
     if weights_path and Path(weights_path).exists():
-        import hashlib
         weights_sha = hashlib.sha256(Path(weights_path).read_bytes()).hexdigest()[:16]
     provenance = dict(version=__version__, mode=mode, grm_method=grm_method, maf_min=maf_min,
                       burden_cap=cap, burden_min_snp=min_snp,
@@ -3552,7 +3551,9 @@ def cmd_interact(args) -> int:
                           "p-values; the smallest component localizes evidence but is not a "
                           "separately calibrated discovery. Inference remains on the predeclared "
                           "primary statistic and multiplicity procedure."),
-                      config_path=str(args.config))
+                      config_path=str(args.config),
+                      config_sha256=hashlib.sha256(
+                          Path(args.config).read_bytes()).hexdigest())
     if mode == "group" and statistic == "omnib":
         provenance.update({
             "mode": "group",

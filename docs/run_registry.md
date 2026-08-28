@@ -32,6 +32,8 @@ HomoeoGWAS refuses to overwrite the old root. Use a new `out_dir`.
 
 The registry writes `run_index.json`, `run_index.tsv` and `run_index.md` under `index_dir`.
 A scientifically valid no-discovery run is complete; it is not a software failure.
+All index formats are published by same-directory atomic replacement. Unexpected runner
+exceptions are recorded as `FAILED` and independent runs continue unless `--fail-fast` is set.
 
 ## Historical entries
 
@@ -40,6 +42,11 @@ read-only numerical/provenance fixtures. These entries are not dispatched or sil
 current canonical analyses. A canonical rerun uses a separate `kind: interaction` entry and a
 new output root.
 
+Historical status is fail-closed: each result root must contain readable `interact_*.json` and
+`audit/*.json` artifacts. Their sizes and SHA-256 hashes enter the registry identity, and declared
+expected discovery/planned/valid counts are checked when present. A missing, unreadable or changed
+fixture becomes `FAILED_HISTORICAL_AUDIT`, not an apparently successful historical record.
+
 ## Repair messages
 
 - Identity mismatch: keep the old result and choose a new output root.
@@ -47,4 +54,3 @@ new output root.
 - NPZ/BIM mismatch: rerun `homoeogwas prep-snps` against the analysis BED.
 - GFF/BIM chromosome mismatch: rename one side so labels match exactly.
 - Missing environment metadata: the formal run remains valid; environment deletion is unavailable.
-

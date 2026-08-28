@@ -78,7 +78,9 @@ homoeogwas follow-up results/my_interaction \
 ```
 
 The deletion analyses are candidate-only internal sensitivity checks, not a new discovery family
-or independent replication. See [the follow-up guide](docs/followup.md).
+or independent replication. The command requires the full audited family and writes an immutable
+identity-bound dossier, so edited rankings and stale output files fail closed. See
+[the follow-up guide](docs/followup.md).
 
 ## Run it by talking to an AI agent (no YAML, no coding)
 

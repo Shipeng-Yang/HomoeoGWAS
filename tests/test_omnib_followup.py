@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -23,7 +25,11 @@ from homoeogwas.followup import (
 )
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import SubgenomeData
-from homoeogwas.omnib_family import score_omnib_family, score_omnib_subset
+from homoeogwas.omnib_family import (
+    _family_provenance,
+    score_omnib_family,
+    score_omnib_subset,
+)
 from homoeogwas.workflow import build_interact_config
 
 
@@ -99,6 +105,65 @@ def test_subset_scorer_validates_keep_and_minimum_sample_count():
         score_omnib_subset(scores, family, expanded, np.arange(9), y[:9], n_jobs=1)
 
 
+def _write_formal_artifacts(tmp_path, cfg, family, ranking):
+    expanded = expand_pair_edges(family)
+    provenance = _family_provenance(family, expanded)
+    ranked = ranking.sort_values("rank").reset_index(drop=True)
+    significant = ranked.loc[ranked["primary_sig"].astype(int) == 1]
+    threshold = (
+        float(significant["p_interaction"].max()) * 1.01
+        if not significant.empty else
+        float(ranked["p_interaction"].min()) * 0.5
+    )
+    result_path = tmp_path / "interact_flowering_time.json"
+    result_path.write_text(json.dumps({
+        "tool": "homoeogwas", "command": "interact", "mode": "group",
+        "trait": "flowering_time", "subgenomes": list(family.subgenomes),
+        "provenance": {
+            "mode": "group", "statistic": "omniB",
+            "primary_transform": "INT",
+            "primary_multiplicity": "bootstrap_minp",
+            "hypothesis_unit": cfg["interact"]["hypothesis_unit"],
+            "family_scope": cfg["interact"]["family_scope"],
+            "subset_order": 2, "covariates_detail": {"policy": "none"},
+            "config_sha256": hashlib.sha256(
+                (tmp_path / "configs/interact.generated.group.omnib.yaml").read_bytes()
+            ).hexdigest(),
+            **provenance,
+        },
+        "results": {"INT": {
+            "n": 48, "G": len(ranked), "n_planned": len(ranked),
+            "n_valid": int((ranked["p_unestimable"].astype(int) == 0).sum()),
+            "n_sig": len(significant), "sig": significant.to_dict("records"),
+            "bootstrap_B": 2000, "bootstrap_seed": 2026,
+            "model_diagnostics": {
+                "family_provenance": provenance,
+                "bootstrap_fwer": {
+                    "family_id": cfg["interact"]["hypothesis_unit"],
+                    "declared_hypothesis_unit": cfg["interact"]["hypothesis_unit"],
+                    "family_scope": cfg["interact"]["family_scope"],
+                    "B": 2000, "n_rejected": len(significant),
+                    "threshold": threshold, "sig": significant.to_dict("records"),
+                    "inferential": True,
+                },
+            },
+        }},
+    }))
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    (audit / "homoeogwas_audit.json").write_text(json.dumps({
+        "overall_status": "INTERNAL_DISCOVERY_REPLICATION_REQUIRED",
+        "n_results": 1,
+        "records": [{
+            "source": str(result_path.resolve()), "command": "interact",
+            "mode": "group", "statistic": "omniB",
+            "trait": "flowering_time", "discovery_count": len(significant),
+            "n": 48, "n_planned": len(ranked),
+            "n_valid": int((ranked["p_unestimable"].astype(int) == 0).sum()),
+        }],
+    }))
+
+
 def _write_canonical_result_fixture(tmp_path, *, significant=(1, 0)):
     cfg = build_interact_config(
         subgenomes=("A", "C"),
@@ -112,6 +177,12 @@ def _write_canonical_result_fixture(tmp_path, *, significant=(1, 0)):
     config_dir.mkdir(parents=True)
     config_path = config_dir / "interact.generated.group.omnib.yaml"
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    (tmp_path / "groups.tsv").write_text(
+        "group_id\tgene_A\tgene_C\n"
+        "group1\tgA1\tgC1\n"
+        "group2\tgA2\tgC2\n")
+    p_values = [1e-6 if significant[0] else 0.2,
+                2e-6 if significant[1] else 0.3]
     ranking = pd.DataFrame({
         "rank": [0, 1],
         "hypothesis_id": ["edge:AC:gA1:gC1", "edge:AC:gA2:gC2"],
@@ -123,8 +194,9 @@ def _write_canonical_result_fixture(tmp_path, *, significant=(1, 0)):
         "direction": ["AC", "AC"],
         "sub_x": ["A", "A"], "sub_y": ["C", "C"],
         "gene_A": ["gA1", "gA2"], "gene_C": ["gC1", "gC2"],
-        "p_interaction": [1e-6, 0.2],
-        "p_adjusted_bootstrap_minp": [0.01, 1.0],
+        "p_interaction": p_values,
+        "p_adjusted_bootstrap_minp": [
+            0.01 if value else 0.8 for value in significant],
         "primary_sig": list(significant), "p_unestimable": [0, 0],
         "driving_edge": ["AC:gA1:gC1", "AC:gA2:gC2"],
         "driving_component": ["pc1", "minor_burden"],
@@ -132,6 +204,10 @@ def _write_canonical_result_fixture(tmp_path, *, significant=(1, 0)):
     })
     ranking_path = tmp_path / "interact_flowering_time_ranking_group_INT.tsv"
     ranking.to_csv(ranking_path, sep="\t", index=False)
+    family = MasterGroupFamily(
+        subgenomes=("A", "C"), group_ids=("group1", "group2"),
+        genes=(("gA1", "gC1"), ("gA2", "gC2")))
+    _write_formal_artifacts(tmp_path, cfg, family, ranking)
     return config_path, ranking_path
 
 
@@ -151,6 +227,39 @@ def test_loader_returns_no_discovery_without_candidates(tmp_path):
     loaded = load_followup_inputs(tmp_path)
 
     assert loaded.formal_hits.empty
+
+
+def test_loader_rejects_edited_discovery_labels(tmp_path):
+    _, ranking_path = _write_canonical_result_fixture(
+        tmp_path, significant=(1, 0))
+    ranking = pd.read_csv(ranking_path, sep="\t")
+    ranking.loc[1, "primary_sig"] = 1
+    ranking.loc[1, "p_adjusted_bootstrap_minp"] = 0.01
+    ranking.to_csv(ranking_path, sep="\t", index=False)
+
+    with pytest.raises(FollowupError, match="discovery labels"):
+        load_followup_inputs(tmp_path)
+
+
+def test_loader_rejects_truncated_formal_family(tmp_path):
+    _, ranking_path = _write_canonical_result_fixture(
+        tmp_path, significant=(1, 0))
+    ranking = pd.read_csv(ranking_path, sep="\t").iloc[:1]
+    ranking.to_csv(ranking_path, sep="\t", index=False)
+
+    with pytest.raises(FollowupError, match="full hypothesis inventory"):
+        load_followup_inputs(tmp_path)
+
+
+def test_loader_rejects_covariate_formal_context(tmp_path):
+    config_path, _ = _write_canonical_result_fixture(
+        tmp_path, significant=(1, 0))
+    cfg = yaml.safe_load(config_path.read_text())
+    cfg["interact"]["covariates"] = {"n_pcs": 2}
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+    with pytest.raises(FollowupError, match="covariate-bearing"):
+        load_followup_inputs(tmp_path)
 
 
 def test_loader_refuses_legacy_ranking_as_canonical(tmp_path):
@@ -201,28 +310,37 @@ def _write_replay_fixture(tmp_path, subdata, family, y, *, corrupt_p=False):
     scores, expanded = score_omnib_family(
         subdata, family, y, np.arange(len(y)), bootstrap_B=0,
         bootstrap_seed=2026, n_jobs=1, grm_method="grm_from_X")
-    edge = expanded.edges[0]
-    component = int(np.nanargmin(scores.edge_components_obs[0]))
-    p_value = float(scores.edge_p[0, 0]) + (0.1 if corrupt_p else 0.0)
-    ranking = pd.DataFrame({
-        "rank": [0], "hypothesis_id": [f"edge:{edge.edge_id}"],
-        "family_id": ["edge"], "hypothesis_unit": ["edge"],
-        "group_id": [edge.source_group_ids[0]], "edge_id": [edge.edge_id],
-        "group_ids": [edge.source_group_ids[0]], "direction": [edge.direction],
-        "sub_x": [edge.sub_x], "sub_y": [edge.sub_y],
-        **{
-            f"gene_{sub}": [edge.gene_x if sub == edge.sub_x else edge.gene_y]
-            for sub in family.subgenomes
-        },
-        "p_interaction": [p_value], "p_adjusted_bootstrap_minp": [0.01],
-        "primary_sig": [1], "p_unestimable": [0],
-        "driving_edge": [edge.edge_id],
-        "driving_component": [["minor_burden", "pc1", "kernel_hadamard"][component]],
-        "driving_component_p": [scores.edge_components_obs[0, component]],
-    })
+    records = []
+    for edge_index, edge in enumerate(expanded.edges):
+        component = int(np.nanargmin(scores.edge_components_obs[edge_index]))
+        p_value = float(scores.edge_p[edge_index, 0])
+        records.append({
+            "hypothesis_id": f"edge:{edge.edge_id}", "family_id": "edge",
+            "hypothesis_unit": "edge", "group_id": edge.source_group_ids[0],
+            "edge_id": edge.edge_id, "group_ids": edge.source_group_ids[0],
+            "direction": edge.direction, "sub_x": edge.sub_x, "sub_y": edge.sub_y,
+            **{
+                f"gene_{sub}": edge.gene_x if sub == edge.sub_x else edge.gene_y
+                for sub in family.subgenomes
+            },
+            "p_interaction": p_value,
+            "p_adjusted_bootstrap_minp": 0.8,
+            "primary_sig": 0, "p_unestimable": 0,
+            "driving_edge": edge.edge_id,
+            "driving_component": ["minor_burden", "pc1", "kernel_hadamard"][component],
+            "driving_component_p": scores.edge_components_obs[edge_index, component],
+        })
+    ranking = pd.DataFrame.from_records(records).sort_values(
+        "p_interaction").reset_index(drop=True)
+    ranking.insert(0, "rank", np.arange(len(ranking)))
+    ranking.loc[0, "primary_sig"] = 1
+    ranking.loc[0, "p_adjusted_bootstrap_minp"] = 0.01
+    if corrupt_p:
+        ranking.loc[0, "p_interaction"] *= 1.01
     ranking.to_csv(
         tmp_path / "interact_flowering_time_ranking_group_INT.tsv",
         sep="\t", index=False)
+    _write_formal_artifacts(tmp_path, cfg, family, ranking)
     return config_path
 
 
@@ -314,6 +432,21 @@ def test_missing_environment_is_explicit(monkeypatch, tmp_path):
     assert status == "NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN"
 
 
+def test_environment_levels_below_ten_are_reported(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+    rows = prepared.phenotype_rows.copy()
+    rows["environment"] = "only_environment"
+    prepared = replace(prepared, phenotype_rows=rows)
+
+    frame, status = run_environment_deletion(
+        prepared, "environment", n_jobs=1)
+
+    assert status == "NOT_AVAILABLE_LT10_SAMPLES"
+    assert set(frame["deleted_environment"]) == {"only_environment"}
+    assert (frame["available"] == 0).all()
+    assert set(frame["unavailable_reason"]) == {"LT10_RETAINED_SAMPLES"}
+
+
 def test_stability_summary_keeps_formal_adjusted_p(monkeypatch, tmp_path):
     prepared = _prepared_toy(monkeypatch, tmp_path)
     material = run_material_deletion(prepared, n_folds=4, n_jobs=1)
@@ -323,6 +456,8 @@ def test_stability_summary_keeps_formal_adjusted_p(monkeypatch, tmp_path):
     assert stability.iloc[0]["formal_p_fwer"] == pytest.approx(
         prepared.inputs.formal_hits.iloc[0]["p_adjusted_bootstrap_minp"])
     assert 0 <= stability.iloc[0]["material_nominal_support_fraction"] <= 1
+    assert 0 <= stability.iloc[0][
+        "material_driving_edge_agreement_fraction"] <= 1
     assert stability.iloc[0]["interpretation"].startswith("candidate-only internal")
 
 
@@ -390,7 +525,27 @@ def test_run_followup_no_hit_writes_successful_stop(tmp_path):
 
     assert result["status"] == "NO_FORMAL_DISCOVERY"
     assert (tmp_path / "followup" / "followup_summary.json").exists()
+    assert (tmp_path / "followup" / "followup_identity.json").exists()
     assert not (tmp_path / "followup" / "candidate_evidence.tsv").exists()
+    assert run_followup(tmp_path, n_jobs=1) == result
+
+
+def test_followup_rejects_changed_identity_in_completed_output(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    run_followup(tmp_path, n_jobs=1)
+
+    with pytest.raises(FollowupError, match="identity mismatch"):
+        run_followup(tmp_path, n_jobs=1, environment_col="environment")
+
+
+def test_followup_rejects_nonempty_unbound_output_directory(tmp_path):
+    _write_canonical_result_fixture(tmp_path, significant=(0, 0))
+    out = tmp_path / "followup"
+    out.mkdir()
+    (out / "candidate_evidence.tsv").write_text("stale\n")
+
+    with pytest.raises(FollowupError, match="non-empty.*identity"):
+        run_followup(tmp_path, n_jobs=1)
 
 
 def test_run_followup_toy_writes_complete_audited_package(monkeypatch, tmp_path):
@@ -416,6 +571,9 @@ def test_run_followup_toy_writes_complete_audited_package(monkeypatch, tmp_path)
     assert (out / "evidence_tiers.tsv").exists()
     assert (out / "independent_audit.json").exists()
     assert (out / "FOLLOWUP_SUMMARY.md").exists()
+    audit = json.loads((out / "independent_audit.json").read_text())
+    assert audit["formal_contract"]["n_planned"] == len(family.group_ids)
+    assert len(audit["formal_contract"]["edge_family_sha256"]) == 64
 
 
 def test_followup_cli_parses_generic_options(tmp_path, monkeypatch, capsys):

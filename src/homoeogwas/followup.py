@@ -24,12 +24,15 @@ class FollowupInputs:
     results_dir: Path
     config_path: Path
     ranking_path: Path
+    result_path: Path
+    audit_path: Path
     config: dict
     subgenomes: tuple[str, ...]
     trait: str
     hypothesis_unit: str
     ranking: pd.DataFrame
     formal_hits: pd.DataFrame
+    formal_contract: dict
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,10 @@ def load_followup_inputs(
     trait = str(ic.get("trait", "")).strip()
     if not trait:
         raise FollowupError("canonical interaction config is missing trait")
+    if ic.get("covariates"):
+        raise FollowupError(
+            "covariate-bearing canonical results are not yet supported by "
+            "deletion follow-up; rerun is refused rather than changing the null model")
     if ranking is None:
         ranking_path = _one_path(
             sorted(root.glob(f"interact_{trait}_ranking_group_INT.tsv")),
@@ -129,10 +136,21 @@ def load_followup_inputs(
     if missing:
         raise FollowupError(
             "canonical ranking is missing columns: " + ", ".join(missing))
-    units = set(frame["hypothesis_unit"].dropna().astype(str).str.lower())
-    if units != {hypothesis_unit}:
+    result_path = _one_path(
+        sorted(root.glob(f"interact_{trait}.json")),
+        "formal interaction result JSON")
+    audit_path = root / "audit" / "homoeogwas_audit.json"
+    if not audit_path.exists():
         raise FollowupError(
-            f"ranking hypothesis unit {sorted(units)} does not match {hypothesis_unit!r}")
+            f"canonical follow-up requires a completed audit: {audit_path}")
+    try:
+        formal_contract = _validate_formal_contract(
+            cfg, config_path, frame, ranking_path, result_path, audit_path)
+    except FollowupError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise FollowupError(
+            f"formal result contract validation failed: {exc}") from exc
     primary = pd.to_numeric(frame["primary_sig"], errors="coerce").fillna(0).astype(int)
     formal = frame.loc[primary == 1].copy().reset_index(drop=True)
     if formal["hypothesis_id"].duplicated().any():
@@ -141,12 +159,15 @@ def load_followup_inputs(
         results_dir=root,
         config_path=config_path,
         ranking_path=ranking_path,
+        result_path=result_path,
+        audit_path=audit_path,
         config=cfg,
         subgenomes=tuple(str(value) for value in ic["subgenomes"]),
         trait=trait,
         hypothesis_unit=hypothesis_unit,
         ranking=frame,
         formal_hits=formal,
+        formal_contract=formal_contract,
     )
 
 
@@ -155,7 +176,210 @@ def _resolve_config_path(value, config_dir: Path) -> Path:
     if path.is_absolute():
         return path
     beside = (config_dir / path).resolve()
-    return beside if beside.exists() else path.resolve()
+    if beside.exists():
+        return beside
+    below_result_root = (config_dir.parent / path).resolve()
+    return below_result_root if below_result_root.exists() else path.resolve()
+
+
+def _read_json_object(path: Path, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FollowupError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise FollowupError(f"{label} must contain a JSON object: {path}")
+    return value
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_formal_contract(
+    cfg: dict,
+    config_path: Path,
+    ranking: pd.DataFrame,
+    ranking_path: Path,
+    result_path: Path,
+    audit_path: Path,
+) -> dict:
+    """Bind discovery labels to the full audited canonical family."""
+    from .group_family import expand_pair_edges, load_master_group_family
+    from .omnib_family import _family_provenance
+
+    ic = cfg["interact"]
+    subgenomes = tuple(str(value) for value in ic["subgenomes"])
+    declared_unit = str(ic["hypothesis_unit"]).lower()
+    family_scope = str(ic.get("family_scope", "primary_only")).lower()
+    family = load_master_group_family(
+        _resolve_config_path(ic["groups"], config_path.parent), subgenomes)
+    expanded = expand_pair_edges(family)
+    computed_family = _family_provenance(family, expanded)
+    edge_ids = [f"edge:{edge.edge_id}" for edge in expanded.edges]
+    group_ids = [f"group:{group_id}" for group_id in family.group_ids]
+    expected_ids = (
+        edge_ids + group_ids if family_scope == "joint"
+        else edge_ids if declared_unit == "edge" else group_ids)
+    expected_units = (
+        {"edge", "group"} if family_scope == "joint" else {declared_unit})
+
+    ranks = pd.to_numeric(ranking["rank"], errors="coerce")
+    if ranks.isna().any() or not np.array_equal(
+        ranks.to_numpy(int), np.arange(len(ranking))
+    ):
+        raise FollowupError("formal ranking ranks must be contiguous from zero")
+    observed_ids = ranking["hypothesis_id"].astype(str).tolist()
+    if len(observed_ids) != len(set(observed_ids)):
+        raise FollowupError("formal ranking contains duplicate hypothesis IDs")
+    if len(observed_ids) != len(expected_ids) or set(observed_ids) != set(expected_ids):
+        raise FollowupError(
+            "formal ranking does not contain the exact full hypothesis inventory")
+    units = set(ranking["hypothesis_unit"].dropna().astype(str).str.lower())
+    if units != expected_units:
+        raise FollowupError(
+            f"ranking hypothesis units {sorted(units)} do not match "
+            f"the declared family {sorted(expected_units)}")
+    p_values = pd.to_numeric(ranking["p_interaction"], errors="coerce")
+    unestimable = pd.to_numeric(
+        ranking["p_unestimable"], errors="coerce").fillna(1).astype(int)
+    valid_p = p_values[unestimable == 0]
+    if valid_p.isna().any() or not valid_p.is_monotonic_increasing:
+        raise FollowupError(
+            "formal ranking is not a complete ascending raw-P ranking")
+
+    payload = _read_json_object(result_path, "formal interaction result")
+    provenance = payload.get("provenance") or {}
+    primary = (payload.get("results") or {}).get("INT") or {}
+    diagnostics = primary.get("model_diagnostics") or {}
+    result_family = diagnostics.get("family_provenance") or {}
+    fwer = diagnostics.get("bootstrap_fwer") or {}
+    expected_contract = {
+        "mode": "group", "statistic": "omniB",
+        "primary_transform": "INT",
+        "primary_multiplicity": "bootstrap_minp",
+        "hypothesis_unit": declared_unit,
+        "family_scope": family_scope,
+        "subset_order": 2,
+    }
+    mismatched = [
+        key for key, expected in expected_contract.items()
+        if provenance.get(key) != expected]
+    if payload.get("command") != "interact" or payload.get("trait") != ic["trait"]:
+        mismatched.extend(["command_or_trait"])
+    if mismatched:
+        raise FollowupError(
+            "formal result provenance does not match the canonical config: "
+            + ", ".join(mismatched))
+    config_sha256 = _sha256_file(config_path)
+    reported_config_sha256 = provenance.get("config_sha256")
+    if reported_config_sha256 is None:
+        manifest_ref = (cfg.get("provenance") or {}).get("pre_run_manifest")
+        if manifest_ref is None:
+            raise FollowupError(
+                "formal result does not bind the exact generated config SHA-256")
+        manifest_path = _resolve_config_path(manifest_ref, config_path.parent)
+        manifest = _read_json_object(manifest_path, "formal pre-run manifest")
+        reported_config_sha256 = (
+            manifest.get("config_sha256")
+            or (manifest.get("config") or {}).get("sha256"))
+        for key in ("group_family_sha256", "edge_family_sha256"):
+            if manifest.get(key) != computed_family[key]:
+                raise FollowupError(
+                    f"formal pre-run manifest family mismatch for {key}")
+    if reported_config_sha256 != config_sha256:
+        raise FollowupError(
+            "formal result config SHA-256 does not match the generated config")
+    for key, expected in computed_family.items():
+        if provenance.get(key) != expected or result_family.get(key) != expected:
+            raise FollowupError(
+                f"formal result family provenance mismatch for {key}")
+    expected_count = len(expected_ids)
+    n_valid = int((unestimable == 0).sum())
+    if primary.get("n_planned") != expected_count or primary.get("n_valid") != n_valid:
+        raise FollowupError(
+            "formal result planned/valid counts do not match the complete ranking")
+    if fwer.get("family_id") != (
+        "joint" if family_scope == "joint" else declared_unit
+    ) or fwer.get("declared_hypothesis_unit") != declared_unit:
+        raise FollowupError("formal bootstrap family declaration is inconsistent")
+    threshold = fwer.get("threshold")
+    if not isinstance(threshold, (int, float)) or not np.isfinite(threshold):
+        raise FollowupError("formal bootstrap-minP threshold is missing or invalid")
+    labels = pd.to_numeric(
+        ranking["primary_sig"], errors="coerce").fillna(-1).astype(int)
+    if not labels.isin([0, 1]).all():
+        raise FollowupError("formal discovery labels must be binary")
+    expected_labels = ((unestimable == 0) & (p_values < float(threshold))).astype(int)
+    if not np.array_equal(labels.to_numpy(), expected_labels.to_numpy()):
+        raise FollowupError(
+            "formal discovery labels do not match the audited bootstrap-minP threshold")
+    significant_ids = set(ranking.loc[labels == 1, "hypothesis_id"].astype(str))
+    result_sig = fwer.get("sig")
+    if not isinstance(result_sig, list):
+        result_sig = primary.get("sig")
+    if not isinstance(result_sig, list):
+        raise FollowupError("formal result is missing its rejected hypothesis records")
+    result_by_id = {
+        str(record.get("hypothesis_id")): record
+        for record in result_sig if isinstance(record, dict)
+    }
+    if set(result_by_id) != significant_ids or fwer.get("n_rejected") != len(
+        significant_ids
+    ):
+        raise FollowupError(
+            "formal discovery labels do not match the result JSON rejection set")
+    ranking_by_id = ranking.set_index(ranking["hypothesis_id"].astype(str))
+    for hypothesis_id, record in result_by_id.items():
+        row = ranking_by_id.loc[hypothesis_id]
+        for column in ("p_interaction", "p_adjusted_bootstrap_minp"):
+            if not np.isclose(
+                float(row[column]), float(record[column]), rtol=1e-12, atol=1e-15
+            ):
+                raise FollowupError(
+                    f"formal rejected-unit {column} differs between ranking and result JSON")
+
+    audit = _read_json_object(audit_path, "formal audit")
+    if str(audit.get("overall_status", "")).upper() in {"INVALID", "FAILED"}:
+        raise FollowupError(
+            f"formal audit status is not follow-up eligible: "
+            f"{audit.get('overall_status')}")
+    records = audit.get("records")
+    if audit.get("n_results") != 1 or not isinstance(records, list) or len(records) != 1:
+        raise FollowupError("formal audit must contain exactly one interaction result")
+    record = records[0]
+    try:
+        audited_source = Path(str(record.get("source"))).resolve()
+    except (TypeError, ValueError) as exc:
+        raise FollowupError("formal audit source path is invalid") from exc
+    if (
+        audited_source != result_path.resolve()
+        or record.get("command") != "interact"
+        or record.get("mode") != "group"
+        or record.get("statistic") != "omniB"
+        or record.get("n_planned") != expected_count
+        or record.get("n_valid") != n_valid
+        or record.get("discovery_count") != len(significant_ids)
+    ):
+        raise FollowupError(
+            "formal audit does not bind the result, family counts, and discoveries")
+    return {
+        **computed_family,
+        "primary_family": "joint" if family_scope == "joint" else declared_unit,
+        "n_planned": expected_count,
+        "n_valid": n_valid,
+        "n_significant": len(significant_ids),
+        "bootstrap_B": fwer.get("B", primary.get("bootstrap_B")),
+        "bootstrap_threshold": float(threshold),
+        "config_sha256": config_sha256,
+        "ranking_sha256": _sha256_file(ranking_path),
+        "result_sha256": _sha256_file(result_path),
+        "audit_sha256": _sha256_file(audit_path),
+    }
 
 
 def _load_verified_subgenomes(interact: dict, subgenomes, config_dir: Path) -> dict:
@@ -433,7 +657,17 @@ def run_environment_deletion(
             if sample in phenotype.index and pd.notna(phenotype.loc[sample])
         ]
         if len(kept_samples) < 10:
-            return None
+            unavailable = prepared.inputs.formal_hits[[
+                "rank", "hypothesis_id"]].copy()
+            unavailable.insert(0, "deleted_environment", level)
+            unavailable.insert(1, "n", int(len(kept_samples)))
+            unavailable.insert(2, "available", 0)
+            unavailable.insert(3, "unavailable_reason", "LT10_RETAINED_SAMPLES")
+            unavailable["p_interaction"] = np.nan
+            unavailable["driving_edge"] = None
+            unavailable["driving_component"] = None
+            unavailable["driving_component_p"] = np.nan
+            return unavailable
         keep = np.asarray([analyzed_lookup[sample] for sample in kept_samples], int)
         y_raw = phenotype.loc[kept_samples].to_numpy(float)
         subset = score_omnib_subset(
@@ -442,17 +676,21 @@ def run_environment_deletion(
         frame = extract_primary_scores(subset, prepared)
         frame.insert(0, "deleted_environment", level)
         frame.insert(1, "n", int(keep.size))
+        frame.insert(2, "available", 1)
+        frame.insert(3, "unavailable_reason", None)
         return frame
 
     with threadpool_limits(limits=1):
         values = Parallel(n_jobs=int(n_jobs), backend="threading") (
             delayed(score)(level) for level in levels)
-    frames = [value for value in values if value is not None]
-    if not frames:
-        return pd.DataFrame(), "NOT_AVAILABLE_LT10_SAMPLES"
-    status = "COMPLETED" if len(frames) == len(levels) \
+    frame = pd.concat(values, ignore_index=True)
+    n_available = int(frame.loc[frame["available"] == 1,
+                                "deleted_environment"].nunique())
+    if n_available == 0:
+        return frame, "NOT_AVAILABLE_LT10_SAMPLES"
+    status = "COMPLETED" if n_available == len(levels) \
         else "COMPLETED_WITH_UNAVAILABLE_LEVELS"
-    return pd.concat(frames, ignore_index=True), status
+    return frame, status
 
 
 def summarize_stability(
@@ -468,6 +706,9 @@ def summarize_stability(
         environment_values = (
             environment.loc[environment["hypothesis_id"] == hypothesis_id]
             if not environment.empty else pd.DataFrame())
+        if not environment_values.empty and "available" in environment_values:
+            environment_values = environment_values.loc[
+                environment_values["available"] == 1]
         record = {
             "rank": int(formal["rank"]),
             "hypothesis_id": hypothesis_id,
@@ -480,6 +721,9 @@ def summarize_stability(
             "material_driver_agreement_fraction": float(
                 (material_values["driving_component"]
                  == formal.get("driving_component")).mean()),
+            "material_driving_edge_agreement_fraction": float(
+                (material_values["driving_edge"]
+                 == formal.get("driving_edge")).mean()),
             "material_min_n": int(material_values["n"].min()),
             "interpretation": (
                 "candidate-only internal sensitivity; not a new discovery "
@@ -496,6 +740,9 @@ def summarize_stability(
                 "environment_driver_agreement_fraction": float(
                     (environment_values["driving_component"]
                      == formal.get("driving_component")).mean()),
+                "environment_driving_edge_agreement_fraction": float(
+                    (environment_values["driving_edge"]
+                     == formal.get("driving_edge")).mean()),
                 "environment_min_n": int(environment_values["n"].min()),
             })
         records.append(record)
@@ -683,6 +930,90 @@ def _write_tsv(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+def _followup_identity(
+    inputs: FollowupInputs,
+    *,
+    material_folds: int,
+    environment_col: str | None,
+    evidence_manifest,
+) -> tuple[str, dict]:
+    from . import __version__, omnib_family
+    from . import evidence as evidence_module
+
+    evidence_identity = None
+    if evidence_manifest is not None:
+        evidence_identity = {
+            "manifest": str(evidence_manifest.source_path),
+            "manifest_sha256": _sha256_file(evidence_manifest.source_path),
+            "sources": [
+                {
+                    "name": source.name,
+                    "path": str(source.path),
+                    "sha256": _sha256_file(source.path),
+                }
+                for source in evidence_manifest.sources
+            ],
+        }
+    payload = {
+        "identity_schema": "homoeogwas-group-omnib-followup-identity-v1",
+        "homoeogwas_version": __version__,
+        "implementation_sha256": {
+            "followup.py": _sha256_file(Path(__file__)),
+            "evidence.py": _sha256_file(Path(evidence_module.__file__)),
+            "omnib_family.py": _sha256_file(Path(omnib_family.__file__)),
+        },
+        "formal_contract": inputs.formal_contract,
+        "material_folds": int(material_folds),
+        "material_fold_seed": 2026,
+        "environment_col": environment_col,
+        "region_rule": {"max_distance_bp": 1_000_000, "pc1_r2": 0.64},
+        "evidence": evidence_identity,
+    }
+    body = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode()
+    return hashlib.sha256(body).hexdigest(), payload
+
+
+def _open_followup_generation(
+    out: Path,
+    identity: str,
+    payload: dict,
+) -> dict | None:
+    """Create one immutable output generation or return a completed match."""
+    identity_path = out / "followup_identity.json"
+    summary_path = out / "followup_summary.json"
+    if out.exists() and any(out.iterdir()):
+        if not identity_path.exists():
+            raise FollowupError(
+                f"follow-up output is non-empty without an identity: {out}; "
+                "choose a new --out-dir")
+        existing = _read_json_object(identity_path, "follow-up output identity")
+        if existing.get("identity") != identity:
+            raise FollowupError(
+                "follow-up output identity mismatch; choose a new --out-dir")
+        if existing.get("status") == "COMPLETE" and summary_path.exists():
+            return _read_json_object(summary_path, "completed follow-up summary")
+        raise FollowupError(
+            "matching follow-up output is incomplete; preserve it for diagnosis "
+            "and choose a new --out-dir")
+    out.mkdir(parents=True, exist_ok=True)
+    _atomic_text(
+        identity_path,
+        json.dumps({
+            "identity": identity, "status": "RUNNING", "payload": payload,
+        }, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+    return None
+
+
+def _complete_followup_generation(out: Path, identity: str, payload: dict) -> None:
+    _atomic_text(
+        out / "followup_identity.json",
+        json.dumps({
+            "identity": identity, "status": "COMPLETE", "payload": payload,
+        }, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+
+
 def _pc1_map(prepared: PreparedFollowup, coordinates: pd.DataFrame) -> dict:
     values = {}
     for left in range(len(coordinates)):
@@ -736,6 +1067,7 @@ def _followup_audit(
     formal_ids = set(prepared.inputs.formal_hits["hypothesis_id"].astype(str))
     tier_ids = set(tiers["hypothesis_id"].astype(str))
     checks = {
+        "formal_contract": dict(prepared.inputs.formal_contract),
         "formal_hit_count": int(len(prepared.inputs.formal_hits)),
         "formal_replay_max_abs_error": prepared.formal_replay_max_abs_error,
         "formal_replay_allowed_abs_error": float(
@@ -803,7 +1135,13 @@ def run_followup(
     inputs = load_followup_inputs(results_dir, config=config, ranking=ranking)
     out = (Path(out_dir).expanduser().resolve() if out_dir is not None
            else inputs.results_dir / "followup")
-    out.mkdir(parents=True, exist_ok=True)
+    manifest = load_evidence_manifest(evidence) if evidence is not None else None
+    identity, identity_payload = _followup_identity(
+        inputs, material_folds=material_folds,
+        environment_col=environment_col, evidence_manifest=manifest)
+    completed = _open_followup_generation(out, identity, identity_payload)
+    if completed is not None:
+        return completed
     if inputs.formal_hits.empty:
         summary = {
             "analysis": "canonical_group_omnib_followup",
@@ -817,6 +1155,7 @@ def run_followup(
         _atomic_text(
             out / "followup_summary.json",
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+        _complete_followup_generation(out, identity, identity_payload)
         return summary
 
     with threadpool_limits(limits=int(grm_blas_threads)):
@@ -830,8 +1169,7 @@ def run_followup(
         prepared, environment_col, n_jobs=n_jobs)
     stability = summarize_stability(prepared, material, environment)
     candidate_genes = _candidate_genes(coordinates)
-    if evidence is not None:
-        manifest = load_evidence_manifest(evidence)
+    if manifest is not None:
         evidence_frame, evidence_provenance = join_candidate_evidence(
             candidate_genes, manifest)
     else:
@@ -890,9 +1228,7 @@ def run_followup(
         "outputs": {name: str(path) for name, path in outputs.items()}
         | {"independent_audit": str(audit_path)},
     }
-    summary_path = _atomic_text(
-        out / "followup_summary.json",
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    summary_path = out / "followup_summary.json"
     markdown = (
         f"# Follow-up summary: {inputs.trait}\n\n"
         f"- Primary unit: {inputs.hypothesis_unit}\n"
@@ -909,7 +1245,12 @@ def run_followup(
     summary["outputs"].update({
         "summary_json": str(summary_path),
         "summary_markdown": str(markdown_path),
+        "followup_identity": str(out / "followup_identity.json"),
     })
+    _atomic_text(
+        summary_path,
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    _complete_followup_generation(out, identity, identity_payload)
     return summary
 
 
