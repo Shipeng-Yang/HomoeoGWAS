@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -327,3 +329,170 @@ def prepare_formal_replay(
         subdata=subdata, scores=scores, analyzed_samples=analyzed,
         sample_idx=sample_idx, y_raw=y_raw, phenotype_rows=phenotype_rows,
         replay=replay, formal_replay_max_abs_error=p_error)
+
+
+def deterministic_folds(
+    samples: Sequence[str],
+    *,
+    n_folds: int = 20,
+    seed: int = 2026,
+) -> tuple[tuple[str, ...], ...]:
+    values = sorted(str(value) for value in samples)
+    if len(values) != len(set(values)):
+        raise FollowupError("sample IDs must be unique")
+    if isinstance(n_folds, bool) or not isinstance(n_folds, int) \
+            or n_folds < 2 or n_folds > len(values):
+        raise FollowupError(
+            "material folds must be between 2 and the number of samples")
+    ordered = sorted(
+        values,
+        key=lambda value: hashlib.sha256(
+            f"{seed}\0{value}".encode()).digest(),
+    )
+    return tuple(tuple(ordered[index::n_folds]) for index in range(n_folds))
+
+
+def run_material_deletion(
+    prepared: PreparedFollowup,
+    *,
+    n_folds: int = 20,
+    n_jobs: int = 8,
+) -> pd.DataFrame:
+    """Score formal units after deterministic, disjoint sample-fold deletion."""
+    from joblib import Parallel, delayed
+    from threadpoolctl import threadpool_limits
+
+    from .omnib_family import score_omnib_subset
+
+    folds = deterministic_folds(
+        prepared.analyzed_samples, n_folds=n_folds, seed=2026)
+    sample_to_local = {
+        sample: index for index, sample in enumerate(prepared.analyzed_samples)
+    }
+
+    def score(index: int, deleted: tuple[str, ...]) -> pd.DataFrame:
+        deleted_set = set(deleted)
+        keep = np.asarray([
+            local for sample, local in sample_to_local.items()
+            if sample not in deleted_set
+        ], int)
+        subset = score_omnib_subset(
+            prepared.scores, prepared.family, prepared.expanded,
+            keep, prepared.y_raw[keep], n_jobs=1)
+        frame = extract_primary_scores(subset, prepared)
+        frame.insert(0, "deleted_fold", f"fold_{index + 1:02d}")
+        frame.insert(1, "n", int(keep.size))
+        frame.insert(2, "deleted_samples", ";".join(deleted))
+        return frame
+
+    with threadpool_limits(limits=1):
+        frames = Parallel(n_jobs=int(n_jobs), backend="threading") (
+            delayed(score)(index, deleted)
+            for index, deleted in enumerate(folds)
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def run_environment_deletion(
+    prepared: PreparedFollowup,
+    environment_col: str | None,
+    *,
+    n_jobs: int = 8,
+) -> tuple[pd.DataFrame, str]:
+    """Delete phenotype records by environment and reaggregate repeated samples."""
+    from joblib import Parallel, delayed
+    from threadpoolctl import threadpool_limits
+
+    from .omnib_family import score_omnib_subset
+
+    if not environment_col:
+        return pd.DataFrame(), "NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN"
+    rows = prepared.phenotype_rows
+    if environment_col not in rows.columns:
+        return pd.DataFrame(), "NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN"
+    levels = sorted(rows[environment_col].dropna().astype(str).unique())
+    if not levels:
+        return pd.DataFrame(), "NOT_AVAILABLE_NO_ENVIRONMENT_LEVELS"
+    sample_col = str(prepared.inputs.config["interact"].get(
+        "sample_col", "sample"))
+    analyzed_lookup = {
+        sample: index for index, sample in enumerate(prepared.analyzed_samples)
+    }
+
+    def score(level: str):
+        environment = rows[environment_col].astype("string")
+        remaining = rows.loc[environment.isna() | (environment.astype(str) != level)]
+        phenotype = remaining.groupby(sample_col, sort=False)[
+            prepared.inputs.trait].mean()
+        kept_samples = [
+            sample for sample in prepared.analyzed_samples
+            if sample in phenotype.index and pd.notna(phenotype.loc[sample])
+        ]
+        if len(kept_samples) < 10:
+            return None
+        keep = np.asarray([analyzed_lookup[sample] for sample in kept_samples], int)
+        y_raw = phenotype.loc[kept_samples].to_numpy(float)
+        subset = score_omnib_subset(
+            prepared.scores, prepared.family, prepared.expanded,
+            keep, y_raw, n_jobs=1)
+        frame = extract_primary_scores(subset, prepared)
+        frame.insert(0, "deleted_environment", level)
+        frame.insert(1, "n", int(keep.size))
+        return frame
+
+    with threadpool_limits(limits=1):
+        values = Parallel(n_jobs=int(n_jobs), backend="threading") (
+            delayed(score)(level) for level in levels)
+    frames = [value for value in values if value is not None]
+    if not frames:
+        return pd.DataFrame(), "NOT_AVAILABLE_LT10_SAMPLES"
+    status = "COMPLETED" if len(frames) == len(levels) \
+        else "COMPLETED_WITH_UNAVAILABLE_LEVELS"
+    return pd.concat(frames, ignore_index=True), status
+
+
+def summarize_stability(
+    prepared: PreparedFollowup,
+    material: pd.DataFrame,
+    environment: pd.DataFrame,
+) -> pd.DataFrame:
+    records = []
+    for formal in prepared.inputs.formal_hits.to_dict(orient="records"):
+        hypothesis_id = str(formal["hypothesis_id"])
+        material_values = material.loc[
+            material["hypothesis_id"] == hypothesis_id]
+        environment_values = (
+            environment.loc[environment["hypothesis_id"] == hypothesis_id]
+            if not environment.empty else pd.DataFrame())
+        record = {
+            "rank": int(formal["rank"]),
+            "hypothesis_id": hypothesis_id,
+            "formal_p": float(formal["p_interaction"]),
+            "formal_p_fwer": float(formal["p_adjusted_bootstrap_minp"]),
+            "material_p_median": float(material_values["p_interaction"].median()),
+            "material_p_max": float(material_values["p_interaction"].max()),
+            "material_nominal_support_fraction": float(
+                (material_values["p_interaction"] < 0.05).mean()),
+            "material_driver_agreement_fraction": float(
+                (material_values["driving_component"]
+                 == formal.get("driving_component")).mean()),
+            "material_min_n": int(material_values["n"].min()),
+            "interpretation": (
+                "candidate-only internal sensitivity; not a new discovery "
+                "family or independent replication"),
+        }
+        if not environment_values.empty:
+            record.update({
+                "environment_p_median": float(
+                    environment_values["p_interaction"].median()),
+                "environment_p_max": float(
+                    environment_values["p_interaction"].max()),
+                "environment_nominal_support_fraction": float(
+                    (environment_values["p_interaction"] < 0.05).mean()),
+                "environment_driver_agreement_fraction": float(
+                    (environment_values["driving_component"]
+                     == formal.get("driving_component")).mean()),
+                "environment_min_n": int(environment_values["n"].min()),
+            })
+        records.append(record)
+    return pd.DataFrame.from_records(records)

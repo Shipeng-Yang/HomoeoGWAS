@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,8 +9,12 @@ import yaml
 
 from homoeogwas.followup import (
     FollowupError,
+    deterministic_folds,
     load_followup_inputs,
     prepare_formal_replay,
+    run_environment_deletion,
+    run_material_deletion,
+    summarize_stability,
 )
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import SubgenomeData
@@ -239,3 +245,75 @@ def test_prepare_formal_replay_stops_on_p_mismatch(monkeypatch, tmp_path):
 
     with pytest.raises(FollowupError, match="formal p reproduction failed"):
         prepare_formal_replay(loaded, n_jobs=1)
+
+
+def _prepared_toy(monkeypatch, tmp_path):
+    subdata, family, y, _ = _toy_group_inputs(("A", "C"))
+    _write_replay_fixture(tmp_path, subdata, family, y)
+    loaded = load_followup_inputs(tmp_path)
+    monkeypatch.setattr(
+        "homoeogwas.followup._load_verified_subgenomes",
+        lambda interact, subgenomes, config_dir: subdata)
+    return prepare_formal_replay(loaded, n_jobs=1)
+
+
+def test_material_folds_cover_every_string_sample_once():
+    samples = [f"S{i:03d}" for i in range(41)]
+
+    folds = deterministic_folds(samples, n_folds=8, seed=2026)
+    flat = [sample for fold in folds for sample in fold]
+
+    assert sorted(flat) == sorted(samples)
+    assert max(map(len, folds)) - min(map(len, folds)) <= 1
+    assert folds == deterministic_folds(samples, n_folds=8, seed=2026)
+
+
+def test_material_deletion_scores_only_formal_hits(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+
+    deletion = run_material_deletion(
+        prepared, n_folds=4, n_jobs=1)
+
+    assert len(deletion) == 4 * len(prepared.inputs.formal_hits)
+    assert deletion["deleted_fold"].nunique() == 4
+    assert set(deletion["hypothesis_id"]) == set(
+        prepared.inputs.formal_hits["hypothesis_id"])
+
+
+def test_environment_deletion_reaggregates_repeated_rows(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+    base = prepared.phenotype_rows[["sample", prepared.inputs.trait]].copy()
+    first = base.assign(environment="E1")
+    second = base.assign(
+        **{prepared.inputs.trait: base[prepared.inputs.trait] + 0.2},
+        environment="E2")
+    repeated = replace(
+        prepared, phenotype_rows=pd.concat([first, second], ignore_index=True))
+
+    frame, status = run_environment_deletion(
+        repeated, "environment", n_jobs=1)
+
+    assert status == "COMPLETED"
+    assert set(frame["deleted_environment"]) == {"E1", "E2"}
+    assert (frame["n"] == len(prepared.analyzed_samples)).all()
+
+
+def test_missing_environment_is_explicit(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+
+    frame, status = run_environment_deletion(prepared, None, n_jobs=1)
+
+    assert frame.empty
+    assert status == "NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN"
+
+
+def test_stability_summary_keeps_formal_adjusted_p(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+    material = run_material_deletion(prepared, n_folds=4, n_jobs=1)
+
+    stability = summarize_stability(prepared, material, pd.DataFrame())
+
+    assert stability.iloc[0]["formal_p_fwer"] == pytest.approx(
+        prepared.inputs.formal_hits.iloc[0]["p_adjusted_bootstrap_minp"])
+    assert 0 <= stability.iloc[0]["material_nominal_support_fraction"] <= 1
+    assert stability.iloc[0]["interpretation"].startswith("candidate-only internal")
