@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -215,3 +219,158 @@ def load_registry(path: str | Path) -> RunRegistry:
         raise RegistryError("registry name must be a non-empty string")
     validate_registry(registry)
     return registry
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_identity(path: Path | None, *, required: bool = True) -> dict | None:
+    if path is None:
+        return None
+    if not path.exists():
+        if required:
+            raise RegistryError(f"identity input is missing: {path}")
+        return {"path": str(path), "missing": True}
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": int(stat.st_size),
+        "sha256": _sha256_file(path),
+    }
+
+
+def _bed_identity(prefix: Path) -> dict:
+    bed = Path(str(prefix) + ".bed")
+    bim = Path(str(prefix) + ".bim")
+    fam = Path(str(prefix) + ".fam")
+    missing = [str(path) for path in (bed, bim, fam) if not path.exists()]
+    if missing:
+        raise RegistryError(
+            "identity PLINK inputs are missing: " + ", ".join(missing))
+    return {
+        "prefix": str(prefix),
+        "bed": {"path": str(bed), "size": int(bed.stat().st_size)},
+        "bim": _file_identity(bim),
+        "fam": _file_identity(fam),
+    }
+
+
+def canonical_run_identity(run: RegistryRun) -> dict:
+    """Return the canonical, input-bound identity payload for one run."""
+    from . import __version__
+
+    payload: dict[str, Any] = {
+        "identity_schema": "homoeogwas-registry-run-identity-v1",
+        "homoeogwas_version": __version__,
+        "id": run.id,
+        "kind": run.kind,
+        "species": run.species,
+        "panel": run.panel,
+        "subgenomes": list(run.subgenomes),
+        "trait": run.trait,
+        "sample_col": run.sample_col,
+        "out_dir": str(run.out_dir) if run.out_dir else None,
+    }
+    if run.kind == "historical":
+        payload.update({
+            "result_root": str(run.result_root),
+            "analysis_shape": run.analysis_shape,
+            "expected": dict(run.expected),
+        })
+        return payload
+    payload.update({
+        "phenotype": _file_identity(run.phenotype),
+        "bed_prefixes": {
+            sub: _bed_identity(run.bed_prefixes[sub])
+            for sub in sorted(run.subgenomes)
+        },
+    })
+    if run.kind == "gwas":
+        payload["gwas"] = {
+            "include_hadamard": run.include_hadamard,
+            "loco": run.loco,
+            "run_plots": run.run_plots,
+        }
+    else:
+        payload["interaction"] = {
+            "mode": "group",
+            "statistic": "omniB",
+            "primary_transform": "INT",
+            "primary_multiplicity": "bootstrap_minp",
+            "subset_order": 2,
+            "family_scope": run.family_scope,
+            "hypothesis_unit": run.hypothesis_unit,
+            "bootstrap_B": run.bootstrap_B,
+            "bootstrap_seed": 2026,
+            "groups": _file_identity(run.groups),
+            "snp_to_gene": {
+                sub: _file_identity(run.snp_to_gene[sub])
+                for sub in sorted(run.subgenomes)
+            },
+        }
+    return payload
+
+
+def run_identity_sha256(run: RegistryRun) -> str:
+    payload = json.dumps(
+        canonical_run_identity(run), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_run_state(out_dir: Path) -> dict | None:
+    path = Path(out_dir) / "registry_run.json"
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RegistryError(f"cannot read registry state {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RegistryError(f"registry state {path} must contain a JSON object")
+    return value
+
+
+def write_run_state(out_dir: Path, payload: Mapping[str, Any]) -> Path:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "registry_run.json"
+    body = json.dumps(
+        dict(payload), indent=2, sort_keys=True, ensure_ascii=False,
+        allow_nan=False) + "\n"
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=out_dir, prefix=".registry_run.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        Path(temp_name).replace(path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def resume_decision(
+    run: RegistryRun,
+    existing_state: Mapping[str, Any] | None,
+    *,
+    resume: bool,
+) -> str:
+    """Return RUN or SKIP, failing closed on an occupied output identity."""
+    if existing_state is None:
+        return "RUN"
+    if not resume:
+        raise RegistryError(
+            f"run {run.id!r}: registry state exists and resume is disabled")
+    observed = existing_state.get("identity")
+    expected = run_identity_sha256(run)
+    if observed != expected:
+        raise RegistryError(
+            f"run {run.id!r}: output identity mismatch; use a new out_dir "
+            "instead of overwriting an existing analysis")
+    return "SKIP" if existing_state.get("status") == "COMPLETE" else "RUN"
