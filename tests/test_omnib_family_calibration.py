@@ -24,7 +24,8 @@ def _make_sub(rng, n=72, g=12, spg=5):
         samples=[f"sample_{i}" for i in range(n)], chunk=None)
 
 
-def _run_small_group_omnib(subgenomes, hypothesis_unit, B, full_dump_path):
+def _run_small_group_omnib(
+        subgenomes, hypothesis_unit, B, full_dump_path, *, n_jobs=1):
     rng = np.random.default_rng(515)
     n_groups = 12
     subdata = {s: _make_sub(rng, g=n_groups) for s in subgenomes}
@@ -40,10 +41,23 @@ def _run_small_group_omnib(subgenomes, hypothesis_unit, B, full_dump_path):
         subdata, family, rng.standard_normal(72), np.arange(72),
         hypothesis_unit=hypothesis_unit, family_scope="primary_only",
         cap=150, n_pc=3, transform="INT", bootstrap_B=B,
-        bootstrap_seed=2026, n_jobs=1, grm_method="grm_from_X",
+        bootstrap_seed=2026, n_jobs=n_jobs, grm_method="grm_from_X",
         maf_min=0.01, burden_maf=0.01, min_snp=3,
         full_dump_path=full_dump_path,
     )
+
+
+def test_group_result_serializes_process_execution():
+    result = _run_small_group_omnib(
+        subgenomes=("A", "B", "D"), hypothesis_unit="edge",
+        B=3, full_dump_path=None, n_jobs=2)
+
+    execution = result.model_diagnostics["parallel_execution"]
+    assert execution["backend"] == "fork_shared_memory"
+    assert execution["process_model"] == "processes"
+    assert execution["inner_threads"] == 1
+    assert execution["effective_jobs"] == 2
+    assert len(execution["worker_pids"]) == 2
 
 
 def test_edge_primary_calibrates_all_directions_in_one_minp_family():

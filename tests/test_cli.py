@@ -20,6 +20,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from homoeogwas import cli  # noqa: E402
 
+
+def test_interact_help_describes_worker_processes(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["interact", "--help"])
+    help_text = capsys.readouterr().out
+    assert "worker processes" in help_text
+
 # ---------------------------------------------------------------------
 # synthetic panel
 # ---------------------------------------------------------------------

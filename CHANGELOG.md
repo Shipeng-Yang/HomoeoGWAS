@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-No changes yet.
+- Canonical `mode: group`, `statistic: omniB` block scoring now uses observable
+  POSIX worker processes with copy-on-write shared numerical state and one
+  native-library thread per worker. This removes the previous near-single-core
+  Python thread bottleneck without changing bootstrap streams, score arrays,
+  checkpoint identities or FWER decisions. Results serialize requested and
+  effective jobs, backend and observed worker PIDs; unsupported platforms
+  record a serial fallback.
 
 ## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
 

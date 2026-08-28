@@ -270,6 +270,16 @@ outputs:
 homoeogwas interact -c interact.yaml --n-jobs 16
 ```
 
+For canonical `mode: group`, `statistic: omniB` runs, `--n-jobs` is the
+maximum number of POSIX worker processes. Large prepared NumPy arrays are
+inherited read-only through fork copy-on-write, and every child limits native
+BLAS/OpenMP libraries to one thread. The JSON result records requested and
+effective jobs, backend, inner-thread limit and observed worker PIDs under
+`results.INT.model_diagnostics.parallel_execution`; this execution metadata is
+not part of the statistical/checkpoint identity. A platform without `fork`
+runs serially and records the fallback reason instead of silently using an
+ineffective Python thread pool.
+
 A complete worked example on an allo-octoploid (strawberry, AABBCCDD,
 2n=8x=56) — one group family with six derived pair edges — is in
 [`examples/strawberry_octoploid.md`](examples/strawberry_octoploid.md).

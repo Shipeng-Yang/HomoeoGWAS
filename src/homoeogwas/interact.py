@@ -3267,6 +3267,7 @@ def cmd_interact(args) -> int:
                 if dump_on else None)
 
     canonical_family_provenance = {}
+    canonical_parallel_execution = {}
     if mode == "group" and statistic == "omnib":
         family = master_family
         hypothesis_unit = str(ic["hypothesis_unit"]).lower()
@@ -3303,6 +3304,8 @@ def cmd_interact(args) -> int:
         results = {"INT": r.__dict__}
         canonical_family_provenance = dict(
             (r.model_diagnostics or {}).get("family_provenance") or {})
+        canonical_parallel_execution = dict(
+            (r.model_diagnostics or {}).get("parallel_execution") or {})
         required_provenance = {
             "group_family_sha256", "edge_family_sha256",
             "n_groups_raw", "n_unique_edges",
@@ -3326,6 +3329,15 @@ def cmd_interact(args) -> int:
             f"primary={hypothesis_unit} minP={r.min_p:.3g} {authority}",
             flush=True,
         )
+        if canonical_parallel_execution:
+            print(
+                "  [parallel] "
+                f"requested={canonical_parallel_execution.get('requested_jobs')} "
+                f"effective={canonical_parallel_execution.get('effective_jobs')} "
+                f"backend={canonical_parallel_execution.get('backend')} "
+                f"inner_threads={canonical_parallel_execution.get('inner_threads')}",
+                flush=True,
+            )
         for hit in (r.sig or []):
             print(
                 f"      BOOTSTRAP-FWER HIT {hit['hypothesis_id']} "
@@ -3562,6 +3574,7 @@ def cmd_interact(args) -> int:
             "family_scope": str(
                 ic.get("family_scope", "primary_only")).lower(),
             "grm_scope": "all_subgenomes",
+            "parallel_execution": canonical_parallel_execution,
             **canonical_family_provenance,
         })
     payload = dict(tool="homoeogwas", command="interact", mode=mode, subgenomes=subs, trait=trait,
@@ -3589,4 +3602,5 @@ def add_interact_subparser(sub) -> None:
     ap.add_argument("-c", "--config", required=True, help="YAML run-config path")
     ap.add_argument("-o", "--out-dir", default=None, help="override outputs.out_dir")
     ap.add_argument("--n-jobs", type=int, default=8,
-                    help="parallel workers for bootstrap/permutation scans")
+                    help=("worker processes for canonical group omniB; "
+                          "legacy bootstrap/permutation engines may differ"))

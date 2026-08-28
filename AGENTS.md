@@ -194,6 +194,12 @@ homoeogwas audit    {outdir}
 homoeogwas demo
 ```
 
+For canonical group omniB, `--n-jobs` means POSIX worker processes sharing
+read-only prepared arrays through fork copy-on-write; each worker uses one
+native-library thread. The result records requested/effective jobs, backend and
+observed worker PIDs. If fork is unavailable the engine records a serial
+fallback rather than presenting Python threads as independent workers.
+
 ---
 
 ## 7. Outputs and how to summarize them

@@ -1555,6 +1555,7 @@ def run_group_scan_omnib(
     model_diagnostics = {
         "bootstrap_fwer": fwer,
         "family_provenance": family_provenance,
+        "parallel_execution": dict(scores.parallel_execution),
         "grm_provenance": {
             "method": grm_method,
             "maf_min": float(maf_min),
