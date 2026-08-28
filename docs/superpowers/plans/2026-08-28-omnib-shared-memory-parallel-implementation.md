@@ -28,7 +28,6 @@
 - Create: `src/homoeogwas/parallel.py`
 - Create: `tests/test_parallel.py`
 - Modify: `pyproject.toml`
-- Modify: `uv.lock`
 
 **Interfaces:**
 - Produces: `ParallelExecution` dataclass and `run_fork_blocks(blocks, worker, *, n_jobs, state_setter, state_clearer) -> tuple[list, ParallelExecution]`.
@@ -86,7 +85,7 @@ child PIDs.
 - [ ] **Step 5: Commit the runner**
 
 ```bash
-git add src/homoeogwas/parallel.py tests/test_parallel.py pyproject.toml uv.lock
+git add src/homoeogwas/parallel.py tests/test_parallel.py pyproject.toml
 git commit -m "feat: add shared-memory fork block runner"
 ```
 
