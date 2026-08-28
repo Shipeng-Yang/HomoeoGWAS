@@ -1,0 +1,5 @@
+gene_id	order_xloc	matched_tissue_support	expression_summary
+BnaA02g19610D	XLOC_008086	0	very-low apex expression and no detected leaf expression in the sampled records
+BnaC02g22960D	XLOC_072516	0	very-low apex expression and no detected leaf expression in the sampled records
+BnaA02g19700D	XLOC_008093	1	expressed in floral-transition apex and leaf developmental records
+BnaC02g23040D	XLOC_072529	1	expressed in floral-transition apex and leaf developmental records

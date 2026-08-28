@@ -432,4 +432,5 @@ def test_followup_cli_parses_generic_options(tmp_path, monkeypatch, capsys):
         "--n-jobs", "4", "--grm-blas-threads", "2"]) == 0
     assert called["material_folds"] == 8
     assert called["n_jobs"] == 4
+    assert called["grm_blas_threads"] == 2
     assert "COMPLETED" in capsys.readouterr().out

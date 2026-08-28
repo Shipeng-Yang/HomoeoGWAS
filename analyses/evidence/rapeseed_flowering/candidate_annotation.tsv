@@ -1,0 +1,5 @@
+gene_id	subgenome	best_tair10	blastp_pident	tair10_description	annotation_scope
+BnaA02g19610D	A	AT1G80580.1	64.528	Integrase-type DNA-binding superfamily protein	sequence-supported ortholog/domain annotation only
+BnaC02g22960D	C	AT1G80580.1	63.774	Integrase-type DNA-binding superfamily protein	sequence-supported ortholog/domain annotation only
+BnaA02g19700D	A	AT1G80510.1	88.776	Transmembrane amino acid transporter family protein	sequence-supported ortholog/domain annotation only
+BnaC02g23040D	C	AT1G80510.1	88.367	Transmembrane amino acid transporter family protein	sequence-supported ortholog/domain annotation only

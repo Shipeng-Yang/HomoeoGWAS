@@ -1,0 +1,20 @@
+evidence_version: 1
+sources:
+  - name: tair10_blastp_annotation
+    kind: annotation
+    path: rapeseed_flowering/candidate_annotation.tsv
+    gene_col: gene_id
+    columns: [subgenome, best_tair10, blastp_pident, tair10_description, annotation_scope]
+  - name: order_apex_leaf_expression
+    kind: expression
+    path: rapeseed_flowering/expression_support.tsv
+    gene_col: gene_id
+    support_col: matched_tissue_support
+    citation: 10.1186/s12870-020-02509-x
+    columns: [matched_tissue_support, order_xloc, expression_summary]
+  - name: curated_flowering_qtl
+    kind: qtl
+    path: rapeseed_flowering/qtl_support.tsv
+    gene_col: gene_id
+    support_col: overlaps_window
+    columns: [overlaps_window, nearest_curated_qtl, distance_bp, predeclared_window_bp]

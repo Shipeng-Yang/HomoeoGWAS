@@ -30,7 +30,18 @@ runs:
     subgenomes: [A, C]
     result_root: ../results/experimental/rapeseed_flowering_group_omnib_f17404_v1
     analysis_shape: canonical_group_omnib_edge_primary
-    expected: {n_significant: 2, primary_unit: edge, n_planned: 17404, n_valid: 17404}
+    expected:
+      n_significant: 2
+      primary_unit: edge
+      n_planned: 17404
+      n_valid: 17404
+      followup_contract:
+        workflow: canonical_group_omnib_followup
+        material_folds: 20
+        environment_status: NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN
+        formal_hits: 2
+        independent_loci: 1
+        evidence_manifest: evidence/rapeseed_flowering.evidence.yaml
 
   - id: wheat.days-to-emerg.route-b
     kind: historical
@@ -39,7 +50,11 @@ runs:
     subgenomes: [A, B, D]
     result_root: ../results/experimental/wheat_watkins_triad3_route_b_omnib_env_adjusted_v1
     analysis_shape: legacy_route_b_group_omnib
-    expected: {n_significant: 10, primary_unit: group, n_planned: 2143}
+    expected:
+      n_significant: 10
+      primary_unit: group
+      n_planned: 2143
+      followup_status: pending_canonical_migration
 
   - id: cotton.FibLen.pairwise-omnib
     kind: historical
@@ -48,7 +63,11 @@ runs:
     subgenomes: [A, D]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibLen
     analysis_shape: legacy_pairwise_omnib
-    expected: {n_significant: 4, primary_unit: edge, n_planned: 3757}
+    expected:
+      n_significant: 4
+      primary_unit: edge
+      n_planned: 3757
+      followup_status: pending_canonical_migration
 
   - id: cotton.FibElo.pairwise-omnib
     kind: historical
@@ -57,7 +76,10 @@ runs:
     subgenomes: [A, D]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibElo
     analysis_shape: legacy_pairwise_omnib
-    expected: {n_significant: 0, primary_unit: edge}
+    expected:
+      n_significant: 0
+      primary_unit: edge
+      followup_status: no_formal_discovery
 
   - id: peanut.hundred-seed-weight.pairwise-omnib
     kind: historical
@@ -66,7 +88,10 @@ runs:
     subgenomes: [A, B]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/hundred_seed_weight
     analysis_shape: legacy_pairwise_omnib
-    expected: {n_significant: 0, primary_unit: edge}
+    expected:
+      n_significant: 0
+      primary_unit: edge
+      followup_status: no_formal_discovery
 
   - id: peanut.seed-length.pairwise-omnib
     kind: historical
@@ -75,5 +100,7 @@ runs:
     subgenomes: [A, B]
     result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/seed_length
     analysis_shape: legacy_pairwise_omnib
-    expected: {n_significant: 0, primary_unit: edge}
-
+    expected:
+      n_significant: 0
+      primary_unit: edge
+      followup_status: no_formal_discovery

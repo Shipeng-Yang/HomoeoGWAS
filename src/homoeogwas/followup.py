@@ -789,7 +789,7 @@ def run_followup(
     environment_col: str | None = None,
     evidence: str | Path | None = None,
     n_jobs: int = 8,
-    grm_blas_threads: int = 8,
+    grm_blas_threads: int = 1,
 ) -> dict:
     """Build a complete candidate-only stability and evidence dossier."""
     from threadpoolctl import threadpool_limits
@@ -925,7 +925,10 @@ def add_followup_subparser(subparsers) -> None:
     parser.add_argument("--environment-col", default=None)
     parser.add_argument("--evidence", default=None, help="evidence manifest YAML")
     parser.add_argument("--n-jobs", type=int, default=8)
-    parser.add_argument("--grm-blas-threads", type=int, default=8)
+    parser.add_argument(
+        "--grm-blas-threads", type=int, default=1,
+        help=("BLAS threads during formal replay; keep at 1 when --n-jobs "
+              "is greater than 1 to avoid nested oversubscription"))
 
 
 def cmd_followup(args) -> int:

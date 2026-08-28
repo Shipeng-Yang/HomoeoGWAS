@@ -1,0 +1,5 @@
+gene_id	overlaps_window	nearest_curated_qtl	distance_bp	predeclared_window_bp
+BnaA02g19610D	0	BnaA02.FLC	2424029	500000
+BnaA02g19700D	0	BnaA02.FLC	2468122	500000
+BnaC02g22960D	0	BnaC02.FLC	7829239	500000
+BnaC02g23040D	0	BnaC02.FLC	7713115	500000

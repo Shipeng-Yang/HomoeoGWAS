@@ -10,7 +10,7 @@ four-copy groups; species names are metadata and do not select different statist
 homoeogwas follow-up results/my_interaction \
   --material-folds 20 \
   --n-jobs 16 \
-  --grm-blas-threads 16 \
+  --grm-blas-threads 1 \
   --environment-col environment \
   --evidence analyses/my_trait.evidence.yaml
 ```
@@ -18,6 +18,10 @@ homoeogwas follow-up results/my_interaction \
 The result directory must contain the generated canonical config at
 `configs/interact.generated.group.omnib.yaml` and the complete INT ranking. Explicit `--config`
 and `--ranking` paths are accepted when a result was archived in another layout.
+
+`--n-jobs` is the main parallelism control. Keep `--grm-blas-threads 1` when more than one job is
+used; multiplying both values creates nested BLAS oversubscription and can be much slower. Raise
+BLAS threads only for a deliberately single-job replay.
 
 Before any sensitivity analysis, HomoeoGWAS reloads the exact phenotype, BED-bound SNP-to-gene
 mappings and master group family and reproduces every formal interaction p-value and evidence
