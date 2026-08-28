@@ -9,10 +9,104 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edges
+from .parallel import run_fork_blocks
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
 PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v2"
+_OMNIB_WORKER_STATE: dict | None = None
+
+
+def _set_omnib_worker_state(state: dict) -> None:
+    global _OMNIB_WORKER_STATE
+    _OMNIB_WORKER_STATE = state
+
+
+def _clear_omnib_worker_state() -> None:
+    global _OMNIB_WORKER_STATE
+    _OMNIB_WORKER_STATE = None
+
+
+def _require_omnib_worker_state(mode: str) -> dict:
+    state = _OMNIB_WORKER_STATE
+    if state is None or state.get("mode") != mode:
+        raise RuntimeError(f"omniB {mode} worker state is not installed")
+    return state
+
+
+def _score_family_block(bounds):
+    from . import interact as I
+
+    state = _require_omnib_worker_state("family")
+    lo, hi = bounds
+    indices = state["valid_indices"][lo:hi]
+    response_count = state["response_count"]
+    values = np.full((indices.size, response_count), np.nan)
+    observed = np.full((indices.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
+    for local, edge_index in enumerate(indices):
+        edge = state["expanded"].edges[int(edge_index)]
+        components = I._omnib_components_over_Y(
+            state["W"], state["whitened_responses"], state["Cw"],
+            state["features"][(edge.sub_x, edge.gene_x)],
+            state["features"][(edge.sub_y, edge.gene_y)],
+        )
+        values[local] = np.asarray([
+            I.acat(components[:, column])
+            for column in range(response_count)
+        ], float)
+        observed[local] = components[:, 0]
+    return indices, values, observed
+
+
+def _score_subset_block(bounds):
+    from . import interact as I
+
+    state = _require_omnib_worker_state("subset")
+    start, stop = bounds
+    selected = state["valid_indices"][start:stop]
+    values = np.full(selected.size, np.nan)
+    component_values = np.full(
+        (selected.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
+    for local, edge_index in enumerate(selected):
+        edge = state["expanded"].edges[int(edge_index)]
+        try:
+            left_full = state["feature_cache"][(edge.sub_x, edge.gene_x)]
+            right_full = state["feature_cache"][(edge.sub_y, edge.gene_y)]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"frozen omniB feature missing for {edge.edge_id}") from exc
+        left = tuple(np.asarray(value)[state["keep"]] for value in left_full)
+        right = tuple(np.asarray(value)[state["keep"]] for value in right_full)
+        result = omnib_components_over_Y(
+            state["W"], state["Yw"], state["Cw"], left, right)[:, 0]
+        component_values[local] = result
+        values[local] = I.acat(result)
+    return selected, values, component_values
+
+
+def _score_prepared_block(bounds):
+    from . import interact as I
+
+    state = _require_omnib_worker_state("prepared")
+    lo, hi = bounds
+    edge_indices = state["valid_indices"][lo:hi]
+    response_count = state["response_count"]
+    values = np.full((edge_indices.size, response_count), np.nan)
+    component_values = np.full(
+        (edge_indices.size, len(OMNIB_COMPONENT_NAMES), response_count),
+        np.nan,
+    )
+    for local, edge_index in enumerate(edge_indices):
+        prepared = state["projection_cache"][int(edge_index)]
+        for start, stop, response_block in state["whitened_blocks"]:
+            components = _prepared_components_over_Y(
+                response_block, prepared)[:, :stop - start]
+            component_values[local, :, start:stop] = components
+            values[local, start:stop] = np.asarray([
+                I.acat(components[:, column])
+                for column in range(stop - start)
+            ], float)
+    return edge_indices, values, component_values
 
 
 @dataclass
@@ -40,6 +134,7 @@ class OmniBFamilyScores:
     edge_membership: np.ndarray = field(
         default_factory=lambda: np.empty(0, bool), repr=False)
     grm_provenance: dict = field(default_factory=dict)
+    parallel_execution: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -123,8 +218,6 @@ def score_omnib_family(
     covariates: dict = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Score unique edges once, then ACAT-reduce the shared matrix by group."""
-    from joblib import Parallel, delayed
-
     from . import interact as I
 
     sample_idx = np.asarray(sample_idx, int)
@@ -231,33 +324,29 @@ def score_omnib_family(
         (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan)
     valid_indices = np.flatnonzero(edge_estimable)
 
-    def score_block(bounds):
-        lo, hi = bounds
-        indices = valid_indices[lo:hi]
-        values = np.full((indices.size, response_count), np.nan)
-        observed = np.full((indices.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
-        for local, edge_index in enumerate(indices):
-            edge = expanded.edges[int(edge_index)]
-            components = I._omnib_components_over_Y(
-                W, whitened_responses, Cw,
-                features[(edge.sub_x, edge.gene_x)],
-                features[(edge.sub_y, edge.gene_y)])
-            values[local] = np.asarray(
-                [I.acat(components[:, col]) for col in range(response_count)], float)
-            observed[local] = components[:, 0]
-        return indices, values, observed
-
-    if valid_indices.size:
-        step = max(1, valid_indices.size // (n_jobs * 8))
-        blocks = [
-            (lo, min(lo + step, valid_indices.size))
-            for lo in range(0, valid_indices.size, step)
-        ]
-        results = Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(score_block)(block) for block in blocks)
-        for indices, values, observed in results:
-            edge_p[indices] = values
-            edge_components_obs[indices] = observed
+    step = max(1, valid_indices.size // (n_jobs * 8))
+    blocks = [
+        (lo, min(lo + step, valid_indices.size))
+        for lo in range(0, valid_indices.size, step)
+    ]
+    worker_state = {
+        "mode": "family",
+        "valid_indices": valid_indices,
+        "response_count": response_count,
+        "expanded": expanded,
+        "W": W,
+        "whitened_responses": whitened_responses,
+        "Cw": Cw,
+        "features": features,
+    }
+    results, execution = run_fork_blocks(
+        blocks, _score_family_block, n_jobs=n_jobs,
+        state_setter=lambda: _set_omnib_worker_state(worker_state),
+        state_clearer=_clear_omnib_worker_state,
+    )
+    for indices, values, observed in results:
+        edge_p[indices] = values
+        edge_components_obs[indices] = observed
 
     failed = edge_estimable & ~np.isfinite(edge_p[:, 0])
     if failed.any():
@@ -301,6 +390,7 @@ def score_omnib_family(
         null_kernels=kernels,
         edge_membership=edge_estimable.copy(),
         grm_provenance=grm_provenance,
+        parallel_execution=execution.as_dict(),
     ), expanded
 
 
@@ -318,8 +408,6 @@ def score_omnib_subset(
     This is an internal-sensitivity primitive. It emits raw candidate-family
     scores only and deliberately has no bootstrap or rejection interface.
     """
-    from joblib import Parallel, delayed
-
     from . import interact as I
 
     keep = np.asarray(keep, int)
@@ -371,38 +459,30 @@ def score_omnib_subset(
     components = np.full(
         (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan)
 
-    def score_block(bounds):
-        start, stop = bounds
-        selected = valid_indices[start:stop]
-        values = np.full(selected.size, np.nan)
-        component_values = np.full(
-            (selected.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
-        for local, edge_index in enumerate(selected):
-            edge = expanded.edges[int(edge_index)]
-            try:
-                left_full = scores.feature_cache[(edge.sub_x, edge.gene_x)]
-                right_full = scores.feature_cache[(edge.sub_y, edge.gene_y)]
-            except KeyError as exc:
-                raise RuntimeError(
-                    f"frozen omniB feature missing for {edge.edge_id}") from exc
-            left = tuple(np.asarray(value)[keep] for value in left_full)
-            right = tuple(np.asarray(value)[keep] for value in right_full)
-            result = omnib_components_over_Y(W, Yw, Cw, left, right)[:, 0]
-            component_values[local] = result
-            values[local] = I.acat(result)
-        return selected, values, component_values
-
-    if valid_indices.size:
-        step = max(1, valid_indices.size // (n_jobs * 8))
-        blocks = [
-            (start, min(start + step, valid_indices.size))
-            for start in range(0, valid_indices.size, step)
-        ]
-        for selected, values, component_values in Parallel(
-            n_jobs=n_jobs, backend="threading"
-        )(delayed(score_block)(block) for block in blocks):
-            edge_p[selected] = values
-            components[selected] = component_values
+    step = max(1, valid_indices.size // (n_jobs * 8))
+    blocks = [
+        (start, min(start + step, valid_indices.size))
+        for start in range(0, valid_indices.size, step)
+    ]
+    worker_state = {
+        "mode": "subset",
+        "valid_indices": valid_indices,
+        "expanded": expanded,
+        "feature_cache": scores.feature_cache,
+        "keep": keep,
+        "W": W,
+        "Yw": Yw,
+        "Cw": Cw,
+    }
+    results, execution = run_fork_blocks(
+        blocks, _score_subset_block, n_jobs=n_jobs,
+        state_setter=lambda: _set_omnib_worker_state(worker_state),
+        state_clearer=_clear_omnib_worker_state,
+    )
+    scores.parallel_execution = execution.as_dict()
+    for selected, values, component_values in results:
+        edge_p[selected] = values
+        components[selected] = component_values
 
     group_p = np.full(len(family.group_ids), np.nan)
     for group_index, edge_indices in enumerate(expanded.group_edge_indices):
@@ -601,8 +681,6 @@ def _score_prepared_responses(
     n_jobs: int = 8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Score response columns through one frozen prepared omniB algorithm."""
-    from joblib import Parallel, delayed
-
     from . import interact as I
 
     responses = np.asarray(responses, float)
@@ -641,38 +719,27 @@ def _score_prepared_responses(
     _update_group_partial(scores, expanded)
     valid_indices = np.flatnonzero(scores.edge_estimable)
 
-    def score_block(bounds):
-        lo, hi = bounds
-        edge_indices = valid_indices[lo:hi]
-        values = np.full((edge_indices.size, response_count), np.nan)
-        component_values = np.full(
-            (edge_indices.size, len(OMNIB_COMPONENT_NAMES), response_count),
-            np.nan,
-        )
-        for local, edge_index in enumerate(edge_indices):
-            cache_key = int(edge_index)
-            prepared = scores.projection_cache[cache_key]
-            for start, stop, response_block in whitened_blocks:
-                components = _prepared_components_over_Y(
-                    response_block, prepared)[:, :stop - start]
-                component_values[local, :, start:stop] = components
-                values[local, start:stop] = np.asarray([
-                    I.acat(components[:, column])
-                    for column in range(stop - start)
-                ], float)
-        return edge_indices, values, component_values
-
-    if valid_indices.size:
-        step = max(1, valid_indices.size // (int(n_jobs) * 8))
-        blocks = [
-            (lo, min(lo + step, valid_indices.size))
-            for lo in range(0, valid_indices.size, step)
-        ]
-        for edge_indices, values, component_values in Parallel(
-            n_jobs=int(n_jobs), backend="threading"
-        )(delayed(score_block)(block) for block in blocks):
-            edge_p[edge_indices] = values
-            edge_components[edge_indices] = component_values
+    step = max(1, valid_indices.size // (int(n_jobs) * 8))
+    blocks = [
+        (lo, min(lo + step, valid_indices.size))
+        for lo in range(0, valid_indices.size, step)
+    ]
+    worker_state = {
+        "mode": "prepared",
+        "valid_indices": valid_indices,
+        "response_count": response_count,
+        "projection_cache": scores.projection_cache,
+        "whitened_blocks": whitened_blocks,
+    }
+    results, execution = run_fork_blocks(
+        blocks, _score_prepared_block, n_jobs=int(n_jobs),
+        state_setter=lambda: _set_omnib_worker_state(worker_state),
+        state_clearer=_clear_omnib_worker_state,
+    )
+    scores.parallel_execution = execution.as_dict()
+    for edge_indices, values, component_values in results:
+        edge_p[edge_indices] = values
+        edge_components[edge_indices] = component_values
 
     group_p = np.full((len(family.group_ids), response_count), np.nan)
     for group_index, edge_indices in enumerate(expanded.group_edge_indices):

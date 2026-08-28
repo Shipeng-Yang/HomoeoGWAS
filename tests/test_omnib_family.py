@@ -126,6 +126,22 @@ def test_gene_features_are_cached_once_and_parallel_blocks_are_deterministic(mon
     np.testing.assert_array_equal(one.edge_p, parallel.edge_p)
 
 
+def test_group_omnib_fork_is_bit_exact_to_serial():
+    one, _ = _family_scores(("A", "D"), 8, 3, n_jobs=1)
+    parallel, _ = _family_scores(("A", "D"), 8, 3, n_jobs=2)
+
+    np.testing.assert_array_equal(one.edge_p, parallel.edge_p)
+    np.testing.assert_array_equal(one.group_p, parallel.group_p)
+    np.testing.assert_array_equal(
+        one.edge_components_obs, parallel.edge_components_obs)
+    np.testing.assert_array_equal(one.edge_estimable, parallel.edge_estimable)
+    np.testing.assert_array_equal(one.group_estimable, parallel.group_estimable)
+    assert one.parallel_execution["backend"] == "serial"
+    assert parallel.parallel_execution["backend"] == "fork_shared_memory"
+    assert parallel.parallel_execution["effective_jobs"] == 2
+    assert len(parallel.parallel_execution["worker_pids"]) == 2
+
+
 def test_pair_wrapper_rejects_task4_bootstrap_primary_authority():
     rng = np.random.default_rng(916)
     n, group_count = 64, 3
