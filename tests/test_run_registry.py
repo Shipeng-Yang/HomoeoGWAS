@@ -339,6 +339,40 @@ def test_historical_entry_rejects_invalid_audit_status(tmp_path):
     assert "ANALYSIS_INVALID" in result["runs"][0]["reason"]
 
 
+def test_custom_historical_audit_must_bind_every_declared_result(tmp_path):
+    import hashlib
+
+    root = tmp_path / "historical-result"
+    root.mkdir()
+    first = root / "interact_first.json"
+    second = root / "interact_second.json"
+    first.write_text('{"command":"interact"}\n')
+    second.write_text('{"command":"interact", "trait":"second"}\n')
+    (root / "audit").mkdir()
+    audit_path = root / "audit" / "independent.audit.json"
+    audit_path.write_text(json.dumps({
+        "status": "PASS",
+        "output_sha256": {
+            "interact_json": hashlib.sha256(first.read_bytes()).hexdigest(),
+        },
+    }))
+    run = {
+        "id": "old", "kind": "historical", "species": "wheat",
+        "panel": "Watkins", "subgenomes": ["A", "B", "D"],
+        "result_root": "historical-result", "analysis_shape": "legacy",
+        "artifact_inventory": [
+            _artifact_record(root, "result", "interact_first.json"),
+            _artifact_record(root, "result", "interact_second.json"),
+            _artifact_record(root, "audit", "audit/independent.audit.json"),
+        ],
+    }
+
+    result = execute_registry(_write_registry(tmp_path, [run]))
+
+    assert result["runs"][0]["status"] == "FAILED_HISTORICAL_AUDIT"
+    assert "do not bind every declared result" in result["runs"][0]["reason"]
+
+
 def test_missing_historical_artifacts_fail_closed(tmp_path):
     run = {
         "id": "old", "kind": "historical", "species": "Triticum aestivum",
@@ -436,6 +470,23 @@ def test_registry_corrupt_state_isolated_to_one_run(tmp_path):
     first_out = tmp_path / "results" / "first"
     first_out.mkdir(parents=True)
     (first_out / "registry_run.json").write_text("not-json\n")
+
+    result = execute_registry(
+        path, interaction_runner=lambda **kwargs: {
+            "ok": True, "summary": {"n_significant": 0}})
+
+    assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
+    assert "cannot read registry state" in result["runs"][0]["reason"]
+
+
+def test_registry_non_utf8_state_isolated_to_one_run(tmp_path):
+    first = _interaction("first")
+    second = _interaction("second")
+    _materialized_run(tmp_path)
+    path = _write_registry(tmp_path, [first, second])
+    first_out = tmp_path / "results" / "first"
+    first_out.mkdir(parents=True)
+    (first_out / "registry_run.json").write_bytes(b"\xff")
 
     result = execute_registry(
         path, interaction_runner=lambda **kwargs: {

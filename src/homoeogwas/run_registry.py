@@ -513,12 +513,21 @@ def audit_historical_artifacts(run: RegistryRun) -> dict:
         else:
             raise RegistryError(
                 f"run {run.id!r}: historical audit status is unknown or invalid")
-    if audited_sources and audited_sources != result_path_set:
+    if not audited_sources.issubset(result_path_set):
         raise RegistryError(
-            f"run {run.id!r}: historical audit sources do not bind the result inventory")
-    if not audited_sources and not custom_bound_results:
+            f"run {run.id!r}: historical audit source is outside the result inventory")
+    unbound_results = []
+    for path in result_paths:
+        relative = path.relative_to(root.resolve()).as_posix()
+        if (
+            path not in audited_sources
+            and declared[relative]["sha256"] not in custom_bound_results
+        ):
+            unbound_results.append(relative)
+    if unbound_results:
         raise RegistryError(
-            f"run {run.id!r}: historical audits do not bind any declared result")
+            f"run {run.id!r}: historical audits do not bind every declared result: "
+            + ", ".join(unbound_results))
     primary_results = []
     for payload in result_payloads:
         results = payload.get("results") or {}
@@ -552,7 +561,7 @@ def load_run_state(out_dir: Path) -> dict | None:
         return None
     try:
         value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RegistryError(f"cannot read registry state {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise RegistryError(f"registry state {path} must contain a JSON object")
