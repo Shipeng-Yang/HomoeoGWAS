@@ -6,9 +6,10 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 class RegistryError(ValueError):
@@ -602,3 +603,54 @@ def execute_registry(
         "indexes": indexes,
         "dry_run": dry_run,
     }
+
+
+def add_registry_subparser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "registry",
+        help="validate or execute a cross-species HomoeoGWAS run registry")
+    actions = parser.add_subparsers(dest="registry_action", required=True)
+    validate = actions.add_parser(
+        "validate", help="validate registry structure without running analyses")
+    validate.add_argument("-c", "--config", required=True, help="registry YAML path")
+    run = actions.add_parser(
+        "run", help="execute registered workflows and write a status index")
+    run.add_argument("-c", "--config", required=True, help="registry YAML path")
+    run.add_argument(
+        "--only", nargs="*", default=(), metavar="RUN_ID",
+        help="execute only the listed run IDs")
+    resume_group = run.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume", dest="resume", action="store_true", default=True,
+        help="resume or skip matching registered output roots (default)")
+    resume_group.add_argument(
+        "--no-resume", dest="resume", action="store_false",
+        help="reject any output root with existing registry state")
+    run.add_argument(
+        "--fail-fast", action="store_true",
+        help="stop after the first failed or identity-blocked run")
+    run.add_argument(
+        "--dry-run", action="store_true",
+        help="generate configs and command plans without long computation")
+
+
+def cmd_registry(args) -> int:
+    try:
+        if args.registry_action == "validate":
+            registry = load_registry(args.config)
+            print(
+                f"[registry] registry schema OK: {registry.name} "
+                f"({len(registry.runs)} runs)")
+            return 0
+        result = execute_registry(
+            args.config, only=args.only, resume=args.resume,
+            fail_fast=args.fail_fast, dry_run=args.dry_run)
+    except RegistryError as exc:
+        print(f"ERROR: registry: {exc}")
+        return 1
+    for record in result["runs"]:
+        print(
+            f"[registry] {record['run_id']}: {record['status']} "
+            f"significant={record.get('n_significant')}")
+    print(f"[registry] index: {result['indexes']['json']}")
+    return 0 if result["ok"] else 1

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from homoeogwas.cli import main
 from homoeogwas.run_registry import (
     RegistryError,
     execute_registry,
@@ -256,3 +257,12 @@ def test_registry_continues_after_independent_failure(tmp_path):
 
     assert [run["status"] for run in result["runs"]] == ["FAILED", "COMPLETE"]
     assert result["ok"] is False
+
+
+def test_registry_cli_validate_and_dry_run(tmp_path, capsys):
+    path = _materialize_registry_inputs(tmp_path)
+
+    assert main(["registry", "validate", "-c", str(path)]) == 0
+    assert "registry schema OK" in capsys.readouterr().out
+    assert main(["registry", "run", "-c", str(path), "--dry-run"]) == 0
+    assert "DRY_RUN" in capsys.readouterr().out

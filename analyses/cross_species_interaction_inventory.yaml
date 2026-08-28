@@ -1,0 +1,79 @@
+registry_version: 1
+name: current_cross_species_interaction_inventory
+index_dir: ../results/registry/current_cross_species_interactions
+runs:
+  - id: rapeseed.flowering.canonical-group-omnib.v1
+    kind: interaction
+    species: Brassica napus
+    panel: Wu-2019 926-sample flowering panel
+    subgenomes: [A, C]
+    phenotype: ../results/experimental/rapeseed_flowering_group_omnib_f17404_v1/inputs/phenotype.release.tsv
+    sample_col: sample
+    trait: flowering_time
+    out_dir: ../results/production/rapeseed_flowering_group_omnib_v1
+    bed_prefixes:
+      A: ../data/processed/rapeseed/bnagvd/A/all
+      C: ../data/processed/rapeseed/bnagvd/C/all
+    snp_to_gene:
+      A: ../results/experimental/pairwise_omnib_unified_v1/prep/rapeseed/snp_to_gene_A.npz
+      C: ../results/experimental/pairwise_omnib_unified_v1/prep/rapeseed/snp_to_gene_C.npz
+    groups: ../results/experimental/rapeseed_flowering_group_omnib_f17404_v1/inputs/groups_AC.generated.tsv
+    hypothesis_unit: edge
+    family_scope: primary_only
+    bootstrap_B: 2000
+    n_jobs: 32
+
+  - id: rapeseed.flowering.formal-20260828
+    kind: historical
+    species: Brassica napus
+    panel: Wu-2019 926-sample flowering panel
+    subgenomes: [A, C]
+    result_root: ../results/experimental/rapeseed_flowering_group_omnib_f17404_v1
+    analysis_shape: canonical_group_omnib_edge_primary
+    expected: {n_significant: 2, primary_unit: edge, n_planned: 17404, n_valid: 17404}
+
+  - id: wheat.days-to-emerg.route-b
+    kind: historical
+    species: Triticum aestivum
+    panel: Watkins diversity panel
+    subgenomes: [A, B, D]
+    result_root: ../results/experimental/wheat_watkins_triad3_route_b_omnib_env_adjusted_v1
+    analysis_shape: legacy_route_b_group_omnib
+    expected: {n_significant: 10, primary_unit: group, n_planned: 2143}
+
+  - id: cotton.FibLen.pairwise-omnib
+    kind: historical
+    species: Gossypium hirsutum
+    panel: cotton fibre panel
+    subgenomes: [A, D]
+    result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibLen
+    analysis_shape: legacy_pairwise_omnib
+    expected: {n_significant: 4, primary_unit: edge, n_planned: 3757}
+
+  - id: cotton.FibElo.pairwise-omnib
+    kind: historical
+    species: Gossypium hirsutum
+    panel: cotton fibre panel
+    subgenomes: [A, D]
+    result_root: ../results/experimental/pairwise_omnib_unified_v1/cotton/FibElo
+    analysis_shape: legacy_pairwise_omnib
+    expected: {n_significant: 0, primary_unit: edge}
+
+  - id: peanut.hundred-seed-weight.pairwise-omnib
+    kind: historical
+    species: Arachis hypogaea
+    panel: peanut agronomic panel
+    subgenomes: [A, B]
+    result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/hundred_seed_weight
+    analysis_shape: legacy_pairwise_omnib
+    expected: {n_significant: 0, primary_unit: edge}
+
+  - id: peanut.seed-length.pairwise-omnib
+    kind: historical
+    species: Arachis hypogaea
+    panel: peanut agronomic panel
+    subgenomes: [A, B]
+    result_root: ../results/experimental/pairwise_omnib_unified_v1/peanut/seed_length
+    analysis_shape: legacy_pairwise_omnib
+    expected: {n_significant: 0, primary_unit: edge}
+

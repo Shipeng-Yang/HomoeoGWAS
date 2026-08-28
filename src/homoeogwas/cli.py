@@ -964,6 +964,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="run the MCP server so any agent/LLM client can "
                                "drive HomoeoGWAS (needs: pip install homoeogwas[mcp])")
 
+    from .run_registry import add_registry_subparser
+    add_registry_subparser(sub)
+
     val = sub.add_parser("validate", help="load + validate a run config and "
                                           "check input paths, without running")
     val.add_argument("-c", "--config", required=True, help="YAML run-config path")
@@ -1675,6 +1678,9 @@ def main(argv=None) -> int:
     if args.subcommand == "mcp":
         from .mcp_server import main as mcp_main
         return mcp_main()
+    if args.subcommand == "registry":
+        from .run_registry import cmd_registry
+        return cmd_registry(args)
     if args.subcommand == "design":
         from .design_depth import cmd_design
         return cmd_design(args)

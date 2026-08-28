@@ -50,6 +50,19 @@ See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. CLI
 subcommands: `fit`, `validate`, `demo`, `split`, `interact`.
 
+### Freeze several species in one production registry
+
+HomoeoGWAS can generate, validate, resume, audit and index multiple species through one
+species-independent registry:
+
+```bash
+homoeogwas registry validate -c analyses/cross_species_interaction_inventory.yaml
+homoeogwas registry run -c analyses/cross_species_interaction_inventory.yaml --dry-run
+```
+
+Species are metadata. New two-, three- and four-copy interaction runs use the same pair-edge
+group omniB engine; see [the registry guide](docs/run_registry.md).
+
 ## Run it by talking to an AI agent (no YAML, no coding)
 
 You do **not** have to write config files. HomoeoGWAS ships an **agent interface**:
