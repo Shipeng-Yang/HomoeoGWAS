@@ -68,10 +68,12 @@ implementations.
 
 ### Native thread control
 
-Each worker runs under `threadpoolctl.threadpool_limits(limits=1)` so BLAS,
-OpenMP, SciPy, and scikit-learn kernels cannot multiply the requested process
-count internally. `threadpoolctl` becomes an explicit runtime dependency rather
-than relying on its transitive installation through scikit-learn.
+The installed `homoeogwas` launcher sets OpenBLAS, OpenMP, MKL and NumExpr to
+one thread before importing NumPy/SciPy for `interact`. Each worker also runs
+under `threadpoolctl.threadpool_limits(limits=1)` as a second layer. Canonical
+parallel omniB refuses a direct/bypassed invocation if an oversized native pool
+has already initialized, with a repair instruction to use the installed
+launcher or `--n-jobs 1`. `threadpoolctl` is an explicit runtime dependency.
 
 ### Determinism and failures
 
@@ -157,4 +159,3 @@ CLI help and interaction documentation will say “worker processes” for the
 canonical group omniB engine. Release notes will state that the change improves
 execution and observability only and does not alter the statistical estimand or
 multiplicity family.
-

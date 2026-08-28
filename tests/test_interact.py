@@ -1125,6 +1125,8 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     )
     monkeypatch.setattr(I, "preflight_interact", lambda _cfg, **_kwargs: [])
     monkeypatch.setattr(
+        I, "_validate_canonical_parallel_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(
         I, "_load_subgenome",
         lambda *_args, **_kwargs: SimpleNamespace(samples=samples),
     )

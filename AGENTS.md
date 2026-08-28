@@ -198,7 +198,11 @@ For canonical group omniB, `--n-jobs` means POSIX worker processes sharing
 read-only prepared arrays through fork copy-on-write; each worker uses one
 native-library thread. The result records requested/effective jobs, backend and
 observed worker PIDs. If fork is unavailable the engine records a serial
-fallback rather than presenting Python threads as independent workers.
+fallback rather than presenting Python threads as independent workers. Always
+launch parallel interaction through the installed `homoeogwas interact`
+command: its lightweight entry point sets OpenBLAS/OpenMP/MKL/NumExpr limits
+before NumPy/SciPy import. A bypassed parallel invocation with an already
+oversubscribed native pool is refused instead of silently multiplying threads.
 
 ---
 

@@ -82,11 +82,12 @@ Issues = "https://github.com/Shipeng-Yang/HomoeoGWAS/issues"
 Reproducibility = "https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility"
 
 [project.scripts]
-homoeogwas = "homoeogwas.cli:main"
+homoeogwas = "homoeogwas_launcher:main"
 homoeogwas-mcp = "homoeogwas.mcp_server:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+py-modules = ["homoeogwas_launcher"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

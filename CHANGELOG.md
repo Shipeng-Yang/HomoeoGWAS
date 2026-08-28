@@ -8,7 +8,9 @@
   Python thread bottleneck without changing bootstrap streams, score arrays,
   checkpoint identities or FWER decisions. Results serialize requested and
   effective jobs, backend and observed worker PIDs; unsupported platforms
-  record a serial fallback.
+  record a serial fallback. The console launcher now fixes native numeric
+  thread limits before NumPy/SciPy import, and canonical parallel omniB refuses
+  unsafe bypass invocations whose native pools were already oversubscribed.
 
 ## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
 

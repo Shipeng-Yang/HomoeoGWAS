@@ -273,7 +273,10 @@ homoeogwas interact -c interact.yaml --n-jobs 16
 For canonical `mode: group`, `statistic: omniB` runs, `--n-jobs` is the
 maximum number of POSIX worker processes. Large prepared NumPy arrays are
 inherited read-only through fork copy-on-write, and every child limits native
-BLAS/OpenMP libraries to one thread. The JSON result records requested and
+BLAS/OpenMP libraries to one thread. Use the installed `homoeogwas interact`
+entry point for parallel runs: it applies OpenBLAS/OpenMP/MKL/NumExpr limits
+before NumPy/SciPy import. Direct library calls with an already oversized
+native pool are refused for `n_jobs > 1`. The JSON result records requested and
 effective jobs, backend, inner-thread limit and observed worker PIDs under
 `results.INT.model_diagnostics.parallel_execution`; this execution metadata is
 not part of the statistical/checkpoint identity. A platform without `fork`

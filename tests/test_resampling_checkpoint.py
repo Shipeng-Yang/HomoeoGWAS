@@ -340,11 +340,14 @@ def _checkpoint_group_run(
     )
 
 
-def _result_bytes(result):
+def _result_bytes(result, *, exclude_execution_metadata=False):
     from homoeogwas.interact import _json_safe
 
+    payload = asdict(result)
+    if exclude_execution_metadata:
+        payload["model_diagnostics"].pop("parallel_execution", None)
     return json.dumps(
-        _json_safe(asdict(result)), sort_keys=True,
+        _json_safe(payload), sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()
 
 
@@ -368,7 +371,8 @@ def test_checkpoint_group_scan_is_worker_and_block_size_invariant(
         hit["hypothesis_id"] for hit in baseline.sig]
 
 
-def test_checkpoint_group_scan_resume_is_byte_identical(monkeypatch, tmp_path):
+def test_checkpoint_group_scan_resume_is_statistically_byte_identical(
+        monkeypatch, tmp_path):
     original = CheckpointStore.write_block
     calls = {"count": 0}
 
@@ -389,7 +393,11 @@ def test_checkpoint_group_scan_resume_is_byte_identical(monkeypatch, tmp_path):
         tmp_path / "resume", n_jobs=4, block_size=3)
     uninterrupted = _checkpoint_group_run(
         tmp_path / "full", n_jobs=1, block_size=3)
-    assert _result_bytes(resumed) == _result_bytes(uninterrupted)
+    assert _result_bytes(
+        resumed, exclude_execution_metadata=True
+    ) == _result_bytes(uninterrupted, exclude_execution_metadata=True)
+    assert resumed.model_diagnostics["parallel_execution"]["effective_jobs"] == 4
+    assert uninterrupted.model_diagnostics["parallel_execution"]["effective_jobs"] == 1
 
 
 def test_checkpoint_group_scan_resume_with_new_block_size_is_calibration_identical(

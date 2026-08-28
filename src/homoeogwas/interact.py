@@ -3088,6 +3088,35 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
     return 0
 
 
+def _validate_canonical_parallel_runtime(
+        *, n_jobs: int, libraries: list[dict] | None = None) -> None:
+    """Refuse process parallelism after an oversized native pool initialized."""
+    if int(n_jobs) <= 1:
+        return
+    if libraries is None:
+        from threadpoolctl import threadpool_info
+
+        libraries = threadpool_info()
+    offenders = [
+        library for library in libraries
+        if library.get("user_api") in {"blas", "openmp"}
+        and int(library.get("num_threads") or 0) != 1
+    ]
+    if not offenders:
+        return
+    detail = ", ".join(
+        f"{library.get('prefix') or library.get('internal_api') or 'numeric-library'}="
+        f"{library.get('num_threads')}"
+        for library in offenders
+    )
+    raise RuntimeError(
+        "native numeric thread pools are already oversubscribed "
+        f"({detail}); launch through the installed `homoeogwas interact` console "
+        "command so OPENBLAS/OMP/MKL/NUMEXPR thread limits are applied before "
+        "NumPy/SciPy import, or use --n-jobs 1"
+    )
+
+
 def cmd_interact(args) -> int:
     import yaml
 
@@ -3104,6 +3133,12 @@ def cmd_interact(args) -> int:
     ic = cfg["interact"]
     subs = list(ic["subgenomes"])
     mode = str(ic.get("mode", "pairwise")).lower()
+    if mode == "group" and str(ic.get("statistic", "burden")) == "omniB":
+        try:
+            _validate_canonical_parallel_runtime(n_jobs=args.n_jobs)
+        except RuntimeError as exc:
+            print(f"ERROR: interaction parallel runtime invalid: {exc}")
+            return 1
     master_family = None
     if mode == "group":
         try:

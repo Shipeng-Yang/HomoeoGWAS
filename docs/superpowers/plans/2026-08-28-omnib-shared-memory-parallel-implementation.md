@@ -8,6 +8,11 @@
 
 **Tech Stack:** Python 3.10+, NumPy, SciPy, multiprocessing, threadpoolctl, pytest, HomoeoGWAS CLI.
 
+**Approved implementation refinement:** Dynamic `threadpoolctl` limits alone
+left pre-import OpenBLAS worker threads alive on the release machine. The
+console entry point therefore sets native thread environment variables before
+importing the package, while the canonical runtime refuses unsafe bypass calls.
+
 **Spec:** `docs/superpowers/specs/2026-08-28-omnib-shared-memory-parallel-design.md`
 
 ## Global Constraints
