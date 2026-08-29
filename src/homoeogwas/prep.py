@@ -1,6 +1,6 @@
 """Build the two input files that ``homoeogwas interact`` needs.
 
-``interact`` tests homoeolog-pair / triad burden-product interactions, but it
+``interact`` tests homoeolog-pair / triad interactions, but it
 consumes two preprocessed files that nothing else in the package produced, so a
 user running on their own polyploid had no supported way to make them. These
 two subcommands close that gap:

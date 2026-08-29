@@ -85,15 +85,24 @@ phenotype:
   trait: <trait>
 genotype:
   scan_bed_prefix_template: <dir>/{subgenome}/all   # if prefixes follow a template
+  # Optional biallelic non-SNP features:
+  # marker_encoding: binary_presence_0_2  # or haplotype_dosage_0_1_2 / mixed_biallelic_0_1_2
+  # marker_manifest_template: <dir>/{subgenome}/marker_manifest.tsv
   grm:
     source: bed
     bed_prefix_template: <dir>/{subgenome}/all       # defaults to scan template
+    # A distinct GRM defaults to diploid_0_1_2. If it is non-standard, declare
+    # marker_encoding + marker_manifest_template inside this grm block.
     maf_min: 0.05
 kernels:
   normalize: trace
   include_hadamard: false   # true adds the homoeolog Hadamard kernel
   hadamard_name: hom
-reml: {n_starts: 10, seed: 2026}
+reml:
+  n_starts: 10
+  seed: 2026
+  # Optional, computationally expensive uncertainty layer:
+  # pve_bootstrap: {enabled: true, B: 200, level: 0.95, n_jobs: 4, n_starts: 10}
 scan:
   mode: memory              # memory | stream | auto
   backend: cpu
@@ -160,6 +169,10 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
 7. **Bind interaction mappings to their BED.** Current `prep-snps` NPZs record
    the source BIM SHA-256 and variant count. Refuse legacy/unverified NPZs or a
    BIM fingerprint mismatch; rerun `prep-snps` with the analysis BED.
+8. **Declare non-SNP marker encodings.** Biallelic SV/PAV/haplotype
+   pseudo-markers require an exact `variant_id,marker_type` manifest. Binary
+   absence/presence is encoded 0/2, not 0/1. Refuse raw/multi-allelic CNV as a
+   diploid SNP surrogate.
 
 ---
 
@@ -216,10 +229,13 @@ After `fit`, in `<out_dir>`:
 - `sumstats_<trait>.tsv` — per-SNP `beta/se/chi2/p/maf` with `subgenome`/`chrom`/`pos`.
 - `variance_components_<trait>.{png,pdf,svg}` (signature figure),
   `manhattan_…`, `qq_…`, `lambda_gc_…`.
+- if `reml.pve_bootstrap.enabled=true`, `pve_bootstrap_<trait>.tsv` and
+  `summary_<trait>.json → reml.pve_uncertainty`.
 
 Report to the user: the **per-subgenome PVE** (which subgenomes carry the
 heritability), genome-wide `λ_GC` (calibration), the strongest hits from
-sumstats, the figure paths — plus any warnings and the next recommended step.
+sumstats, PVE uncertainty when run, the audit status, the figure paths — plus
+any warnings and the next recommended step.
 
 After `interact`: name the declared primary unit (`edge` or `group`), the one
 experiment-wide bootstrap-minP family, adjusted p-values, significant units,

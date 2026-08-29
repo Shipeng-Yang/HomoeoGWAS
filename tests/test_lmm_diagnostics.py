@@ -18,6 +18,7 @@ from homoeogwas.diagnostics import (
     compare_nested_reml,
     lrt_boundary_pvalue,
     parametric_bootstrap_lrt,
+    parametric_bootstrap_pve,
     pve_sensitivity_grid,
     residual_only_reml,
 )
@@ -60,6 +61,24 @@ def test_residual_only_reml_matches_ols_variance():
     assert res.pve == {"e": 1.0}
     assert np.isfinite(res.log_lik)
     assert res.n == n and res.p == 1
+
+
+def test_parametric_bootstrap_pve_reports_ci_boundary_and_rank_stability():
+    y, K_A, K_C, X = _simulate_2kernel(
+        n=55, sig2_A=0.5, sig2_C=0.2, sig2_e=0.3, seed=41)
+    result = parametric_bootstrap_pve(
+        y, X, {"A": K_A, "C": K_C}, B=8, level=0.9, seed=9,
+        n_jobs=1, fit_kwargs={"n_starts": 1, "maxiter": 250},
+        min_success_fraction=0.5)
+    assert result.B_success >= 4
+    assert result.B_success + result.B_failed == 8
+    assert set(result.components) == {"A", "C", "e"}
+    for item in result.components.values():
+        assert 0.0 <= item["ci_low"] <= item["ci_high"] <= 1.0
+        assert 0.0 <= item["boundary_rate"] <= 1.0
+    assert sum(result.top_genetic_component_probability.values()) == pytest.approx(1.0)
+    assert len(result.samples) == result.B_success
+    assert "samples" not in result.to_dict()
 
 
 def test_default_model_specs_exhaustive_J2():

@@ -85,6 +85,154 @@ class NestedREMLComparison:
     kernels_used: list[str]
 
 
+@dataclass
+class PVEBootstrapResult:
+    """Parametric-bootstrap uncertainty for the fitted PVE partition."""
+
+    method: str
+    level: float
+    B_requested: int
+    B_success: int
+    B_failed: int
+    seed: int
+    components: dict[str, dict[str, float]]
+    top_genetic_component_probability: dict[str, float]
+    samples: pd.DataFrame
+    failures: list[str] = field(default_factory=list)
+
+    def to_dict(self, *, include_samples: bool = False) -> dict:
+        value = {
+            "method": self.method,
+            "level": self.level,
+            "B_requested": self.B_requested,
+            "B_success": self.B_success,
+            "B_failed": self.B_failed,
+            "seed": self.seed,
+            "components": self.components,
+            "top_genetic_component_probability": self.top_genetic_component_probability,
+            "failures": self.failures,
+        }
+        if include_samples:
+            value["samples"] = self.samples.to_dict(orient="records")
+        return value
+
+
+def parametric_bootstrap_pve(
+    y: np.ndarray,
+    X: np.ndarray,
+    kernels: dict[str, np.ndarray],
+    *,
+    fit: MultiREMLResult | None = None,
+    B: int = 200,
+    level: float = 0.95,
+    seed: int = 2026,
+    n_jobs: int = 1,
+    fit_kwargs: dict | None = None,
+    min_success_fraction: float = 0.8,
+) -> PVEBootstrapResult:
+    """Estimate uncertainty and rank stability of a multi-kernel PVE partition.
+
+    Replicates are generated from the fitted alternative model
+    ``N(X beta_hat, sum sigma2_j K_j + sigma2_e I)`` and refitted with the same
+    kernels.  This quantifies panel/model-conditional estimator uncertainty; it
+    does not measure portability to another population or environment.
+    """
+    y = np.asarray(y, float)
+    X = np.asarray(X, float)
+    if B < 1:
+        raise ValueError(f"B must be >= 1, got {B}")
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"level must be in (0,1), got {level}")
+    if not 0.0 < min_success_fraction <= 1.0:
+        raise ValueError(
+            f"min_success_fraction must be in (0,1], got {min_success_fraction}")
+    fit_kwargs = dict(fit_kwargs or {})
+    if fit is None:
+        fit = fit_multi_reml(y, X, kernels, **fit_kwargs)
+
+    names = list(kernels)
+    n = y.size
+    V = float(fit.sigma2["e"]) * np.eye(n)
+    for name in names:
+        V = V + float(fit.sigma2[name]) * np.asarray(kernels[name], float)
+    evals, evecs = np.linalg.eigh(0.5 * (V + V.T))
+    if float(evals.min()) < -1e-8:
+        raise ValueError(
+            f"fitted covariance is not PSD (min eigenvalue={float(evals.min()):.3g})")
+    root = (evecs * np.sqrt(np.clip(evals, 0.0, None))) @ evecs.T
+    mean = X @ np.asarray(fit.beta, float)
+    master_seed = np.random.SeedSequence(seed)
+    draw_seed, optimizer_seed = master_seed.spawn(2)
+    rng = np.random.default_rng(draw_seed)
+    draws = rng.standard_normal((B, n))
+    optimizer_seeds = [
+        int(child.generate_state(1, dtype=np.uint32)[0])
+        for child in optimizer_seed.spawn(B)
+    ]
+
+    # Starting every refit at the observed solution is both stable and much
+    # cheaper than a fresh random search. Paper-grade runs should retain the
+    # observed fit's multi-start search; the warm start is then only one of the
+    # candidate basins.
+    refit_kwargs = dict(fit_kwargs)
+    refit_kwargs.setdefault("init", dict(fit.sigma2))
+    refit_kwargs.setdefault("n_starts", int(getattr(fit, "n_starts", 1)))
+
+    def _one(index: int):
+        y_star = mean + root @ draws[index]
+        kwargs = dict(refit_kwargs)
+        kwargs.setdefault("random_state", optimizer_seeds[index])
+        try:
+            value = fit_multi_reml(y_star, X, kernels, **kwargs)
+            if not value.optimizer_status:
+                return index, None, f"replicate {index}: optimizer did not converge"
+            return index, value, None
+        except Exception as exc:  # one failed replicate is reported, never silently imputed
+            return index, None, f"replicate {index}: {type(exc).__name__}: {exc}"
+
+    from joblib import Parallel, delayed
+
+    values = Parallel(n_jobs=n_jobs)(
+        delayed(_one)(index) for index in range(B))
+    values.sort(key=lambda item: item[0])
+    fits = [value for _, value, _ in values if value is not None]
+    failures = [error for _, _, error in values if error is not None]
+    if len(fits) < max(1, int(np.ceil(B * min_success_fraction))):
+        raise RuntimeError(
+            f"PVE bootstrap had only {len(fits)}/{B} successful refits; "
+            f"need >= {min_success_fraction:.0%}. First failures: {failures[:3]}")
+
+    components = names + ["e"]
+    frame = pd.DataFrame([
+        {name: float(value.pve[name]) for name in components}
+        | {f"boundary_{name}": name in value.boundary_components
+           for name in components}
+        for value in fits
+    ])
+    alpha = 1.0 - level
+    summary: dict[str, dict[str, float]] = {}
+    for name in components:
+        pve = frame[name].to_numpy(float)
+        summary[name] = {
+            "estimate": float(fit.pve[name]),
+            "median": float(np.median(pve)),
+            "ci_low": float(np.quantile(pve, alpha / 2.0)),
+            "ci_high": float(np.quantile(pve, 1.0 - alpha / 2.0)),
+            "boundary_rate": float(frame[f"boundary_{name}"].mean()),
+        }
+    top_counts = {name: 0 for name in names}
+    for _, row in frame[names].iterrows():
+        top_counts[str(row.astype(float).idxmax())] += 1
+    top_probability = {
+        name: float(top_counts[name] / len(frame)) for name in names}
+    return PVEBootstrapResult(
+        method="parametric_bootstrap_fitted_multi_kernel_reml",
+        level=float(level), B_requested=int(B), B_success=len(fits),
+        B_failed=len(failures), seed=int(seed), components=summary,
+        top_genetic_component_probability=top_probability,
+        samples=frame, failures=failures[:20])
+
+
 def _default_model_specs(
     kernel_names: list[str],
     strategy: Literal["exhaustive", "leave_one_out", "singletons"] = "exhaustive",

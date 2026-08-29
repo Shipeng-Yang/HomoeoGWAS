@@ -43,6 +43,7 @@ tables/
 # Tool / state caches not part of the package
 # ---------------------------------------------------------------------------
 .codex_state/
+.codex_state_eval/
 .codex_logs/
 # ignore local Claude settings/state, but ship the agent skill
 .claude/*
@@ -80,6 +81,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+site/
 .eggs/
 pip-wheel-metadata/
 
@@ -112,6 +114,7 @@ Thumbs.db
 *.fam
 *.vcf
 *.vcf.gz
+*.vcf.csi
 *.vcf.gz.tbi
 *.vcf.gz.csi
 *.bcf
@@ -143,3 +146,5 @@ plink.log
 # Top-level scratch notes (internal working notes)
 notes/
 Rplots.pdf
+snpEff_genes.txt
+snpEff_summary.html

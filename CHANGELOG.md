@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+### Changed
+
 - Canonical `mode: group`, `statistic: omniB` block scoring now uses observable
   POSIX worker processes with copy-on-write shared numerical state and one
   native-library thread per worker. This removes the previous near-single-core
@@ -13,6 +15,42 @@
   unsafe bypass invocations whose native pools were already oversubscribed.
   Candidate follow-up material/environment deletion now uses the same observable
   fork/shared-memory process runner instead of the former joblib threading path.
+
+### Added
+
+- Experimental `interact.statistic: triad3` for exactly three subgenomes. It
+  tests the minor-burden `A:B:D` coefficient conditional on all three main
+  effects and all three pairwise interactions, freezes estimability on the raw
+  hierarchical design, reports target residual-information diagnostics, and
+  supports kinship-preserving parametric-bootstrap min-P calibration.
+
+## v2.0.1 — evidence audit and non-SNP input hardening (2026-07-25)
+
+### Added
+
+- `homoeogwas audit <result-json-or-directory>` writes JSON, TSV and Markdown
+  evidence audits that separate computational validity, internal familywise
+  discovery, component-specific interpretation and replication status.
+- Optional `reml.pve_bootstrap` performs a fitted-model parametric bootstrap of
+  the subgenome PVE partition and reports percentile intervals, boundary rates,
+  refit success and component-rank stability. Bootstrap refits now inherit the
+  observed model's multi-start search by default and use independent
+  `SeedSequence` streams.
+- Biallelic PAV, SV and haplotype pseudo-markers can be bound to exact
+  per-subgenome marker manifests. Scan and GRM inputs have separate encoding
+  contracts, and `fit`/`predict` apply the same preflight validation.
+
+### Fixed
+
+- The production omniB path now retains the minor-allele burden, PC1 and
+  kernel-Hadamard component p-values for top/significant units. With
+  `outputs.full_ranking: true`, pairwise and triad/group scans write complete
+  component-aware ranking TSVs; pairwise scans also write top-pair minor-burden
+  values. Previously only the combined omniB p was available, so a kernel-driven
+  omnibus hit could be incorrectly described as a burden-product interaction.
+- Interaction provenance now records the actual statistic and calibration
+  method and no longer claims that a full ranking was produced when the omniB
+  path had ignored the requested output.
 
 ## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
 
@@ -184,5 +222,6 @@ strawberry AABBCCDD, oat, rice).
 ### Quality
 - 318 tests pass; ruff-clean; CPU/GPU Docker images; reproducible-by-config runs.
 
-[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.0...HEAD
+[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v1.0.2...v2.0.0

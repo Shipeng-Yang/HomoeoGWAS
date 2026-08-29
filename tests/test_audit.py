@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from homoeogwas.audit import audit_result, cmd_audit, run_audit
-from homoeogwas.cli import main
+from homoeogwas.cli import main, validate_config
 
 
 def _write(path, payload):
@@ -858,3 +858,22 @@ def test_run_audit_writes_json_tsv_and_markdown(tmp_path):
                  "homoeogwas_audit.md"):
         assert (out / name).exists()
     assert main(["audit", str(tmp_path), "-o", str(tmp_path / "cli_audit")]) == 0
+
+
+def test_fit_config_validates_optional_pve_bootstrap():
+    cfg = {
+        "panel": {"subgenomes": ["A", "D"]},
+        "phenotype": {"path": "pheno.tsv", "trait": "height"},
+        "genotype": {"scan_bed_prefix_template": "geno/{subgenome}/all"},
+        "reml": {
+            "pve_bootstrap": {
+                "enabled": True, "B": 50, "level": 0.95, "n_jobs": 2}},
+    }
+    validate_config(cfg)
+    cfg["reml"]["pve_bootstrap"]["B"] = 0
+    try:
+        validate_config(cfg)
+    except SystemExit as exc:
+        assert "pve_bootstrap.B" in str(exc)
+    else:
+        raise AssertionError("B=0 must be rejected")

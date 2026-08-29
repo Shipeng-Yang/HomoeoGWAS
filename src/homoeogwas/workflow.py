@@ -131,17 +131,20 @@ def build_fit_config(*, subgenomes: Sequence[str], phenotype: str,
                      out_dir: str, panel: str = "panel",
                      include_hadamard: bool = False, loco: bool = False,
                      maf_min: float = 0.05, call_rate_min: float = 0.9,
-                     scan_mode: str = "memory", backend: str = "cpu") -> dict:
+                     scan_mode: str = "memory", backend: str = "cpu",
+                     marker_encoding: str = "diploid_0_1_2",
+                     marker_manifest_template: str | None = None) -> dict:
     """Assemble a ``homoeogwas fit`` config dict from high-level inputs."""
     loco_block = ({"enabled": True, "fallback": "error"} if loco
                   else {"enabled": False})
-    return {
+    cfg = {
         "fit_version": 1,
         "panel": {"name": panel, "subgenomes": list(subgenomes)},
         "phenotype": {"path": phenotype, "sample_col": sample_col,
                       "trait": trait},
         "genotype": {
             "scan_bed_prefix_template": bed_template,
+            "marker_encoding": marker_encoding,
             "grm": {"source": "bed", "bed_prefix_template": bed_template,
                     "maf_min": maf_min}},
         "kernels": {"normalize": "trace",
@@ -153,6 +156,9 @@ def build_fit_config(*, subgenomes: Sequence[str], phenotype: str,
         "plots": {"enabled": True},
         "outputs": {"out_dir": out_dir, "prefix": trait},
     }
+    if marker_manifest_template is not None:
+        cfg["genotype"]["marker_manifest_template"] = marker_manifest_template
+    return cfg
 
 
 def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[str, str],

@@ -1,11 +1,11 @@
 # HomoeoGWAS
 
-**Subgenome-aware mixed-model GWAS for allopolyploid crops, with an optional zero-shot deep-learning prior.**
+**Subgenome-aware trait architecture and homoeolog-interaction analysis for allopolyploid crops.**
 
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
 <!-- DOI badge added after the first Zenodo release:
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
@@ -14,20 +14,28 @@ HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
 peanut, strawberry, …) by modelling each subgenome explicitly. A new species is added
 through a single YAML config — no framework code changes. The only requirement
 is that the subgenomes are distinguishable (a homoeologous chromosome naming or a
-`chrom_map`); the optional deep-learning prior additionally needs a reference
-FASTA.
+`chrom_map`).
 
 It combines:
 
 1. **Subgenome-partitioned linear mixed model** — `y = Xβ + u_A + u_B [+ u_D …] + ε`,
    with a per-subgenome GRM fit by REML and an optional leave-one-chromosome-out
    (LOCO) correction.
-2. **Optional homoeolog interaction kernel** `K_hom = K_A ⊙ K_B [⊙ K_D]` for
-   cross-subgenome epistasis.
-3. **Optional zero-shot deep-learning prior** — PlantCaduceus + AgroNT
-   log-likelihoods fused with the GWAS p-value to re-rank candidate loci.
-4. **CPU and dual-GPU backends** for the per-SNP scan, scaling to tens of millions
-   of markers.
+2. **Gene-resolution homoeolog-group interaction tests** — one engine for 2,
+   3 or 4+ copies, with pair omniB as the primitive and kinship-preserving
+   bootstrap min-P as the experiment-wide calibration. omniB combines
+   minor-burden, PC1 and kernel-Hadamard evidence while retaining all three
+   components for interpretation.
+3. **Evidence-aware outputs** — the per-subgenome variance fingerprint,
+   interaction rankings, prediction comparison and a result audit that
+   distinguishes internal discovery from replication.
+4. **Scalable per-SNP scanning** — streaming CPU and optional CUDA backends for
+   panels with tens of millions of markers.
+
+The global `K_hom` kernel and phenotype-independent external priors remain
+optional research extensions. They are not required for the primary variance
+partition or interaction workflow and should not be treated as discovery
+evidence without a frozen benchmark.
 
 ## Quick start
 
@@ -41,14 +49,17 @@ homoeogwas demo --keep            # prints acceptance checks + lists the outputs
 # 3. Run on your own data
 homoeogwas validate -c my_run.yaml    # check config + input paths first
 homoeogwas fit -c my_run.yaml -o results/my_run
+homoeogwas audit results/my_run       # validity, uncertainty and evidence limits
 
-# (Optional) GPU extras for the per-SNP scan + DL prior
+# (Optional) GPU extras for the per-SNP scan
 pip install "homoeogwas[gpu]"
 ```
 
 See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
-config, and [the I/O contract](docs/io.md) for input/output formats. CLI
-subcommands: `fit`, `validate`, `demo`, `split`, `interact`, `follow-up`.
+config, and [the I/O contract](docs/io.md) for input/output formats. Main CLI
+subcommands: `split`, `validate`, `fit`, `predict`, `interact`, `follow-up`,
+`registry`, `audit`, `plot`, `locus`, `rplot`, `design`, `prep-snps`, and
+`prep-homoeologs`.
 
 ### Freeze several species in one production registry
 
@@ -126,7 +137,7 @@ auto-generated YAML → run → summary), and it **blocks on common mistakes**
 runs everything on CPU; the agent uses `--backend auto`, which silently picks
 GPU *only if one is present* and otherwise falls back to CPU with identical
 results. A GPU is **purely optional acceleration** for the genome-wide per-SNP
-scan and the deep-learning variant prior — never a requirement. So tell the
+scan — never a requirement. So tell the
 agent "use CPU" (or just say nothing) and it works on any laptop:
 
 ```bash
@@ -144,7 +155,7 @@ docker build -t homoeogwas:cpu .
 docker run --rm homoeogwas:cpu demo
 docker run --rm -v "$PWD":/work -w /work homoeogwas:cpu fit -c run.yaml
 
-# Docker — GPU (per-SNP scan + DL prior; CUDA 12.1)
+# Docker — GPU (per-SNP scan; CUDA 12.1)
 docker build -f Dockerfile.gpu -t homoeogwas:gpu .
 docker run --rm --gpus all -v "$PWD":/work -w /work homoeogwas:gpu fit -c run.yaml --backend gpu
 
@@ -159,9 +170,8 @@ Pass `--build-arg PIP_INDEX_URL=<mirror>` to build through a faster pip mirror.
 
 One genotype file goes in; it is split by subgenome and feeds two analyses — a
 **subgenome-stratified mixed model** (whose signature output is the per-subgenome
-heritability partition) and a **homoeolog-interaction test** (whose output is the
-interaction network). A zero-shot deep-learning variant prior can optionally
-re-rank the scan.
+variance partition) and a **homoeolog-interaction test**. Their results feed one
+evidence audit.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica, Arial, sans-serif","fontSize":"14px","lineColor":"#8A8A8A"}}}%%
@@ -169,7 +179,7 @@ flowchart LR
     G(["VCF / PLINK<br/>genotypes"]) --> S["split by<br/>subgenome"]
 
     subgraph MODEL["subgenome-stratified mixed model"]
-        K["per-subgenome GRM<br/>+ homoeolog kernel"] --> R["multi-kernel<br/>REML"]
+        K["per-subgenome GRMs"] --> R["multi-kernel<br/>REML"]
         R --> SC["per-SNP scan<br/>LOCO · CPU / GPU"]
     end
 
@@ -290,6 +300,10 @@ material are maintained separately in
 Raw inputs and large intermediate outputs are not tracked there; its README
 documents the boundary between versioned reproduction material and
 provider-hosted datasets.
+
+The repository-side validation assessment and next biological priorities are in
+[`docs/validation_inventory.md`](docs/validation_inventory.md) and
+[`docs/roadmap_biology.md`](docs/roadmap_biology.md).
 
 ## Status
 

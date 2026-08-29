@@ -20,6 +20,7 @@ from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import (
     FrozenTraitSet,
     SubgenomeData,
+    _score_omnib_family,
     acat,
     acat_weighted,
     block_burden_capped,
@@ -933,6 +934,112 @@ def _make_sub_maf(rng, n=N, g=G, spg=SPG):
     return SubgenomeData(X=X, gene_snp=gene_snp, samples=[f"s{j}" for j in range(n)], chunk=None)
 
 
+def _synthetic_family_scores(subgenomes, n_groups, B, return_family=False):
+    rng = np.random.default_rng(912)
+    n = 72
+    subdata = {
+        s: _make_sub_maf(rng, n=n, g=n_groups, spg=5)
+        for s in subgenomes
+    }
+    family = MasterGroupFamily(
+        subgenomes=tuple(subgenomes),
+        group_ids=tuple(f"group_{i}" for i in range(n_groups)),
+        genes=tuple(
+            tuple(f"g{i}" for _ in subgenomes)
+            for i in range(n_groups)
+        ),
+    )
+    scores, expanded = _score_omnib_family(
+        subdata, family, rng.standard_normal(n), np.arange(n),
+        cap=150, n_pc=3, transform="INT", bootstrap_B=B,
+        bootstrap_seed=2026, n_jobs=1, grm_method="grm_from_X",
+        maf_min=0.01, burden_maf=0.01, min_snp=3,
+    )
+    return (scores, expanded) if return_family else scores
+
+
+def test_omnib_family_two_copy_group_equals_edge_for_all_bootstrap_columns():
+    scores = _synthetic_family_scores(
+        subgenomes=("A", "D"), n_groups=8, B=19)
+    assert scores.edge_p.shape == (8, 20)
+    assert scores.group_p.shape == (8, 20)
+    np.testing.assert_array_equal(scores.group_p, scores.edge_p)
+
+
+def test_omnib_family_three_and_four_copy_group_acat_reduction():
+    for subs, expected_edges in [
+        (("A", "B", "D"), 3),
+        (("A", "B", "C", "D"), 6),
+    ]:
+        scores, expanded = _synthetic_family_scores(
+            subgenomes=subs, n_groups=5, B=3, return_family=True)
+        assert len(expanded.group_edge_indices[0]) == expected_edges
+        for gi, edge_idx in enumerate(expanded.group_edge_indices):
+            for col in range(scores.group_p.shape[1]):
+                assert scores.group_p[gi, col] == pytest.approx(
+                    acat(scores.edge_p[list(edge_idx), col]))
+
+
+def test_omnib_family_records_partial_groups_and_predeclared_nonestimable_edges():
+    rng = np.random.default_rng(913)
+    n = 64
+    subdata = {s: _make_sub_maf(rng, n=n, g=2, spg=5) for s in ("A", "B", "D")}
+    family = MasterGroupFamily(
+        subgenomes=("A", "B", "D"),
+        group_ids=("complete", "partial"),
+        genes=(("g0", "g0", "g0"), ("g1", "g1", "missing")),
+    )
+    scores, expanded = _score_omnib_family(
+        subdata, family, rng.normal(size=n), np.arange(n), bootstrap_B=2,
+        n_jobs=1, grm_method="grm_from_X", min_snp=3)
+
+    partial_edges = np.asarray(expanded.group_edge_indices[1], int)
+    assert scores.group_estimable.tolist() == [True, True]
+    assert scores.group_partial.tolist() == [False, True]
+    assert scores.edge_estimable[partial_edges].tolist() == [True, False, False]
+    assert np.isnan(scores.edge_p[partial_edges[1:]]).all()
+    np.testing.assert_allclose(
+        scores.group_p[1], scores.edge_p[partial_edges[0]], rtol=0, atol=0)
+
+
+def test_omnib_family_rejects_nonfinite_observed_score_for_callable_edge(monkeypatch):
+    rng = np.random.default_rng(914)
+    n = 48
+    subdata = {s: _make_sub_maf(rng, n=n, g=1, spg=5) for s in ("A", "D")}
+    family = MasterGroupFamily(("A", "D"), ("g",), (("g0", "g0"),))
+
+    def _nonfinite(*args, **kwargs):
+        return np.full((3, 2), np.nan)
+
+    monkeypatch.setattr(I, "_omnib_components_over_Y", _nonfinite)
+    with pytest.raises(RuntimeError, match="post-whitening.*non-finite"):
+        _score_omnib_family(
+            subdata, family, rng.normal(size=n), np.arange(n), bootstrap_B=1,
+            n_jobs=1, grm_method="grm_from_X", min_snp=3)
+
+
+def test_omnib_family_caches_each_subgenome_gene_feature_once(monkeypatch):
+    rng = np.random.default_rng(915)
+    n = 48
+    subdata = {s: _make_sub_maf(rng, n=n, g=1, spg=5) for s in ("A", "D")}
+    family = MasterGroupFamily(
+        ("A", "D"), ("one", "two"), (("g0", "g0"), ("g0", "g0")))
+    calls = {"n": 0}
+    original = I.gene_pc_scores
+
+    def _counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(I, "gene_pc_scores", _counting)
+    scores, expanded = _score_omnib_family(
+        subdata, family, rng.normal(size=n), np.arange(n), bootstrap_B=0,
+        n_jobs=1, grm_method="grm_from_X", min_snp=3)
+    assert len(expanded.edges) == 1
+    assert calls["n"] == 2
+    assert scores.edge_estimable.tolist() == [True]
+
+
 def test_omnib_pair_scan_detects_and_isolates_interaction():
     rng = np.random.default_rng(11)
     subdata = {"A": _make_sub_maf(rng), "D": _make_sub_maf(rng)}
@@ -949,6 +1056,41 @@ def test_omnib_pair_scan_detects_and_isolates_interaction():
     # it clears the small-sample Bonferroni bar.
     assert tuple(r.top[0]["pair"])[0] == f"g{hit}"
     assert r.min_p < 1e-2
+
+
+def test_omnib_reports_components_and_full_ranking(tmp_path):
+    rng = np.random.default_rng(110)
+    n, g = 80, 8
+    subdata = {
+        "A": _make_sub_maf(rng, n=n, g=g, spg=5),
+        "D": _make_sub_maf(rng, n=n, g=g, spg=5),
+    }
+    pairs = [(f"g{i}", f"g{i}") for i in range(g)]
+    bA = block_burden_capped(
+        subdata["A"].X, subdata["A"].gene_snp["g3"], 150, rng, minor=True)
+    bD = block_burden_capped(
+        subdata["D"].X, subdata["D"].gene_snp["g3"], 150, rng, minor=True)
+    y = rng.normal(size=n) + 2.0 * _std(bA) * _std(bD)
+    ranking = tmp_path / "ranking.tsv"
+    burdens = tmp_path / "burdens.tsv"
+
+    result = run_pair_scan_omnib(
+        subdata, pairs, y, np.arange(n), bootstrap_B=0, n_jobs=1,
+        pair_subs=("A", "D"), grm_method="grm_from_X",
+        full_dump_path=str(ranking), burden_dump_path=str(burdens),
+        top_k_burden=2)
+
+    lead = result.top[0]
+    components = np.array(list(lead["component_p"].values()), float)
+    assert acat(components) == pytest.approx(lead["p"])
+    assert lead["smallest_component"] in I.OMNIB_COMPONENT_NAMES
+    assert sum(result.component_diagnostics["smallest_component_counts"].values()) == g
+
+    header = ranking.read_text().splitlines()[0].split("\t")
+    assert {"p_minor_burden", "p_pc1", "p_kernel_hadamard",
+            "smallest_component", "p_marginal_x", "p_marginal_y"} <= set(header)
+    assert len(ranking.read_text().splitlines()) == g + 1
+    assert len(burdens.read_text().splitlines()) == 2 * n + 1
 
 
 def test_omnib_min_snp_gate_honours_configured_threshold():
@@ -1518,6 +1660,62 @@ def test_omnib_bootstrap_reports_fwer_and_tail_excess():
     assert 0.0 < r.tail_excess["n_below_0.01"]["empirical_p"] <= 1.0
 
 
+def test_pairwise_omnib_bootstrap_minp_is_the_formal_rejection_layer(monkeypatch):
+    """Catch regressions where pairwise omniB reports Bonferroni hits as bootstrap-FWER hits."""
+    rng = np.random.default_rng(1301)
+    n, g = 70, 3
+    subdata = {
+        "A": _make_sub_maf(rng, n=n, g=g, spg=5),
+        "D": _make_sub_maf(rng, n=n, g=g, spg=5),
+    }
+    pairs = [(f"g{i}", f"g{i}") for i in range(g)]
+
+    def _forced_calibration(p_obs, p_null, *, alpha=0.05):
+        assert p_obs.size == g
+        assert p_null.shape == (g, 3)
+        return {
+            "alpha": alpha,
+            "method": "parametric_bootstrap_minp_plus_one",
+            "B": 3,
+            "empirical_p": 0.25,
+            "threshold": 1.0,
+            "threshold_comparator": "strict_less_than",
+            "rejected": True,
+            "rejected_local": [1],
+            "adjusted_p_local": np.array([0.75, 0.25, 1.0]),
+            "n_degenerate_replicates": 0,
+            "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
+        }
+
+    monkeypatch.setattr(I, "_bootstrap_minp_calibration", _forced_calibration)
+    result = run_pair_scan_omnib(
+        subdata, pairs, rng.normal(size=n), np.arange(n),
+        bootstrap_B=3, n_jobs=1, pair_subs=("A", "D"),
+        grm_method="grm_from_X", primary_multiplicity="bootstrap_minp")
+
+    assert result.n_sig == 1
+    assert [tuple(value["pair"]) for value in result.sig] == [pairs[1]]
+    assert result.sig[0]["p_adjusted_bootstrap_minp"] == pytest.approx(0.25)
+    assert result.model_diagnostics["bootstrap_fwer"]["sig"] == result.sig
+    assert result.model_diagnostics["bootstrap_fwer"]["note"].startswith(
+        "This bootstrap min-P object is the sole calibrated discovery layer")
+
+
+def test_pairwise_omnib_schema_accepts_formal_bootstrap_minp():
+    cfg = _minimal_interact_config(
+        statistic="omniB", primary_multiplicity="bootstrap_minp",
+        calibration={"method": "bootstrap", "B": 2000, "seed": 2026})
+    I.validate_interact_config(cfg)
+
+
+def test_pairwise_omnib_schema_requires_enough_formal_bootstraps():
+    cfg = _minimal_interact_config(
+        statistic="omniB", primary_multiplicity="bootstrap_minp",
+        calibration={"method": "bootstrap", "B": 99, "seed": 2026})
+    with pytest.raises(SystemExit, match="formal inferential pairwise omniB requires"):
+        I.validate_interact_config(cfg)
+
+
 def test_omnib_bootstrap_whitens_once_never_refits_null():
     # the critical pitfall guard: the kinship-preserving bootstrap must fit the null LMM / build the
     # whitener EXACTLY once (never refit REML on a bootstrap phenotype, which would collapse the
@@ -1560,6 +1758,254 @@ def test_omnib_clique_triad_is_acat_of_pairwise_omnib():
     # group p = ACAT of the 3 pairwise omniBs (only B-D carries signal) -> further diluted; assert
     # the injected group is the strongest.
     assert tuple(r.top[0]["pair"])[0] == f"g{hit}"
+
+
+def test_threeway_test_conditions_on_every_lower_order_term():
+    rng = np.random.default_rng(1501)
+    n = 420
+    A = rng.normal(size=(n, 2))
+    B = rng.normal(size=(n, 2))
+    D = rng.normal(size=(n, 2))
+    mask, exclusions, diag = threeway_design_mask(A, B, D)
+    assert mask.all() and not exclusions
+    assert np.all(diag["target_residual_ratio"] > 0.1)
+    assert np.all(
+        (diag["target_information_max_fraction"] > 0)
+        & (diag["target_information_max_fraction"] < 1))
+    assert np.all(diag["target_information_effective_n"] > 1)
+
+    # A very strong pairwise signal must not be mislabeled as third order.
+    y_pair = 8.0 * A[:, 0] * B[:, 0] + rng.normal(size=n)
+    p_pair = threeway_pvals(np.eye(n), y_pair, A, B, D, fixed_mask=mask)
+    assert p_pair[0] > 1e-3
+
+    # Inject only the part of A:B:D that is orthogonal to the complete
+    # hierarchy below it, making the intended conditional estimand explicit.
+    target = A[:, 1] * B[:, 1] * D[:, 1]
+    nuisance = I._threeway_nuisance(A[:, 1], B[:, 1], D[:, 1])
+    coef, *_ = np.linalg.lstsq(nuisance, target, rcond=None)
+    target_resid = target - nuisance @ coef
+    y_three = rng.normal(size=n) + 2.0 * _std(target_resid)
+    p_three = threeway_pvals(np.eye(n), y_three, A, B, D, fixed_mask=mask)
+    assert p_three[1] < 1e-12
+
+
+def test_batched_nested_f_matches_scalar_threeway_fwl():
+    rng = np.random.default_rng(15011)
+    n, g, b = 160, 5, 7
+    A = rng.normal(size=(n, g))
+    B = 0.25 * A + rng.normal(size=(n, g))
+    D = rng.normal(size=(n, g))
+    y = rng.normal(size=(n, b))
+    q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    scales = np.linspace(0.7, 1.4, n)
+    W = (q * scales) @ q.T
+    mask, _exclusions, _diag = threeway_design_mask(A, B, D)
+    for j in range(g):
+        nuisance = I._threeway_nuisance(A[:, j], B[:, j], D[:, j])
+        p_batch = I._batch_nested_f(
+            W @ y, W @ nuisance,
+            (W @ (A[:, j] * B[:, j] * D[:, j])).reshape(-1, 1))
+        p_scalar = np.array([
+            threeway_pvals(
+                W, y[:, k], A[:, j:j + 1], B[:, j:j + 1],
+                D[:, j:j + 1], fixed_mask=mask[j:j + 1])[0]
+            for k in range(b)
+        ])
+        assert p_batch == pytest.approx(p_scalar, rel=1e-10, abs=1e-12)
+
+
+def test_batched_nested_f_handles_duplicate_nuisance_columns():
+    rng = np.random.default_rng(15012)
+    n = 100
+    x = rng.normal(size=n)
+    z = rng.normal(size=n)
+    y = np.column_stack([0.8 * z + rng.normal(size=n), rng.normal(size=n)])
+    duplicated = np.column_stack([np.ones(n), x, x, 2.0 * x])
+    unique = np.column_stack([np.ones(n), x])
+    p_duplicated = I._batch_nested_f(y, duplicated, z.reshape(-1, 1))
+    p_unique = I._batch_nested_f(y, unique, z.reshape(-1, 1))
+    assert p_duplicated == pytest.approx(p_unique, rel=1e-11, abs=1e-12)
+
+
+def test_bootstrap_minp_degenerate_replicate_is_conservative():
+    p_obs = np.array([0.01, 0.20])
+    p_null = np.array([
+        [0.02, np.nan, 0.03],
+        [0.40, 0.50, 0.60],
+    ])
+    cal = I._bootstrap_minp_calibration(p_obs, p_null, alpha=0.25)
+    assert cal["n_degenerate_replicates"] == 1
+    assert cal["empirical_p"] == pytest.approx(0.5)
+    assert cal["rejected"] is False
+
+
+def test_bootstrap_minp_uses_exact_order_statistic_and_strict_ties():
+    p_obs = np.array([0.01, 0.20])
+    # B=19, alpha*(B+1)=1: threshold is the smallest null minimum.
+    null_min = np.linspace(0.01, 0.19, 19)
+    p_null = np.vstack([null_min, np.full(19, 0.8)])
+    cal = I._bootstrap_minp_calibration(p_obs, p_null, alpha=0.05)
+    assert cal["threshold"] == pytest.approx(0.01)
+    assert cal["empirical_p"] == pytest.approx(0.1)
+    assert cal["rejected"] is False
+    assert cal["rejected_local"] == []
+
+    p_obs_below = np.array([0.009, 0.20])
+    cal_below = I._bootstrap_minp_calibration(
+        p_obs_below, p_null, alpha=0.05)
+    assert cal_below["empirical_p"] == pytest.approx(0.05)
+    assert cal_below["rejected"] is True
+    assert cal_below["rejected_local"] == [0]
+    assert cal_below["adjusted_p_local"][0] == pytest.approx(0.05)
+
+
+def test_bootstrap_minp_rejects_mismatched_fixed_family():
+    with pytest.raises(ValueError, match="same fixed hypothesis family"):
+        I._bootstrap_minp_calibration(
+            np.array([0.1, 0.2]), np.ones((3, 19)))
+
+
+def test_triad3_scan_detects_injected_conditional_signal_and_bootstraps(tmp_path):
+    rng = np.random.default_rng(1502)
+    n, g, spg = 180, 14, 5
+    subdata = {
+        s: _make_sub_maf(rng, n=n, g=g, spg=spg)
+        for s in ("A", "B", "D")
+    }
+    triads = [(f"g{i}", f"g{i}", f"g{i}") for i in range(g)]
+    hit = 7
+    burdens = []
+    for s in ("A", "B", "D"):
+        b = block_burden_capped(
+            subdata[s].X, subdata[s].gene_snp[f"g{hit}"], 150, rng,
+            minor=True)
+        burdens.append(_std(b))
+    a, b, d = burdens
+    target = a * b * d
+    nuisance = I._threeway_nuisance(a, b, d)
+    coef, *_ = np.linalg.lstsq(nuisance, target, rcond=None)
+    target_resid = target - nuisance @ coef
+    y = rng.normal(size=n) + 4.0 * _std(target_resid)
+    ranking = tmp_path / "triad3.tsv"
+
+    result = run_triad3_scan(
+        subdata, triads, y, np.arange(n), transform="raw",
+        bootstrap_B=999, bootstrap_seed=2026, n_jobs=1,
+        grm_method="grm_from_X", full_dump_path=str(ranking))
+
+    assert result.statistic == "triad3"
+    assert tuple(result.top[0]["triad"])[0] == f"g{hit}"
+    assert result.min_p < 1e-8
+    assert result.model_diagnostics["tested_term"] == "A:B:D"
+    assert 1 / 1000 <= result.minp_boot_emp <= 1
+    assert result.n_sig == len(result.sig)
+    assert result.sig == result.model_diagnostics["bootstrap_fwer"]["sig"]
+    assert result.analytic_screen_n == len(result.analytic_screen_sig)
+    assert any(tuple(value["triad"])[0] == f"g{hit}" for value in result.sig)
+    assert all(value["p_adjusted_bootstrap_minp"] <= 0.05
+               for value in result.sig)
+    header = ranking.read_text().splitlines()[0].split("\t")
+    assert {
+        "p_threeway", "target_residual_ratio", "target_sd",
+        "primary_sig", "analytic_screen_sig",
+    } <= set(header)
+    assert len(ranking.read_text().splitlines()) == g + 1
+
+
+def test_triad3_formal_rejection_maps_back_across_unestimable_row(monkeypatch):
+    rng = np.random.default_rng(15021)
+    n, g, spg = 90, 3, 5
+    subdata = {
+        s: _make_sub_maf(rng, n=n, g=g, spg=spg)
+        for s in ("A", "B", "D")
+    }
+    triads = [(f"g{i}", f"g{i}", f"g{i}") for i in range(g)]
+    original_mask = I.threeway_design_mask
+
+    def _mask_with_first_excluded(A, B, D, C=None):
+        mask, exclusions, diag = original_mask(A, B, D, C=C)
+        mask[0] = False
+        exclusions[0] = "target_nonestimable"
+        return mask, exclusions, diag
+
+    def _forced_calibration(p_obs, p_null, *, alpha=0.05):
+        assert p_obs.size == g - 1
+        return {
+            "alpha": alpha,
+            "method": "parametric_bootstrap_minp_plus_one",
+            "B": p_null.shape[1],
+            "empirical_p": 0.01,
+            "threshold": 1.0,
+            "threshold_comparator": "strict_less_than",
+            "rejected": True,
+            "rejected_local": [0],
+            "adjusted_p_local": np.array([0.01, 0.8]),
+            "n_degenerate_replicates": 0,
+            "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
+        }
+
+    monkeypatch.setattr(I, "threeway_design_mask", _mask_with_first_excluded)
+    monkeypatch.setattr(
+        I, "_bootstrap_minp_calibration", _forced_calibration)
+    result = run_triad3_scan(
+        subdata, triads, rng.normal(size=n), np.arange(n),
+        transform="raw", bootstrap_B=999, bootstrap_seed=7,
+        n_jobs=1, grm_method="grm_from_X")
+    assert result.n_unestimable == 1
+    assert [tuple(value["triad"]) for value in result.sig] == [triads[1]]
+
+
+def test_triad3_is_invariant_to_ref_alt_recoding():
+    rng = np.random.default_rng(1503)
+    n, g, spg = 120, 8, 5
+    subdata = {
+        s: _make_sub_maf(rng, n=n, g=g, spg=spg)
+        for s in ("A", "B", "D")
+    }
+    triads = [(f"g{i}", f"g{i}", f"g{i}") for i in range(g)]
+    y = rng.normal(size=n)
+    r0 = run_triad3_scan(
+        subdata, triads, y, np.arange(n), transform="raw",
+        bootstrap_B=0, inferential=False, n_jobs=1,
+        grm_method="grm_from_X")
+    flipped = {
+        s: SubgenomeData(
+            X=2.0 - value.X, gene_snp=value.gene_snp,
+            samples=value.samples, chunk=None)
+        for s, value in subdata.items()
+    }
+    r1 = run_triad3_scan(
+        flipped, triads, y, np.arange(n), transform="raw",
+        bootstrap_B=0, inferential=False, n_jobs=1,
+        grm_method="grm_from_X")
+    assert r0.min_p == pytest.approx(r1.min_p, rel=1e-6, abs=1e-10)
+    assert [h["p"] for h in r0.top] == pytest.approx(
+        [h["p"] for h in r1.top], rel=1e-6, abs=1e-10)
+
+
+def test_omnib_clique_ranking_decomposes_pairs_and_components(tmp_path):
+    rng = np.random.default_rng(151)
+    n, g = 70, 6
+    subdata = {
+        s: _make_sub_maf(rng, n=n, g=g, spg=4)
+        for s in ("A", "B", "D")
+    }
+    groups = [(f"g{i}", f"g{i}", f"g{i}") for i in range(g)]
+    ranking = tmp_path / "triad_ranking.tsv"
+    result = run_clique_scan_omnib(
+        subdata, groups, rng.normal(size=n), np.arange(n),
+        bootstrap_B=0, n_jobs=1, grm_method="grm_from_X",
+        full_dump_path=str(ranking))
+
+    lead = result.top[0]
+    pair_ps = np.array([value["p_omnib"] for value in lead["pairwise"].values()])
+    assert acat(pair_ps) == pytest.approx(lead["p"])
+    assert set(lead["pairwise"]) == {"AB", "AD", "BD"}
+    header = ranking.read_text().splitlines()[0].split("\t")
+    assert {"p_omnib_AB", "p_minor_burden_AD", "p_pc1_BD",
+            "p_kernel_hadamard_BD"} <= set(header)
+    assert len(ranking.read_text().splitlines()) == g + 1
 
 
 # --- multiplicity / estimability regression suite (engine v2) -------------------------------------
@@ -2104,7 +2550,7 @@ def test_weighted_primary_decides_the_group_omnibus_too():
     assert any(tuple(h["triad"])[0] == f"g{hit}" for h in go["sig"])
 
 
-def test_permutation_threshold_publishes_its_comparator():
+def test_permutation_threshold_publishes_its_comparator(monkeypatch, tmp_path):
     rng = np.random.default_rng(43)
     subdata = {s: _make_sub(rng) for s in ("A", "D")}
     pairs = [(f"g{i}", f"g{i}") for i in range(G)]
@@ -2114,12 +2560,25 @@ def test_permutation_threshold_publishes_its_comparator():
     assert r.minp_perm_threshold_comparator == "strict_less_than"
     # Bonferroni is primary by default, so min-P emits no rejection decision
     assert r.minp_perm_rejected is None
+    monkeypatch.setattr(I, "PAIRWISE_BURDEN_FORMAL_PERMUTATION_MIN_B", 39)
+    ranking = tmp_path / "ranking.tsv"
     r2 = run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
                        transform="INT", perm_B=39, n_jobs=1, pair_subs=("A", "D"),
-                       grm_method="grm_from_X", primary_multiplicity="permutation_minp")
-    assert r2.sig is None and r2.n_sig is None       # the non-primary procedure emits nothing
+                       grm_method="grm_from_X", primary_multiplicity="permutation_minp",
+                       full_dump_path=str(ranking))
+    assert r2.n_sig == len(r2.sig)
+    assert all(hit["p_adjusted_permutation_minp"] <= 0.05 for hit in r2.sig)
+    assert all("p_adjusted_permutation_minp" in hit for hit in r2.top)
     assert r2.minp_perm_rejected == (r2.minp_perm_emp <= 0.05)
     assert r2.minp_perm_rejected == (r2.min_p < r2.minp_perm_threshold)
+    fwer = r2.model_diagnostics["permutation_fwer"]
+    assert fwer["method"] == "freedman_lane_permutation_minp_plus_one"
+    assert fwer["inferential"] is True
+    assert fwer["n_rejected"] == r2.n_sig
+    assert fwer["rejected"] == (r2.n_sig > 0)
+    header = ranking.read_text().splitlines()[0].split("\t")
+    assert "p_adjusted_permutation_minp" in header
+    assert "primary_sig" in header
 
 
 def test_weighted_primary_headline_uses_the_weighted_adjusted_p():
@@ -2220,7 +2679,7 @@ def test_permutation_primary_requires_enough_replicates():
     rng = np.random.default_rng(63)
     subdata = {s: _make_sub(rng) for s in ("A", "D")}
     pairs = [(f"g{i}", f"g{i}") for i in range(G)]
-    with pytest.raises(ValueError, match="perm_B >= 19"):
+    with pytest.raises(ValueError, match="perm_B >= 999"):
         run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
                       transform="INT", perm_B=5, n_jobs=1, pair_subs=("A", "D"),
                       grm_method="grm_from_X", primary_multiplicity="permutation_minp")
@@ -2230,6 +2689,16 @@ def test_permutation_primary_requires_enough_replicates():
                       grm_method="grm_from_X", primary_multiplicity="permutation_minp",
                       primary_weighting="weighted",
                       pair_weights={(f"g{i}", f"g{i}"): 1.0 for i in range(G)})
+
+
+def test_permutation_primary_requires_formal_resolution():
+    rng = np.random.default_rng(64)
+    subdata = {s: _make_sub(rng) for s in ("A", "D")}
+    pairs = [(f"g{i}", f"g{i}") for i in range(G)]
+    with pytest.raises(ValueError, match="perm_B >= 999"):
+        run_pair_scan(subdata, pairs, rng.standard_normal(N), np.arange(N), cap=150,
+                      transform="INT", perm_B=99, n_jobs=1, pair_subs=("A", "D"),
+                      grm_method="grm_from_X", primary_multiplicity="permutation_minp")
 
 
 def test_sensitivity_run_is_never_aborted_by_inference_only_guards():

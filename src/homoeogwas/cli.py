@@ -31,6 +31,7 @@ from .io import load_bed_hardcall, plink_path, read_delimited
 from .jsonutil import dump_strict, dumps_strict
 from .kernel import build_homoeolog_kernel, normalize_kernel
 from .lmm import fit_multi_reml
+from .markers import ALLOWED_ENCODINGS, DEFAULT_ENCODING, validate_marker_contract
 from .scan import (
     LOCOContext,
     build_loco_scan_contexts,
@@ -115,6 +116,22 @@ def validate_config(cfg: dict) -> None:
         raise SystemExit("ERR: config phenotype.trait is required")
     if not _get(cfg, "genotype.scan_bed_prefix_template"):
         raise SystemExit("ERR: config genotype.scan_bed_prefix_template is required")
+    marker_encoding = _get(
+        cfg, "genotype.marker_encoding", DEFAULT_ENCODING
+    )
+    if marker_encoding not in ALLOWED_ENCODINGS:
+        raise SystemExit(
+            "ERR: genotype.marker_encoding must be one of "
+            f"{sorted(ALLOWED_ENCODINGS)}, got {marker_encoding!r}"
+        )
+    if (
+        marker_encoding != DEFAULT_ENCODING
+        and not _get(cfg, "genotype.marker_manifest_template")
+    ):
+        raise SystemExit(
+            "ERR: non-default genotype.marker_encoding requires "
+            "genotype.marker_manifest_template"
+        )
     mode = _get(cfg, "scan.mode", "auto")
     if mode not in ("auto", "memory", "stream"):
         raise SystemExit(f"ERR: scan.mode must be auto|memory|stream, got {mode!r}")
@@ -123,6 +140,42 @@ def validate_config(cfg: dict) -> None:
         raise SystemExit(f"ERR: genotype.grm.source must be bed|npz, got {grm_source!r}")
     if grm_source == "npz" and not _get(cfg, "genotype.grm.npz_path"):
         raise SystemExit("ERR: genotype.grm.source=npz requires genotype.grm.npz_path")
+    grm_encoding_configured = _get(cfg, "genotype.grm.marker_encoding")
+    grm_manifest_configured = _get(
+        cfg, "genotype.grm.marker_manifest_template"
+    )
+    if grm_source == "npz" and (
+        grm_encoding_configured is not None or grm_manifest_configured is not None
+    ):
+        raise SystemExit(
+            "ERR: genotype.grm.marker_encoding/marker_manifest_template apply "
+            "only when genotype.grm.source=bed"
+        )
+    if grm_source == "bed":
+        grm_encoding, grm_manifest = _grm_marker_contract(cfg)
+        if grm_encoding not in ALLOWED_ENCODINGS:
+            raise SystemExit(
+                "ERR: genotype.grm.marker_encoding must be one of "
+                f"{sorted(ALLOWED_ENCODINGS)}, got {grm_encoding!r}"
+            )
+        if grm_encoding != DEFAULT_ENCODING and not grm_manifest:
+            raise SystemExit(
+                "ERR: non-default genotype.grm.marker_encoding requires "
+                "genotype.grm.marker_manifest_template"
+            )
+        if _grm_uses_scan_beds(cfg):
+            if grm_encoding != marker_encoding:
+                raise SystemExit(
+                    "ERR: scan and GRM resolve to the same BED files but declare "
+                    "different marker encodings"
+                )
+            if grm_manifest != _get(
+                cfg, "genotype.marker_manifest_template"
+            ):
+                raise SystemExit(
+                    "ERR: scan and GRM resolve to the same BED files but declare "
+                    "different marker manifests"
+                )
     had_name = _get(cfg, "kernels.hadamard_name", "hom")
     if had_name in subg:
         raise SystemExit(f"ERR: kernels.hadamard_name {had_name!r} collides with "
@@ -154,6 +207,21 @@ def validate_config(cfg: dict) -> None:
     if nstarts is not None and (not isinstance(nstarts, int) or nstarts < 1):
         raise SystemExit(f"ERR: config reml.n_starts must be an integer >= 1, "
                          f"got {nstarts!r}")
+    pve_boot = _get(cfg, "reml.pve_bootstrap")
+    if pve_boot is not None and not isinstance(pve_boot, (bool, dict)):
+        raise SystemExit("ERR: reml.pve_bootstrap must be true|false or a mapping")
+    if isinstance(pve_boot, dict):
+        for key, lo in (("B", 1), ("n_jobs", 1), ("n_starts", 1)):
+            value = pve_boot.get(key)
+            if value is not None and (not isinstance(value, int) or value < lo):
+                raise SystemExit(
+                    f"ERR: reml.pve_bootstrap.{key} must be an integer >= {lo}, "
+                    f"got {value!r}")
+        level = pve_boot.get("level")
+        if level is not None and not (
+                isinstance(level, (int, float)) and 0.0 < float(level) < 1.0):
+            raise SystemExit(
+                "ERR: reml.pve_bootstrap.level must be a number in (0,1)")
     # LOCO config
     loco_cfg = _get(cfg, "scan.loco")
     if loco_cfg is not None:
@@ -203,6 +271,28 @@ def _grm_bed_prefix(cfg: dict, sg: str) -> Path:
     return Path(tmpl.format(subgenome=sg))
 
 
+def _grm_uses_scan_beds(cfg: dict) -> bool:
+    """Return whether every GRM BED resolves to the corresponding scan BED."""
+    return all(
+        _grm_bed_prefix(cfg, sg) == _scan_bed_prefix(cfg, sg)
+        for sg in _get(cfg, "panel.subgenomes")
+    )
+
+
+def _grm_marker_contract(cfg: dict) -> tuple[str, str | None]:
+    """Resolve the GRM marker contract without conflating it with scan features."""
+    same_beds = _grm_uses_scan_beds(cfg)
+    scan_encoding = _get(cfg, "genotype.marker_encoding", DEFAULT_ENCODING)
+    scan_manifest = _get(cfg, "genotype.marker_manifest_template")
+    encoding = _get(cfg, "genotype.grm.marker_encoding")
+    manifest = _get(cfg, "genotype.grm.marker_manifest_template")
+    if encoding is None:
+        encoding = scan_encoding if same_beds else DEFAULT_ENCODING
+    if manifest is None and same_beds and encoding == scan_encoding:
+        manifest = scan_manifest
+    return encoding, manifest
+
+
 def preflight(cfg: dict) -> list[str]:
     """Check every input path exists; return a list of human-readable problems."""
     problems: list[str] = []
@@ -223,6 +313,32 @@ def preflight(cfg: dict) -> list[str]:
             bed = plink_path(_grm_bed_prefix(cfg, sg), ".bed")
             if not bed.exists():
                 problems.append(f"GRM BED missing for subgenome {sg}: {bed}")
+    marker_problems, _ = validate_marker_contract(
+        subgenomes=subg,
+        bed_prefix=lambda sg: _scan_bed_prefix(cfg, sg),
+        encoding=_get(cfg, "genotype.marker_encoding", DEFAULT_ENCODING),
+        manifest_template=_get(cfg, "genotype.marker_manifest_template"),
+        check_values=True,
+    )
+    problems.extend(marker_problems)
+    if _get(cfg, "genotype.grm.source", "bed") == "bed":
+        grm_encoding, grm_manifest = _grm_marker_contract(cfg)
+        same_contract = (
+            _grm_uses_scan_beds(cfg)
+            and grm_encoding
+            == _get(cfg, "genotype.marker_encoding", DEFAULT_ENCODING)
+            and grm_manifest == _get(cfg, "genotype.marker_manifest_template")
+        )
+        if not same_contract:
+            grm_problems, _ = validate_marker_contract(
+                subgenomes=subg,
+                bed_prefix=lambda sg: _grm_bed_prefix(cfg, sg),
+                encoding=grm_encoding,
+                manifest_template=grm_manifest,
+                check_values=True,
+                contract_label="genotype.grm",
+            )
+            problems.extend(grm_problems)
     return problems
 
 
@@ -313,7 +429,47 @@ def build_kernels(cfg: dict, analysis_samples: np.ndarray):
     norm = _get(cfg, "kernels.normalize", "trace")
     maf_min = float(_get(cfg, "genotype.grm.maf_min", 0.01))
     source = _get(cfg, "genotype.grm.source", "bed")
-    grm_info: dict = {"source": source, "normalize": norm, "raw": {}}
+    marker_problems, scan_marker_input = validate_marker_contract(
+        subgenomes=subg,
+        bed_prefix=lambda sg: _scan_bed_prefix(cfg, sg),
+        encoding=_get(cfg, "genotype.marker_encoding", DEFAULT_ENCODING),
+        manifest_template=_get(cfg, "genotype.marker_manifest_template"),
+        check_values=False,
+    )
+    if marker_problems:
+        raise SystemExit("ERR: marker contract failed after preflight: "
+                         + "; ".join(marker_problems))
+    if source == "bed":
+        grm_encoding, grm_manifest = _grm_marker_contract(cfg)
+        grm_problems, grm_marker_input = validate_marker_contract(
+            subgenomes=subg,
+            bed_prefix=lambda sg: _grm_bed_prefix(cfg, sg),
+            encoding=grm_encoding,
+            manifest_template=grm_manifest,
+            check_values=False,
+            contract_label="genotype.grm",
+        )
+        if grm_problems:
+            raise SystemExit(
+                "ERR: GRM marker contract failed after preflight: "
+                + "; ".join(grm_problems)
+            )
+    else:
+        grm_marker_input = {
+            "encoding": "precomputed_grm",
+            "manifest_template": None,
+            "subgenomes": {},
+            "scope": "precomputed GRM; marker values are not re-read",
+        }
+    grm_info: dict = {
+        "source": source,
+        "normalize": norm,
+        "raw": {},
+        "marker_input": {
+            "scan": scan_marker_input,
+            "grm": grm_marker_input,
+        },
+    }
 
     raw: dict[str, np.ndarray] = {}
     if source == "npz":
@@ -415,8 +571,41 @@ def build_loco_kernels(
             f"ERR: build_loco_kernels requires genotype.grm.source=bed, "
             f"got {source!r}")
 
-    grm_info: dict = {"source": source, "normalize": norm,
-                       "loco_enabled": True, "raw": {}, "loco": {}}
+    marker_problems, scan_marker_input = validate_marker_contract(
+        subgenomes=subg,
+        bed_prefix=lambda sg: _scan_bed_prefix(cfg, sg),
+        encoding=_get(cfg, "genotype.marker_encoding", DEFAULT_ENCODING),
+        manifest_template=_get(cfg, "genotype.marker_manifest_template"),
+        check_values=False,
+    )
+    if marker_problems:
+        raise SystemExit("ERR: marker contract failed after preflight: "
+                         + "; ".join(marker_problems))
+    grm_encoding, grm_manifest = _grm_marker_contract(cfg)
+    grm_problems, grm_marker_input = validate_marker_contract(
+        subgenomes=subg,
+        bed_prefix=lambda sg: _grm_bed_prefix(cfg, sg),
+        encoding=grm_encoding,
+        manifest_template=grm_manifest,
+        check_values=False,
+        contract_label="genotype.grm",
+    )
+    if grm_problems:
+        raise SystemExit(
+            "ERR: GRM marker contract failed after preflight: "
+            + "; ".join(grm_problems)
+        )
+    grm_info: dict = {
+        "source": source,
+        "normalize": norm,
+        "loco_enabled": True,
+        "raw": {},
+        "loco": {},
+        "marker_input": {
+            "scan": scan_marker_input,
+            "grm": grm_marker_input,
+        },
+    }
 
     # read each subgenome's BED, align samples, accumulate parts
     global_parts: dict[str, GRMPart] = {}
@@ -793,6 +982,39 @@ def cmd_fit(args) -> int:
     check("reml_converged", bool(reml.optimizer_status))
     check("reml_pve_sums_to_1", abs(sum(reml.pve.values()) - 1.0) < 1e-6)
 
+    pve_uncertainty = None
+    pve_bootstrap_samples = None
+    pve_boot = _get(cfg, "reml.pve_bootstrap", False)
+    pve_boot_enabled = bool(
+        pve_boot if isinstance(pve_boot, bool) else pve_boot.get("enabled", True))
+    if pve_boot_enabled:
+        from .diagnostics import parametric_bootstrap_pve
+
+        pve_boot_cfg = pve_boot if isinstance(pve_boot, dict) else {}
+        pve_B = int(pve_boot_cfg.get("B", 200))
+        pve_jobs = int(pve_boot_cfg.get("n_jobs", 1))
+        pve_level = float(pve_boot_cfg.get("level", 0.95))
+        pve_seed = int(pve_boot_cfg.get("seed", seed + 1000))
+        pve_refit_starts = int(pve_boot_cfg.get("n_starts", n_starts))
+        print(f"  PVE uncertainty: parametric bootstrap B={pve_B} "
+              f"jobs={pve_jobs} level={pve_level:.3g}", flush=True)
+        pve_boot_result = parametric_bootstrap_pve(
+            y, X, kernels, fit=reml, B=pve_B, level=pve_level,
+            seed=pve_seed, n_jobs=pve_jobs,
+            fit_kwargs={"n_starts": pve_refit_starts})
+        pve_uncertainty = pve_boot_result.to_dict()
+        pve_bootstrap_samples = out_dir / f"pve_bootstrap_{prefix}.tsv"
+        pve_boot_result.samples.to_csv(
+            pve_bootstrap_samples, sep="\t", index_label="replicate")
+        check(
+            "pve_bootstrap_success",
+            pve_boot_result.B_success >= int(np.ceil(0.8 * pve_B)),
+            f"{pve_boot_result.B_success}/{pve_B} successful refits")
+        for name, item in pve_boot_result.components.items():
+            print(f"    {name}: PVE={item['estimate']:.3f} "
+                  f"{pve_level:.0%} CI [{item['ci_low']:.3f}, "
+                  f"{item['ci_high']:.3f}] boundary={item['boundary_rate']:.1%}")
+
     # scan context
     if loco_enabled:
         assert kernels_by_chrom is not None
@@ -885,7 +1107,8 @@ def cmd_fit(args) -> int:
                  "log_lik": reml.log_lik,
                  "optimizer_status": bool(reml.optimizer_status),
                  "boundary_components": reml.boundary_components,
-                 "n_starts": n_starts},
+                 "n_starts": n_starts,
+                 "pve_uncertainty": pve_uncertainty},
         "scan": {**mode_info, "backend_requested": backend,
                  "backend_used": scan_out["backend_used"],
                  "n_markers_input": scan_out["n_markers_input"],
@@ -898,6 +1121,8 @@ def cmd_fit(args) -> int:
         "outputs": {"out_dir": str(out_dir), "sumstats": scan_out["sumstats"],
                     "lambda_gc_tsv": str(out_dir / f"lambda_gc_{prefix}.tsv"),
                     "plots": plot_paths,
+                    "pve_bootstrap_samples": (
+                        str(pve_bootstrap_samples) if pve_bootstrap_samples else None),
                     "analysis_samples": str(out_dir / "analysis_samples.tsv"),
                     "resolved_config": str(out_dir / "resolved_config.yaml")},
         "acceptance": acceptance, "acceptance_all_passed": all_passed,
@@ -1599,6 +1824,11 @@ def cmd_predict(args) -> int:
     t0 = time.time()
     cfg = load_config(args.config)
     validate_config(cfg)
+    problems = preflight(cfg)
+    if problems:
+        for problem in problems:
+            print(f"  ERR preflight: {problem}")
+        raise SystemExit("ERR: preflight failed — fix the inputs above")
     if args.out_dir:
         cfg.setdefault("outputs", {})["out_dir"] = args.out_dir
     out_dir = Path(_get(cfg, "outputs.out_dir", "results/homoeogwas_predict"))

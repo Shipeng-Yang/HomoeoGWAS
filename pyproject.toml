@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "homoeogwas"
-version = "2.0.0"
-description = "Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS"
+version = "2.0.1"
+description = "Subgenome-aware mixed-model GWAS and homoeolog interaction analysis for allopolyploids"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -18,9 +18,8 @@ keywords = [
     "allopolyploid",
     "mixed model",
     "LMM",
-    "deep learning prior",
-    "PlantCaduceus",
-    "AgroNT",
+    "homoeolog interaction",
+    "variance partition",
     "wheat",
     "cotton",
     "rapeseed",

@@ -1,20 +1,27 @@
-"""Gene-resolution homoeolog-pair burden-product interaction scan.
+"""Gene-resolution homoeolog interaction scans.
 
-For each homoeolog pair (X in subgenome S_x, Y in S_y) it fits the whitened GLS
+The production default, omniB, combines three encoding-robust conditional
+interaction tests (minor-burden, PC1 and kernel-Hadamard) and calibrates the
+experiment-wide minimum with a kinship-preserving parametric bootstrap. The
+experimental ``triad3`` statistic instead tests the hierarchy-preserving
+``A:B:D`` minor-burden coefficient conditional on all main and pairwise terms.
+legacy burden path fits, for each homoeolog pair, the whitened GLS
 
     y_w ~ 1 + b_X + b_Y + b_X * b_Y
 
 where b_* are gene burdens (capped block-mean of standardized dosages) and the whitener
 comes from a subgenome-stratified null LMM (multi-kernel REML over {K_sub}); it then tests
 the interaction coefficient and aggregates per-pair p-values with ACAT. INT is the primary
-transform; ``raw`` is a sensitivity transform. Empirical calibration uses y-shuffle
-permutation. Optional y-independent extensions: ``--weights`` (DL/HEB pair priors for
-weighted hypothesis testing) and ``--multi-trait`` (ACAT across a predeclared trait set).
+transform; ``raw`` is a sensitivity transform. The legacy empirical calibration uses
+Freedman-Lane permutation. Optional y-independent extensions include frozen pair weights and
+multi-trait ACAT over a predeclared trait set.
 
 Config (YAML)::
 
     interact:
       subgenomes: [A, D]               # 2 (disomic) or 3 (hexaploid)
+      statistic: omniB
+      primary_transform: INT
       genotype: {A: <plink_prefix>, D: <plink_prefix>}
       snp_to_gene: {A: <npz>, D: <npz>}    # gene_ids + snp_idx into that subgenome's X
       pairs: <tsv>                          # columns gene_<S> per subgenome (e.g. gene_A,gene_D)
@@ -23,9 +30,8 @@ Config (YAML)::
       trait: <name>                         # single-trait; OR predeclare a frozen set below
       # multi_trait: [t1, t2, t3]           # pairwise-only pleiotropy: ACAT across a FROZEN trait set
       burden: {cap: 150, min_snp: 3}
-      transform: INT                        # INT primary; also runs raw sensitivity
-      calibration: {perm_B: 2000}
-    outputs: {out_dir: <dir>}
+      calibration: {method: bootstrap, B: 2000, seed: 2026}
+    outputs: {out_dir: <dir>, full_ranking: true}
 """
 from __future__ import annotations
 
@@ -42,6 +48,7 @@ from scipy import stats
 
 from . import omnib_family as _family_score
 from .formal_provenance import FormalLaunchError, verify_formal_launch
+from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edges
 from .group_family import load_master_group_family
 from .interaction_config import normalize_interact_config
 
@@ -897,7 +904,12 @@ def _normalize_weights(raw, G: int, label: str) -> np.ndarray:
 
 def _tsv_p(v: float) -> str:
     """Round-trippable p for a ranking dump; a test that was not run is NA, never a number."""
-    return repr(float(v)) if np.isfinite(v) else "NA"
+    if v is None:
+        return "NA"
+    try:
+        return repr(float(v)) if np.isfinite(v) else "NA"
+    except (TypeError, ValueError):
+        return "NA"
 
 
 def _json_safe(obj):
@@ -1224,11 +1236,11 @@ def run_pair_scan(
         if primary_weighting == "weighted":
             raise ValueError("weighted permutation min-P is not implemented; the permuted "
                              "statistic would have to be the weighted one")
-        # below 19 replicates the smallest attainable plus-one p exceeds 0.05, so a declared 5%
-        # permutation-primary analysis could never reject
-        if not perm_B or perm_B < 19:
-            raise ValueError("primary_multiplicity='permutation_minp' needs perm_B >= 19 for a "
-                             f"5% test; got {perm_B}")
+        if not perm_B or perm_B < PAIRWISE_BURDEN_FORMAL_PERMUTATION_MIN_B:
+            raise ValueError(
+                "primary_multiplicity='permutation_minp' needs "
+                f"perm_B >= {PAIRWISE_BURDEN_FORMAL_PERMUTATION_MIN_B} for formal inference; "
+                f"got {perm_B}. Use inferential=False for a >=19-replicate QA run")
     rng = np.random.default_rng(seed)
     subs = list(subdata.keys())
     n_t = sample_idx.size
@@ -1309,9 +1321,10 @@ def run_pair_scan(
     # only the predeclared procedure emits rejections: two alpha-level procedures over the same
     # hypotheses do not control alpha if the reader may take whichever one rejects
     bonf_is_primary = inferential and primary_multiplicity == "bonferroni"
-    sig = ([dict(pair=kept_pairs[i], p=float(pv[i]),
-                 p_adjusted_bonferroni=float(min(pv[i] * G, 1.0)))
-            for i in order if pv[i] < bonf]
+    analytic_sig = [dict(pair=kept_pairs[i], p=float(pv[i]),
+                         p_adjusted_bonferroni=float(min(pv[i] * G, 1.0)))
+                    for i in order if pv[i] < bonf]
+    sig = (analytic_sig
            if (bonf_is_primary and primary_weighting == "unweighted") else None)
     top = [dict(pair=kept_pairs[i], p=float(pv[i])) for i in order[:5]]
     estimability = dict(ESTIMABILITY_POLICY, decided_on="raw_design", n_planned=int(G),
@@ -1335,35 +1348,14 @@ def run_pair_scan(
                   for gx, gy in kept_pairs]
 
     if full_dump_path:
-        # Full genome-wide ranking (descriptive). Now also carries each gene's coordinates and
-        # single-burden marginal p so downstream viz can build the interaction Manhattan and the
-        # interaction-vs-marginal contrast without recomputation. gene_len stays NA (joined
-        # downstream from annotation).
+        # Cache the y-independent/descriptive columns now; the TSV is written after permutation so
+        # its primary_sig and adjusted-p columns reflect the declared multiplicity procedure.
         nx, ny = np.asarray(nsnp_x), np.asarray(nsnp_y)
         sort_key = np.where(est, pv, np.inf)              # unestimable rows stay, but sort last
         _, rank_of, tie_of = _rank_with_ties(sort_key, kept_pairs)
         nl = _neglog10(pv)
         nlmx, nlmy = _neglog10(pmx), _neglog10(pmy)
         cbin = _decile_bin(nx + ny)
-        rows = [[int(rank_of[i]), kept_pairs[i][0], kept_pairs[i][1], sx, sy,
-                 _tsv_p(pv[i]), _tsv_p(nl[i]), int(nx[i]), int(ny[i]), int(nx[i] + ny[i]),
-                 int(cbin[i]), int(tie_of[i]), int(not est[i]),
-                 (int(est[i] and pv[i] < (bonf * w[i] if w is not None and
-                                          primary_weighting == "weighted" else bonf))
-                  if (inferential and bonf_is_primary) else "NA"),
-                 "NA", "NA", "NA",
-                 coords[i][0][0], coords[i][0][1], coords[i][1][0], coords[i][1][1],
-                 _tsv_p(pmx[i]), _tsv_p(pmy[i]),
-                 _tsv_p(nlmx[i]), _tsv_p(nlmy[i])]
-                for i in np.argsort(sort_key, kind="stable")]
-        _write_ranking_tsv(full_dump_path,
-                           ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y", "p_interaction",
-                            "neglog10p", f"n_snp_{sx}", f"n_snp_{sy}", "n_snp_pair",
-                            "callable_snp_decile", "tie_group", "p_unestimable", "primary_sig",
-                            f"gene_len_{sx}", f"gene_len_{sy}", "gene_len_pair_sum",
-                            "chrom_x", "pos_x", "chrom_y", "pos_y",
-                            "p_marginal_x", "p_marginal_y",
-                            "neglog10p_marginal_x", "neglog10p_marginal_y"], rows)
 
     if burden_dump_path:
         # per-sample burdens + phenotype for the top-K pairs -> A×D interaction-surface plot.
@@ -1442,6 +1434,7 @@ def run_pair_scan(
     minp_perm_emp = float("nan")
     minp_perm_threshold = float("nan")
     minp_perm_rejected = None
+    p_adjusted_perm = np.full(G, np.nan, dtype=float)
     perm_status = dict(status="not_run", B_requested=int(perm_B or 0), n_used=0, n_degenerate=0,
                        note="no resampling was run; empirical p fields are null, not 1.0")
     if perm_B and perm_B > 0:
@@ -1468,11 +1461,66 @@ def run_pair_scan(
                 minp_perm_emp = float((1 + int((mp <= minp_obs).sum())) / (len(mp) + 1))
             k = int(np.floor(0.05 * (len(mp) + 1)))
             minp_perm_threshold = float(np.sort(mp)[k - 1]) if k >= 1 else float("nan")
+            mp_sorted = np.sort(mp)
+            p_adjusted_perm[est] = (
+                1 + np.searchsorted(mp_sorted, pv[est], side="right")) / (len(mp) + 1)
             # only the declared procedure emits a rejection decision: Bonferroni and permutation
             # min-P each spend the full alpha over the same hypotheses
             if (inferential and primary_multiplicity == "permutation_minp"
                     and primary_weighting == "unweighted"):
                 minp_perm_rejected = bool(np.isfinite(minp_perm_emp) and minp_perm_emp <= 0.05)
+
+    permutation_is_primary = (
+        inferential and primary_multiplicity == "permutation_minp"
+        and primary_weighting == "unweighted")
+    if permutation_is_primary:
+        sig = [dict(pair=kept_pairs[i], p=float(pv[i]),
+                    p_adjusted_permutation_minp=float(p_adjusted_perm[i]))
+               for i in order if p_adjusted_perm[i] <= 0.05]
+    top = [dict(pair=kept_pairs[i], p=float(pv[i]),
+                **({"p_adjusted_permutation_minp": float(p_adjusted_perm[i])}
+                   if np.isfinite(p_adjusted_perm[i]) else {}))
+           for i in order[:5]]
+    primary_index = {
+        kept_pairs.index(tuple(hit["pair"])) for hit in (sig or [])
+    } if sig is not None else set()
+
+    permutation_fwer = dict(
+        alpha=0.05,
+        method="freedman_lane_permutation_minp_plus_one",
+        inferential=bool(permutation_is_primary),
+        rejected=(bool(sig) if permutation_is_primary else None),
+        n_rejected=(len(sig) if permutation_is_primary else None),
+        empirical_p=(float(minp_perm_emp) if np.isfinite(minp_perm_emp) else None),
+        threshold=(float(minp_perm_threshold)
+                   if np.isfinite(minp_perm_threshold) else None),
+        threshold_comparator="strict_less_than",
+        n_degenerate_replicates=int(perm_status["n_degenerate"]),
+        sig=(sig if permutation_is_primary else None),
+    )
+
+    if full_dump_path:
+        rows = [[int(rank_of[i]), kept_pairs[i][0], kept_pairs[i][1], sx, sy,
+                 _tsv_p(pv[i]), _tsv_p(nl[i]), _tsv_p(p_adjusted_perm[i]),
+                 int(nx[i]), int(ny[i]), int(nx[i] + ny[i]),
+                 int(cbin[i]), int(tie_of[i]), int(not est[i]),
+                 (int(i in primary_index) if sig is not None else "NA"),
+                 int(est[i] and pv[i] < bonf),
+                 "NA", "NA", "NA",
+                 coords[i][0][0], coords[i][0][1], coords[i][1][0], coords[i][1][1],
+                 _tsv_p(pmx[i]), _tsv_p(pmy[i]),
+                 _tsv_p(nlmx[i]), _tsv_p(nlmy[i])]
+                for i in np.argsort(sort_key, kind="stable")]
+        _write_ranking_tsv(
+            full_dump_path,
+            ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y", "p_interaction",
+             "neglog10p", "p_adjusted_permutation_minp",
+             f"n_snp_{sx}", f"n_snp_{sy}", "n_snp_pair",
+             "callable_snp_decile", "tie_group", "p_unestimable", "primary_sig",
+             "analytic_screen_sig", f"gene_len_{sx}", f"gene_len_{sy}",
+             "gene_len_pair_sum", "chrom_x", "pos_x", "chrom_y", "pos_y",
+             "p_marginal_x", "p_marginal_y", "neglog10p_marginal_x",
+             "neglog10p_marginal_y"], rows)
 
     return InteractResult(
         trait="", transform=transform, n=int(n_t), G=int(G),
@@ -1486,6 +1534,8 @@ def run_pair_scan(
         minp_perm_rejected=minp_perm_rejected,
         n_planned=int(G), n_valid=n_valid, n_unestimable=int(G - n_valid),
         estimability=estimability, permutation=perm_status,
+        model_diagnostics={"permutation_fwer": permutation_fwer},
+        analytic_screen_n=len(analytic_sig), analytic_screen_sig=analytic_sig,
         inference_plan=dict(
             primary_weighting=primary_weighting, primary_multiplicity=primary_multiplicity,
             inferential=bool(inferential),
@@ -1506,18 +1556,351 @@ def _batch_nested_f(Yw: np.ndarray, Xred: np.ndarray, Xadd: np.ndarray) -> np.nd
     from scipy.linalg import orth
 
     n = Yw.shape[0]
-    Qr, Qf = orth(Xred), orth(np.column_stack([Xred, Xadd]))
-    dfd = n - Qf.shape[1]
-    if Qf.shape[1] <= Qr.shape[1] or dfd < 1:
+    Qr = orth(Xred)
+    Xadd_r = Xadd - Qr @ (Qr.T @ Xadd) if Qr.size else Xadd
+    Qa = orth(Xadd_r)
+    dfn = Qa.shape[1]
+    dfd = n - Qr.shape[1] - dfn
+    if dfn < 1 or dfd < 1:
         return np.full(Yw.shape[1], np.nan)
-    tot = (Yw ** 2).sum(0)
-    rss_r = tot - ((Qr.T @ Yw) ** 2).sum(0)
-    rss_f = tot - ((Qf.T @ Yw) ** 2).sum(0)
-    dfn = Qf.shape[1] - Qr.shape[1]
+    # Explicit residual norms avoid catastrophic cancellation from
+    # ||Y||^2 - ||Q'Y||^2 when the fitted model explains almost all variation.
+    Yres = Yw - Qr @ (Qr.T @ Yw) if Qr.size else Yw.copy()
+    added_ss = ((Qa.T @ Yres) ** 2).sum(0)
+    full_resid = Yres - Qa @ (Qa.T @ Yres)
+    rss_f = (full_resid ** 2).sum(0)
     denom = rss_f / dfd
     bad = denom <= 1e-300
-    f = np.maximum(rss_r - rss_f, 0.0) / dfn / np.where(bad, 1.0, denom)
-    return np.where(bad, np.nan, stats.f.sf(f, dfn, dfd))
+    f = added_ss / dfn / np.where(bad, 1.0, denom)
+    p = stats.f.sf(np.maximum(f, 0.0), dfn, dfd)
+    # A truly perfect full-model fit with positive added signal has p=0;
+    # an entirely degenerate response remains undefined.
+    return np.where(bad, np.where(added_ss > 1e-300, 0.0, np.nan), p)
+
+
+def _bootstrap_minp_calibration(
+    p_obs: np.ndarray,
+    p_null: np.ndarray,
+    *,
+    alpha: float = 0.05,
+) -> dict:
+    """Single-step plus-one min-P calibration with conservative degeneracy handling.
+
+    ``p_null`` contains only the fixed, design-estimable hypothesis family.
+    If any statistic in a null replicate is non-finite, that replicate's
+    minimum is set to zero.  This cannot create a false discovery; silently
+    dropping the failed test could make the null minimum too large.
+    """
+    p_obs = np.asarray(p_obs, float)
+    p_null = np.asarray(p_null, float)
+    if p_null.ndim != 2:
+        raise ValueError("p_null must be a hypothesis-by-bootstrap matrix")
+    if p_null.shape[0] != p_obs.size:
+        raise ValueError(
+            "p_obs and p_null must contain the same fixed hypothesis family")
+    B = int(p_null.shape[1])
+    if B < 1:
+        raise ValueError("bootstrap min-P calibration requires at least one replicate")
+    if not np.isfinite(p_obs).all():
+        raise ValueError("observed min-P family contains non-finite statistics")
+
+    finite_null = np.isfinite(p_null)
+    degenerate = ~finite_null.all(axis=0)
+    safe = np.where(finite_null, p_null, np.inf)
+    null_min = safe.min(axis=0)
+    null_min[degenerate] = 0.0
+    minp_obs = float(p_obs.min())
+    empirical_p = float(
+        (1 + int((null_min <= minp_obs).sum())) / (B + 1))
+    k = int(np.floor(alpha * (B + 1)))
+    threshold = float(np.sort(null_min)[k - 1]) if k >= 1 else None
+    rejected = bool(empirical_p <= alpha)
+    rejected_local = (
+        np.flatnonzero(p_obs < threshold).astype(int).tolist()
+        if threshold is not None else []
+    )
+    if rejected != bool(rejected_local):
+        raise RuntimeError(
+            "bootstrap global decision and single-step rejection set disagree")
+    return {
+        "alpha": float(alpha),
+        "method": "parametric_bootstrap_minp_plus_one",
+        "B": B,
+        "empirical_p": empirical_p,
+        "threshold": threshold,
+        "threshold_comparator": "strict_less_than",
+        "rejected": rejected,
+        "rejected_local": rejected_local,
+        "adjusted_p_local": (
+            (1 + (null_min[None, :] <= p_obs[:, None]).sum(axis=1))
+            / (B + 1)
+        ).astype(float),
+        "n_degenerate_replicates": int(degenerate.sum()),
+        "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
+    }
+
+
+OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
+
+
+@dataclass
+class OmniBFamilyScores:
+    """Observed/bootstrap omniB matrices for one predeclared group family.
+
+    Rows in ``edge_p`` retain the deterministic unique-edge order from
+    :func:`expand_pair_edges`; rows in ``group_p`` retain the master-table
+    order.  Column zero is observed and the remaining columns are shared null
+    responses.  Non-estimable edges remain present as all-NaN rows so family
+    membership never depends on the phenotype.
+    """
+
+    edge_p: np.ndarray
+    group_p: np.ndarray
+    edge_components_obs: np.ndarray
+    edge_estimable: np.ndarray
+    group_estimable: np.ndarray
+    W: np.ndarray
+    y: np.ndarray
+    covariance_components: dict[str, float]
+    group_partial: np.ndarray = field(default_factory=lambda: np.empty(0, bool))
+    gated_snp: dict = field(default_factory=dict, repr=False)
+    feature_cache: dict = field(default_factory=dict, repr=False)
+    covariate_block: np.ndarray | None = field(default=None, repr=False)
+    covariate_metadata: dict = field(default_factory=dict)
+
+
+def _omnib_edge_design_estimable(gsx, gsy, C: np.ndarray) -> bool:
+    """Predeclare whether at least one omniB component has target rank.
+
+    This check is genotype/covariate-only and happens before the phenotype is
+    whitened.  It separates structural non-estimability (which keeps an NaN
+    row) from a numerical failure after whitening (which aborts the scan).
+    """
+    from scipy.linalg import orth
+
+    bx, p1x, PX = gsx
+    by, p1y, PY = gsy
+    n = C.shape[0]
+    for ax, ay in ((bx, by), (p1x, p1y), (PX, PY)):
+        reduced = np.column_stack([C, ax, ay])
+        Qr = orth(reduced)
+        cross = (ax[:, :, None] * ay[:, None, :]).reshape(n, -1)
+        residual = cross - Qr @ (Qr.T @ cross) if Qr.size else cross
+        Qa = orth(residual)
+        if Qa.shape[1] and n - Qr.shape[1] - Qa.shape[1] > 0:
+            return True
+    return False
+
+
+def _score_omnib_family(
+    subdata: dict[str, SubgenomeData],
+    family: MasterGroupFamily,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int = 150,
+    n_pc: int = 3,
+    transform: str = "INT",
+    bootstrap_B: int = 2000,
+    bootstrap_seed: int = 2026,
+    n_jobs: int = 8,
+    grm_method: str = "compute_grm_maf",
+    maf_min: float = 0.01,
+    burden_maf: float = 0.01,
+    min_snp: int = 3,
+    covariates: dict = None,
+) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
+    """Score every unique edge once and derive every group from that matrix.
+
+    One all-subgenome null fit and one observed/bootstrap response matrix are
+    shared by all directions.  Feature blocks are cached by
+    ``(subgenome, gene_id)``.  The returned matrices preserve the complete
+    predeclared family, including structurally non-estimable edges.
+    """
+    sample_idx = np.asarray(sample_idx, int)
+    y_raw = np.asarray(y_raw, float)
+    if y_raw.ndim != 1 or y_raw.size != sample_idx.size:
+        raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
+    if not np.all(np.isfinite(y_raw)):
+        raise ValueError("phenotype contains non-finite values")
+    if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
+        raise ValueError("bootstrap_B must be an integer")
+    bootstrap_B = int(bootstrap_B)
+    if bootstrap_B < 0:
+        raise ValueError("bootstrap_B must be >= 0")
+    if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
+        raise ValueError("n_jobs must be an integer >= 1")
+    n_jobs = int(n_jobs)
+    missing_subgenomes = [s for s in family.subgenomes if s not in subdata]
+    if missing_subgenomes:
+        raise ValueError(
+            "master family references missing subgenomes: "
+            + ", ".join(missing_subgenomes))
+
+    expanded = expand_pair_edges(family)
+    if not expanded.edges:
+        raise ValueError("master homoeolog family contains no pair edges")
+
+    # Include every supplied subgenome kernel in the common null, even when a
+    # compatibility pair wrapper selects only one edge direction.
+    subs = list(subdata)
+    n_t = sample_idx.size
+    kernels = {
+        s: _build_grm(subdata[s], sample_idx, grm_method, maf_min)
+        for s in subs
+    }
+    C = None
+    cov_meta = {"policy": "none"}
+    if covariates:
+        C, cov_meta = build_covariate_block(
+            kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
+            extra=covariates.get("extra"))
+    C_design = np.ones((n_t, 1)) if C is None else np.asarray(C, float).reshape(n_t, -1)
+    y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
+    W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+    Cw = W @ C_design
+
+    rng = np.random.default_rng(bootstrap_seed)
+    gated: dict[tuple[str, str], np.ndarray] = {}
+    feats: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    def _gated_snps(sub: str, gene: str) -> np.ndarray | None:
+        key = (sub, gene)
+        if key in gated:
+            return gated[key]
+        if gene not in subdata[sub].gene_snp:
+            return None
+        idx = np.asarray(subdata[sub].gene_snp[gene], int)
+        mu = np.nanmean(subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
+        gated[key] = idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
+        return gated[key]
+
+    def _feature(sub: str, gene: str, idx: np.ndarray):
+        key = (sub, gene)
+        if key not in feats:
+            Xg = subdata[sub].X[np.ix_(sample_idx, idx)]
+            local_idx = np.arange(idx.size)
+            burden = block_burden_capped(
+                Xg, local_idx, cap, rng, minor=True).reshape(-1, 1)
+            pcs = gene_pc_scores(Xg, local_idx, cap, rng, n_pc)
+            feats[key] = burden, pcs[:, :1], pcs
+        return feats[key]
+
+    edge_estimable = np.zeros(len(expanded.edges), bool)
+    for ei, edge in enumerate(expanded.edges):
+        ix = _gated_snps(edge.sub_x, edge.gene_x)
+        iy = _gated_snps(edge.sub_y, edge.gene_y)
+        if ix is None or iy is None or ix.size < min_snp or iy.size < min_snp:
+            continue
+        fx = _feature(edge.sub_x, edge.gene_x, ix)
+        fy = _feature(edge.sub_y, edge.gene_y, iy)
+        edge_estimable[ei] = _omnib_edge_design_estimable(fx, fy, C_design)
+
+    ncol = bootstrap_B + 1
+    Yall = np.empty((n_t, ncol), float)
+    Yall[:, 0] = y
+    if bootstrap_B:
+        ystars, _W2, _cv2 = null_replicates(
+            kernels, y, C=C, B=bootstrap_B, method="bootstrap",
+            seed=bootstrap_seed, null_fit=(W, V, beta, cv))
+        Yall[:, 1:] = np.column_stack(
+            [np.asarray(value, float) for value in ystars])
+    Yw = W @ Yall
+
+    from joblib import Parallel, delayed
+
+    edge_p = np.full((len(expanded.edges), ncol), np.nan)
+    edge_components_obs = np.full(
+        (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan)
+    valid_indices = np.flatnonzero(edge_estimable)
+
+    def _block(bounds):
+        lo, hi = bounds
+        indices = valid_indices[lo:hi]
+        out = np.full((indices.size, ncol), np.nan)
+        observed = np.full((indices.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
+        for local, edge_index in enumerate(indices):
+            edge = expanded.edges[int(edge_index)]
+            components = _omnib_components_over_Y(
+                W, Yw, Cw,
+                feats[(edge.sub_x, edge.gene_x)],
+                feats[(edge.sub_y, edge.gene_y)])
+            out[local] = np.asarray(
+                [acat(components[:, col]) for col in range(ncol)], float)
+            observed[local] = components[:, 0]
+        return indices, out, observed
+
+    if valid_indices.size:
+        step = max(1, valid_indices.size // (n_jobs * 8))
+        blocks = [
+            (lo, min(lo + step, valid_indices.size))
+            for lo in range(0, valid_indices.size, step)
+        ]
+        results = Parallel(n_jobs=n_jobs, backend="threading")(
+            delayed(_block)(block) for block in blocks)
+        for indices, values, components in results:
+            edge_p[indices] = values
+            edge_components_obs[indices] = components
+
+    failed_observed = edge_estimable & ~np.isfinite(edge_p[:, 0])
+    if failed_observed.any():
+        failed_ids = [
+            expanded.edges[i].edge_id
+            for i in np.flatnonzero(failed_observed)[:5]
+        ]
+        raise RuntimeError(
+            "design-valid edge produced a post-whitening non-finite observed "
+            f"omniB score: {', '.join(failed_ids)}")
+
+    group_p = np.full((len(family.group_ids), ncol), np.nan)
+    group_partial = np.zeros(len(family.group_ids), bool)
+    for gi, edge_indices in enumerate(expanded.group_edge_indices):
+        idx = np.asarray(edge_indices, int)
+        valid_count = int(edge_estimable[idx].sum())
+        group_partial[gi] = 0 < valid_count < idx.size
+        if idx.size == 1:
+            # Required bit-exact two-copy reduction; a trigonometric ACAT
+            # round-trip need not reproduce the input's final bits.
+            group_p[gi] = edge_p[idx[0]]
+        else:
+            for col in range(ncol):
+                group_p[gi, col] = acat(edge_p[idx, col])
+    group_estimable = np.isfinite(group_p[:, 0])
+
+    scores = OmniBFamilyScores(
+        edge_p=edge_p,
+        group_p=group_p,
+        edge_components_obs=edge_components_obs,
+        edge_estimable=edge_estimable,
+        group_estimable=group_estimable,
+        W=W,
+        y=y,
+        covariance_components={str(k): float(v) for k, v in cv.items()},
+        group_partial=group_partial,
+        gated_snp=gated,
+        feature_cache=feats,
+        covariate_block=C,
+        covariate_metadata=cov_meta,
+    )
+    return scores, expanded
+
+
+def _omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
+    """Return the three omniB component p-values (component x phenotype).
+
+    Keeping this matrix available is essential for interpretation: an omniB
+    discovery is evidence from the *combined* test and must not automatically
+    be described as a burden-product interaction.  The smallest component is
+    descriptive only; inference remains on the predeclared omniB p-value.
+    """
+    bx, p1x, PX = gsx
+    by, p1y, PY = gsy
+    comps = []
+    for ax, ay in ((bx, by), (p1x, p1y), (PX, PY)):
+        Xred = np.column_stack([Cw, Wh @ ax, Wh @ ay])
+        cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
+        comps.append(_batch_nested_f(Yw, Xred, Wh @ cross))
+    return np.vstack(comps)
 
 
 def _omnib_pair_over_Y(Wh, Yw, Cw, gsx, gsy):
@@ -1527,15 +1910,61 @@ def _omnib_pair_over_Y(Wh, Yw, Cw, gsx, gsy):
     (genotype-only). The reduced model of each component is its two constituent main effects plus the
     fixed-effect block ``Cw`` (whitened), so every component is tested CONDITIONAL on its main
     effects, and all three are encoding-invariant."""
-    bx, p1x, PX = gsx
-    by, p1y, PY = gsy
-    comps = []
-    for ax, ay in ((bx, by), (p1x, p1y), (PX, PY)):
-        Xred = np.column_stack([Cw, Wh @ ax, Wh @ ay])
-        cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
-        comps.append(_batch_nested_f(Yw, Xred, Wh @ cross))
-    P = np.vstack(comps)                                   # 3 x n_pheno
+    P = _omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy)
     return np.array([acat(P[:, j]) for j in range(P.shape[1])])
+
+
+def _omnib_component_record(pvals) -> dict:
+    """JSON-safe descriptive component record for one observed omniB unit."""
+    p = np.asarray(pvals, float)
+    finite = np.isfinite(p)
+    driver = None
+    driver_p = None
+    if finite.any():
+        idx = int(np.nanargmin(np.where(finite, p, np.nan)))
+        driver = OMNIB_COMPONENT_NAMES[idx]
+        driver_p = float(p[idx])
+    return {
+        "component_p": {
+            name: (float(value) if np.isfinite(value) else None)
+            for name, value in zip(OMNIB_COMPONENT_NAMES, p, strict=True)
+        },
+        "smallest_component": driver,
+        "smallest_component_p": driver_p,
+    }
+
+
+def _omnib_component_summary(component_p: np.ndarray) -> dict:
+    """Compact all-units component audit (the full values belong in the ranking TSV)."""
+    P = np.asarray(component_p, float)
+    counts = {name: 0 for name in OMNIB_COMPONENT_NAMES}
+    for row in P:
+        finite = np.isfinite(row)
+        if finite.any():
+            idx = int(np.nanargmin(np.where(finite, row, np.nan)))
+            counts[OMNIB_COMPONENT_NAMES[idx]] += 1
+    return {
+        "names": list(OMNIB_COMPONENT_NAMES),
+        "smallest_component_counts": counts,
+        "n_units": int(P.shape[0]),
+        "n_component_estimable": {
+            name: int(np.isfinite(P[:, i]).sum())
+            for i, name in enumerate(OMNIB_COMPONENT_NAMES)
+        },
+        "interpretation": (
+            "The smallest component is descriptive, not a separately calibrated discovery. "
+            "An omniB-significant unit is an omnibus interaction; call it a burden-product "
+            "interaction only when the minor_burden component is itself the prespecified target "
+            "and is supported at its declared threshold."
+        ),
+    }
+
+
+OmniBFamilyScores = _family_score.OmniBFamilyScores  # noqa: F811
+_score_omnib_family = _family_score.score_omnib_family
+_omnib_components_over_Y = _family_score.omnib_components_over_Y
+_bootstrap_minp_calibration = _family_score.bootstrap_minp_calibration
+run_group_scan_omnib = _family_score.run_group_scan_omnib
 
 
 def run_pair_scan_omnib(
@@ -1558,6 +1987,10 @@ def run_pair_scan_omnib(
     covariates: dict = None,
     tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
     inferential: bool = True,           # False => sensitivity run, emits no rejection set
+    full_dump_path: str = None,         # full omniB ranking + all three component p-values
+    burden_dump_path: str = None,       # per-sample minor burdens for top-ranked pairs
+    top_k_burden: int = 5,
+    primary_multiplicity: str = "bonferroni",
 ) -> InteractResult:
     """Encoding-invariant primary interaction scan (omniB) with kinship-preserving bootstrap.
 
@@ -1568,98 +2001,39 @@ def run_pair_scan_omnib(
     phenotype (that is the permutation flaw). Experiment-wide FWER is the empirical p of the observed
     minimum omniB against the bootstrap min-p distribution; the aggregate tail-excess compares the
     observed count of small omniB p-values to its bootstrap null at each threshold."""
-    rng = np.random.default_rng(bootstrap_seed)
     subs = list(subdata.keys())
     sx, sy = pair_subs
     n_t = sample_idx.size
-    kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
-    C = None
-    cov_meta = dict(policy="none")
-    if covariates:
-        C, cov_meta = build_covariate_block(kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
-                                            extra=covariates.get("extra"))
-
-    y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
-    # whiten once (kinship is recoding- and phenotype-independent given the fitted null variance comps)
-    W, _V, _beta, cv = null_lmm_fit(kernels, y, C, seed=42)
-    Cw = (W @ (np.ones(n_t) if C is None else C)).reshape(n_t, -1)
-
-    # gene -> in-gene SNPs passing the burden MAF gate (computed IN the analysis cohort, so the
-    # scored SNP set matches the paper's omniB universe). A gene is testable only with >= min_snp
-    # such SNPs. block_burden_capped / gene_pc_scores index only these columns of the FULL matrix
-    # (cheap); restrict to the phenotyped rows AFTER (avoid copying the whole genome-wide matrix).
-    def _gene_snp_gated(sub, gid):
-        idx = np.asarray(subdata[sub].gene_snp[gid], int)
-        mu = np.nanmean(subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
-        return idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
-
-    def _feat(sub, gidx):
-        # slice to the analysis rows AND the gene's columns first (small), so the burden/PC
-        # standardization is over the phenotyped cohort -- matching the paper's omniB exactly.
-        Xg = subdata[sub].X[np.ix_(sample_idx, gidx)]
-        loc = np.arange(gidx.size)
-        b = block_burden_capped(Xg, loc, cap, rng, minor=True).reshape(-1, 1)
-        P = gene_pc_scores(Xg, loc, cap, rng, n_pc)
-        return b, P[:, :1], P
-
-    gated = {}
-    kept, feats = [], {}
-    for p in pairs:
-        gx, gy = p
-        if gx not in subdata[sx].gene_snp or gy not in subdata[sy].gene_snp:
-            continue
-        for sub, g in ((sx, gx), (sy, gy)):
-            if (sub, g) not in gated:
-                gated[(sub, g)] = _gene_snp_gated(sub, g)
-        if gated[(sx, gx)].size < min_snp or gated[(sy, gy)].size < min_snp:
-            continue
-        # key features by (subgenome, gene) -- a gene id can occur in BOTH subgenomes (e.g. a family
-        # cross with shared marker names), and keying by gene id alone would reuse one copy's features
-        # for the other and turn the interaction into a self-product.
-        if (sx, gx) not in feats:
-            feats[(sx, gx)] = _feat(sx, gated[(sx, gx)])
-        if (sy, gy) not in feats:
-            feats[(sy, gy)] = _feat(sy, gated[(sy, gy)])
-        kept.append((gx, gy))
+    family = MasterGroupFamily(
+        subgenomes=(sx, sy),
+        group_ids=tuple(f"pair_{i}" for i in range(len(pairs))),
+        genes=tuple(tuple(pair) for pair in pairs),
+    )
+    scores, expanded = _score_omnib_family(
+        subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
+        transform=transform, bootstrap_B=bootstrap_B,
+        bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+        grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
+        min_snp=min_snp, covariates=covariates)
+    selected = np.flatnonzero(scores.edge_estimable)
+    kept = [
+        (expanded.edges[i].gene_x, expanded.edges[i].gene_y)
+        for i in selected
+    ]
     G = len(kept)
     if G < 1:
         raise ValueError(
             "no homoeolog pairs retained: each copy must be present with "
             f">= {min_snp} SNPs passing burden MAF >= {burden_maf}")
-
-    # observed + bootstrap null phenotypes as columns, whitened by the SAME fitted-null W. The
-    # bootstrap draws y* = C.beta_hat + V_hat^{1/2} z from that same fitted null (kinship exact); they
-    # are already on the analyzed scale, so they are NOT re-transformed -- re-applying rank-INT would
-    # distort the covariance the whitener assumes. null_replicates re-fits the null with the identical
-    # seed=42, so its V_hat matches W.
-    ncol = 1 + max(int(bootstrap_B), 0)
-    Yall = np.empty((n_t, ncol))
-    Yall[:, 0] = y
-    if bootstrap_B and bootstrap_B > 0:
-        ystars, _W2, _cv2 = null_replicates(kernels, y, C=C, B=int(bootstrap_B),
-                                            method="bootstrap", seed=int(bootstrap_seed))
-        Yall[:, 1:] = np.column_stack([np.asarray(v, float) for v in ystars])
-    Yw = W @ Yall
-
-    from joblib import Parallel, delayed
-
-    # Threading backend: the per-pair work is numpy linear algebra (orth/matmul) that releases the
-    # GIL, so threads parallelize without pickling the shared whitener/phenotype/feature arrays each
-    # dispatch (the loky/multiprocessing pickling of W, Yw and every gene feature was the bottleneck).
-    def _block(lo_hi):
-        lo, hi = lo_hi
-        out = np.empty((hi - lo, ncol))
-        for j, g in enumerate(range(lo, hi)):
-            gx, gy = kept[g]
-            out[j] = _omnib_pair_over_Y(W, Yw, Cw, feats[(sx, gx)], feats[(sy, gy)])
-        return lo, out
-
-    step = max(1, G // (max(n_jobs, 1) * 8))
-    blocks = [(i, min(i + step, G)) for i in range(0, G, step)]
-    res = Parallel(n_jobs=n_jobs, backend="threading")(delayed(_block)(b) for b in blocks)
-    P = np.empty((G, ncol))
-    for lo, arr in res:
-        P[lo:lo + arr.shape[0]] = arr
+    P = scores.edge_p[selected]
+    component_obs = scores.edge_components_obs[selected]
+    W = scores.W
+    y = scores.y
+    cv = scores.covariance_components
+    C = scores.covariate_block
+    cov_meta = scores.covariate_metadata
+    feats = scores.feature_cache
+    gated = scores.gated_snp
 
     p_obs = P[:, 0]
     finite = np.isfinite(p_obs)
@@ -1668,25 +2042,165 @@ def run_pair_scan_omnib(
     minp_obs = float(np.nanmin(p_obs))
     bonf = 0.05 / G
     order = [int(i) for i in np.argsort(np.where(finite, p_obs, np.inf)) if finite[i]]
-    sig = ([dict(pair=kept[i], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
-           if inferential else None)
-    top = [dict(pair=kept[i], p=float(p_obs[i])) for i in order[:5]]
+    primary_multiplicity = str(primary_multiplicity).lower()
+    if primary_multiplicity not in {"bonferroni", "bootstrap_minp"}:
+        raise ValueError(
+            "pairwise omniB primary_multiplicity must be bonferroni or bootstrap_minp")
+    minp_adjusted = np.full(G, np.nan)
+
+    def _hit(i):
+        return (dict(
+            pair=kept[i], p=float(p_obs[i]),
+            p_adjusted_bonferroni=float(min(p_obs[i] * G, 1.0)),
+            p_adjusted_bootstrap_minp=(
+                float(minp_adjusted[i]) if np.isfinite(minp_adjusted[i]) else None),
+        ) | _omnib_component_record(component_obs[i]))
+
+    analytic_indices = [i for i in order if p_obs[i] < bonf]
     p_acat_obs = acat(p_obs)
 
     minp_boot_emp = minp_boot_threshold = None
+    minp_boot_rejected = None
+    bootstrap_fwer = None
     tail_excess = None
+    formal_indices = None
     if bootstrap_B and bootstrap_B > 0:
-        null_min = np.nanmin(P[:, 1:], axis=0)
-        minp_boot_emp = float((1 + int((null_min <= minp_obs).sum())) / (null_min.size + 1))
-        minp_boot_threshold = float(np.quantile(null_min, 0.05))
+        family_indices = np.flatnonzero(finite)
+        cal = _bootstrap_minp_calibration(
+            p_obs[finite], P[finite, 1:], alpha=0.05)
+        minp_adjusted[finite] = cal["adjusted_p_local"]
+        minp_boot_emp = cal["empirical_p"]
+        minp_boot_threshold = cal["threshold"]
+        if primary_multiplicity == "bootstrap_minp":
+            minp_boot_rejected = cal["rejected"] if inferential else None
+            formal_indices = (
+                [int(family_indices[i]) for i in cal["rejected_local"]]
+                if inferential else None)
+        bootstrap_fwer = {
+            key: value for key, value in cal.items()
+            if key not in {"rejected_local", "adjusted_p_local"}
+        } | {
+            "inferential": bool(
+                inferential and primary_multiplicity == "bootstrap_minp"),
+            "rejected": minp_boot_rejected,
+            "n_rejected": (
+                len(formal_indices) if formal_indices is not None else None),
+            "sig": (
+                [_hit(i) for i in formal_indices]
+                if formal_indices is not None else None),
+            "note": (
+                "This bootstrap min-P object is the sole calibrated discovery "
+                "layer. Bonferroni fields are a descriptive analytic screen."
+                if primary_multiplicity == "bootstrap_minp" else
+                "Bootstrap min-P is diagnostic because Bonferroni was the "
+                "predeclared discovery layer."
+            ),
+        }
         tail_excess = {}
-        for t in tail_thresholds:
-            obs_ct = int((p_obs[finite] < t).sum())
-            null_ct = (P[:, 1:] < t).sum(0).astype(float)
-            tail_excess[f"n_below_{t:g}"] = dict(
-                observed=obs_ct, null_mean=float(null_ct.mean()),
-                null_q95=float(np.quantile(null_ct, 0.95)),
-                empirical_p=float((1 + int((null_ct >= obs_ct).sum())) / (null_ct.size + 1)))
+        null_family = P[finite, 1:]
+        for threshold in tail_thresholds:
+            obs_ct = int((p_obs[finite] < threshold).sum())
+            null_ct = (null_family < threshold).sum(0).astype(float)
+            degenerate = ~np.isfinite(null_family).all(axis=0)
+            null_ct[degenerate] = float(finite.sum())
+            tail_excess[f"n_below_{threshold:g}"] = {
+                "observed": obs_ct,
+                "null_mean": float(null_ct.mean()),
+                "null_q95": float(np.quantile(null_ct, 0.95)),
+                "empirical_p": float(
+                    (1 + int((null_ct >= obs_ct).sum()))
+                    / (null_ct.size + 1)),
+                "role": "descriptive_tail_diagnostic_not_a_discovery_test",
+            }
+    elif primary_multiplicity == "bootstrap_minp" and inferential:
+        raise ValueError(
+            "formal pairwise omniB bootstrap_minp requires bootstrap_B >= 1")
+
+    if primary_multiplicity == "bonferroni" and inferential:
+        formal_indices = analytic_indices
+    analytic_sig = [_hit(i) for i in analytic_indices]
+    sig = ([_hit(i) for i in formal_indices]
+           if formal_indices is not None else None)
+    top = [_hit(i) for i in order[:5]]
+
+    if full_dump_path or burden_dump_path:
+        BX = np.column_stack([feats[(sx, gx)][0][:, 0] for gx, _ in kept])
+        BY = np.column_stack([feats[(sy, gy)][0][:, 0] for _, gy in kept])
+        pmx, dmx = marginal_pvals(W, y, BX, C=C, return_diag=True)
+        pmy, dmy = marginal_pvals(W, y, BY, C=C, return_diag=True)
+        if dmx["failures"] or dmy["failures"]:
+            raise ValueError(
+                "single-minor-burden marginal test failed on a design-valid gene; "
+                "the omniB interaction-vs-marginal contrast would silently read NA")
+        coords = [(_gene_coord(subdata[sx], gated[(sx, gx)]),
+                   _gene_coord(subdata[sy], gated[(sy, gy)]))
+                  for gx, gy in kept]
+
+    if full_dump_path:
+        nx = np.asarray([gated[(sx, gx)].size for gx, _ in kept], int)
+        ny = np.asarray([gated[(sy, gy)].size for _, gy in kept], int)
+        sort_key = np.where(finite, p_obs, np.inf)
+        _, rank_of, tie_of = _rank_with_ties(sort_key, kept)
+        nl = _neglog10(p_obs)
+        nlmx, nlmy = _neglog10(pmx), _neglog10(pmy)
+        cbin = _decile_bin(nx + ny)
+        formal_set = set(formal_indices or [])
+        analytic_set = set(analytic_indices)
+        rows = []
+        for i in np.argsort(sort_key, kind="stable"):
+            record = _omnib_component_record(component_obs[i])
+            cp = record["component_p"]
+            rows.append([
+                int(rank_of[i]), kept[i][0], kept[i][1], sx, sy,
+                _tsv_p(p_obs[i]), _tsv_p(minp_adjusted[i]), _tsv_p(nl[i]),
+                _tsv_p(cp["minor_burden"]), _tsv_p(cp["pc1"]),
+                _tsv_p(cp["kernel_hadamard"]),
+                record["smallest_component"] or "NA",
+                _tsv_p(record["smallest_component_p"]),
+                int(nx[i]), int(ny[i]), int(nx[i] + ny[i]), int(cbin[i]),
+                int(tie_of[i]), int(not finite[i]),
+                (int(i in formal_set) if inferential else "NA"),
+                int(i in analytic_set),
+                coords[i][0][0], coords[i][0][1],
+                coords[i][1][0], coords[i][1][1],
+                _tsv_p(pmx[i]), _tsv_p(pmy[i]),
+                _tsv_p(nlmx[i]), _tsv_p(nlmy[i]),
+            ])
+        _write_ranking_tsv(
+            full_dump_path,
+            ["rank", f"gene_{sx}", f"gene_{sy}", "sub_x", "sub_y",
+             "p_interaction", "p_adjusted_bootstrap_minp", "neglog10p",
+             "p_minor_burden", "p_pc1",
+             "p_kernel_hadamard", "smallest_component", "smallest_component_p",
+             f"n_snp_{sx}", f"n_snp_{sy}", "n_snp_pair",
+             "callable_snp_decile", "tie_group", "p_unestimable", "primary_sig",
+             "analytic_screen_sig",
+             "chrom_x", "pos_x", "chrom_y", "pos_y",
+             "p_marginal_x", "p_marginal_y",
+             "neglog10p_marginal_x", "neglog10p_marginal_y"],
+            rows)
+
+    if burden_dump_path:
+        if C is None:
+            resid_y = y - float(np.mean(y))
+        else:
+            b_c, *_ = np.linalg.lstsq(C, y, rcond=None)
+            resid_y = y - C @ b_c
+        rows = []
+        for kr, i in enumerate(order[:max(int(top_k_burden), 1)]):
+            gx, gy = kept[i]
+            for sample_row in range(n_t):
+                rows.append([
+                    kr, gx, gy, sx, sy, sample_row,
+                    repr(float(BX[sample_row, i])),
+                    repr(float(BY[sample_row, i])),
+                    repr(float(y[sample_row])), repr(float(resid_y[sample_row])),
+                ])
+        _write_ranking_tsv(
+            burden_dump_path,
+            ["pair_rank", "gene_x", "gene_y", "sub_x", "sub_y", "sample_row",
+             "minor_burden_x", "minor_burden_y", "phenotype", "resid"],
+            rows)
 
     return InteractResult(
         trait="", transform=transform, n=int(n_t), G=int(G),
@@ -1700,7 +2214,11 @@ def run_pair_scan_omnib(
         statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
-        tail_excess=tail_excess)
+        minp_boot_rejected=minp_boot_rejected,
+        tail_excess=tail_excess,
+        component_diagnostics=_omnib_component_summary(component_obs),
+        analytic_screen_n=len(analytic_sig), analytic_screen_sig=analytic_sig,
+        model_diagnostics={"bootstrap_fwer": bootstrap_fwer})
 
 
 def run_clique_scan_omnib(
@@ -1722,6 +2240,7 @@ def run_clique_scan_omnib(
     covariates: dict = None,
     tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
     inferential: bool = True,           # False => sensitivity run, emits no rejection set
+    full_dump_path: str = None,         # full group ranking + pair/component decomposition
 ) -> InteractResult:
     """n-subgenome homoeolog-clique omniB scan (triad = n=3 special case; wheat/JA/8x).
 
@@ -1729,78 +2248,35 @@ def run_clique_scan_omnib(
     pair is tested with the encoding-invariant primary and the group omnibus inherits invariance.
     Same kinship-preserving bootstrap as :func:`run_pair_scan_omnib`: whiten once, rescan every group
     for each null phenotype, and calibrate the experiment-wide FWER and tail-excess on group p."""
-    rng = np.random.default_rng(bootstrap_seed)
     subs = list(subdata.keys())
     n_t = sample_idx.size
-    kernels = {s: _build_grm(subdata[s], sample_idx, grm_method, maf_min) for s in subs}
-    C = None
-    cov_meta = dict(policy="none")
-    if covariates:
-        C, cov_meta = build_covariate_block(kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
-                                            extra=covariates.get("extra"))
-    y = rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
-    W, _V, _beta, cv = null_lmm_fit(kernels, y, C, seed=42)
-    Cw = (W @ (np.ones(n_t) if C is None else C)).reshape(n_t, -1)
-
-    def _gene_snp_gated(sub, gid):
-        idx = np.asarray(subdata[sub].gene_snp[gid], int)
-        mu = np.nanmean(subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
-        return idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
-
-    def _feat(sub, gidx):
-        Xg = subdata[sub].X[np.ix_(sample_idx, gidx)]
-        loc = np.arange(gidx.size)
-        b = block_burden_capped(Xg, loc, cap, rng, minor=True).reshape(-1, 1)
-        P = gene_pc_scores(Xg, loc, cap, rng, n_pc)
-        return b, P[:, :1], P
-
     pair_defs = list(itertools.combinations(subs, 2))
-    kept, feats = [], {}
-    for group in groups:
-        gmap = dict(zip(subs, group, strict=True))
-        if not all(gmap[s] in subdata[s].gene_snp for s in subs):
-            continue
-        gated = {s: _gene_snp_gated(s, gmap[s]) for s in subs}
-        if any(gated[s].size < min_snp for s in subs):
-            continue
-        for s in subs:
-            key = (s, gmap[s])
-            if key not in feats:
-                feats[key] = _feat(s, gated[s])
-        kept.append(tuple(group))
+    family = MasterGroupFamily(
+        subgenomes=tuple(subs),
+        group_ids=tuple(f"group_{i}" for i in range(len(groups))),
+        genes=tuple(tuple(group) for group in groups),
+    )
+    scores, expanded = _score_omnib_family(
+        subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
+        transform=transform, bootstrap_B=bootstrap_B,
+        bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+        grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
+        min_snp=min_snp, covariates=covariates)
+    selected = np.flatnonzero(scores.group_estimable & ~scores.group_partial)
+    kept = [family.genes[i] for i in selected]
     G = len(kept)
     if G < 1:
         raise ValueError("no homoeolog groups retained (need all copies present with >= min_snp SNPs)")
-
-    ncol = 1 + max(int(bootstrap_B), 0)
-    Yall = np.empty((n_t, ncol))
-    Yall[:, 0] = y
-    if bootstrap_B and bootstrap_B > 0:
-        ystars, _W2, _cv2 = null_replicates(kernels, y, C=C, B=int(bootstrap_B),
-                                            method="bootstrap", seed=int(bootstrap_seed))
-        Yall[:, 1:] = np.column_stack([np.asarray(v, float) for v in ystars])
-    Yw = W @ Yall
-
-    from joblib import Parallel, delayed
-
-    def _block(lo_hi):
-        lo, hi = lo_hi
-        out = np.empty((hi - lo, ncol))
-        for j, gi in enumerate(range(lo, hi)):
-            group = kept[gi]
-            gmap = dict(zip(subs, group, strict=True))
-            pw = [_omnib_pair_over_Y(W, Yw, Cw, feats[(sa, gmap[sa])], feats[(sb, gmap[sb])])
-                  for sa, sb in pair_defs]
-            M = np.vstack(pw)                              # C(n,2) x ncol
-            out[j] = np.array([acat(M[:, c]) for c in range(ncol)])
-        return lo, out
-
-    step = max(1, G // (max(n_jobs, 1) * 8))
-    blocks = [(i, min(i + step, G)) for i in range(0, G, step)]
-    res = Parallel(n_jobs=n_jobs, backend="threading")(delayed(_block)(b) for b in blocks)
-    P = np.empty((G, ncol))
-    for lo, arr in res:
-        P[lo:lo + arr.shape[0]] = arr
+    P = scores.group_p[selected]
+    pair_obs = np.empty((G, len(pair_defs)))
+    component_obs = np.empty((G, len(pair_defs), len(OMNIB_COMPONENT_NAMES)))
+    for local, family_index in enumerate(selected):
+        edge_idx = np.asarray(expanded.group_edge_indices[family_index], int)
+        pair_obs[local] = scores.edge_p[edge_idx, 0]
+        component_obs[local] = scores.edge_components_obs[edge_idx]
+    cv = scores.covariance_components
+    cov_meta = scores.covariate_metadata
+    gated_by_gene = scores.gated_snp
 
     p_obs = P[:, 0]
     finite = np.isfinite(p_obs)
@@ -1809,9 +2285,94 @@ def run_clique_scan_omnib(
     minp_obs = float(np.nanmin(p_obs))
     bonf = 0.05 / G
     order = [int(i) for i in np.argsort(np.where(finite, p_obs, np.inf)) if finite[i]]
-    sig = ([dict(pair=kept[i], p=float(p_obs[i])) for i in order if p_obs[i] < bonf]
+    pair_labels = [f"{sa}{sb}" for sa, sb in pair_defs]
+
+    def _hit(i):
+        pairwise = {}
+        for pi, label in enumerate(pair_labels):
+            pairwise[label] = (
+                {"p_omnib": float(pair_obs[i, pi])}
+                | _omnib_component_record(component_obs[i, pi]))
+        flat = component_obs[i].reshape(-1)
+        finite_flat = np.isfinite(flat)
+        smallest_pair = smallest_component = None
+        smallest_p = None
+        if finite_flat.any():
+            idx = int(np.nanargmin(np.where(finite_flat, flat, np.nan)))
+            pi, ci = np.unravel_index(idx, component_obs[i].shape)
+            smallest_pair = pair_labels[pi]
+            smallest_component = OMNIB_COMPONENT_NAMES[ci]
+            smallest_p = float(flat[idx])
+        return {
+            "pair": kept[i],
+            "p": float(p_obs[i]),
+            "p_adjusted_bonferroni": float(min(p_obs[i] * G, 1.0)),
+            "pairwise": pairwise,
+            "smallest_pair": smallest_pair,
+            "smallest_component": smallest_component,
+            "smallest_component_p": smallest_p,
+        }
+
+    sig = ([_hit(i) for i in order if p_obs[i] < bonf]
            if inferential else None)
-    top = [dict(pair=kept[i], p=float(p_obs[i])) for i in order[:5]]
+    top = [_hit(i) for i in order[:5]]
+
+    if full_dump_path:
+        nsnp = {
+            s: np.asarray([
+                gated_by_gene[(s, dict(zip(subs, group, strict=True))[s])].size
+                for group in kept
+            ], int)
+            for s in subs
+        }
+        coords = {
+            s: [
+                _gene_coord(
+                    subdata[s],
+                    gated_by_gene[(s, dict(zip(subs, group, strict=True))[s])])
+                for group in kept
+            ]
+            for s in subs
+        }
+        sort_key = np.where(finite, p_obs, np.inf)
+        _, rank_of, tie_of = _rank_with_ties(sort_key, kept)
+        rows = []
+        for i in np.argsort(sort_key, kind="stable"):
+            h = _hit(i)
+            row = [
+                int(rank_of[i]), *kept[i], _tsv_p(p_obs[i]),
+                _tsv_p(_neglog10(np.array([p_obs[i]]))[0]),
+                h["smallest_pair"] or "NA",
+                h["smallest_component"] or "NA",
+                _tsv_p(h["smallest_component_p"]),
+                *[int(nsnp[s][i]) for s in subs],
+                int(sum(nsnp[s][i] for s in subs)),
+                int(tie_of[i]), int(not finite[i]),
+                int(finite[i] and inferential and p_obs[i] < bonf)
+                if inferential else "NA",
+                *[value for s in subs for value in coords[s][i]],
+            ]
+            for label in pair_labels:
+                ph = h["pairwise"][label]
+                row.extend([
+                    _tsv_p(ph["p_omnib"]),
+                    _tsv_p(ph["component_p"]["minor_burden"]),
+                    _tsv_p(ph["component_p"]["pc1"]),
+                    _tsv_p(ph["component_p"]["kernel_hadamard"]),
+                ])
+            rows.append(row)
+        header = (
+            ["rank", *[f"gene_{s}" for s in subs], "p_interaction", "neglog10p",
+             "smallest_pair", "smallest_component", "smallest_component_p",
+             *[f"n_snp_{s}" for s in subs], "n_snp_group",
+             "tie_group", "p_unestimable", "primary_sig"]
+            + [value for s in subs for value in (f"chrom_{s}", f"pos_{s}")]
+            + [value
+               for label in pair_labels
+               for value in (f"p_omnib_{label}", f"p_minor_burden_{label}",
+                             f"p_pc1_{label}", f"p_kernel_hadamard_{label}")]
+        )
+        _write_ranking_tsv(full_dump_path, header, rows)
 
     minp_boot_emp = minp_boot_threshold = None
     tail_excess = None
@@ -1840,15 +2401,391 @@ def run_clique_scan_omnib(
         statistic="omniB", calibration_method=("bootstrap" if bootstrap_B else "none"),
         bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
         minp_boot_emp=minp_boot_emp, minp_boot_threshold=minp_boot_threshold,
-        tail_excess=tail_excess)
+        tail_excess=tail_excess,
+        component_diagnostics={
+            "pair_labels": pair_labels,
+            "per_pair": {
+                label: _omnib_component_summary(component_obs[:, pi, :])
+                for pi, label in enumerate(pair_labels)
+            },
+            "interpretation": (
+                "The group p-value is ACAT across pairwise omniB tests. Pair and component "
+                "decomposition is descriptive localization, not an additional rejection family."
+            ),
+        })
 
 
-OmniBFamilyScores = _family_score.OmniBFamilyScores
-_score_omnib_family = _family_score.score_omnib_family
-_omnib_components_over_Y = _family_score.omnib_components_over_Y
-run_pair_scan_omnib = _family_score.run_pair_scan_omnib  # noqa: F811
-run_clique_scan_omnib = _family_score.run_clique_scan_omnib  # noqa: F811
-run_group_scan_omnib = _family_score.run_group_scan_omnib  # noqa: F811
+def run_triad3_scan(
+    subdata: dict[str, SubgenomeData],
+    triads: list,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int = 150,
+    transform: str = "INT",
+    bootstrap_B: int = 2000,
+    bootstrap_seed: int = 2026,
+    n_jobs: int = 8,
+    grm_method: str = "compute_grm_maf",
+    maf_min: float = 0.01,
+    burden_maf: float = 0.01,
+    min_snp: int = 3,
+    covariates: dict = None,
+    tail_thresholds: tuple = (1e-2, 1e-3, 1e-4, 1e-5),
+    inferential: bool = True,
+    full_dump_path: str = None,
+) -> InteractResult:
+    """Experimental conditional three-way homoeolog-burden scan.
+
+    For exactly three subgenomes, fit the hierarchy-preserving model
+
+    ``y ~ C + A + B + D + A:B + A:D + B:D + A:B:D``
+
+    and test the final coefficient.  Burdens are minor-allele oriented before
+    centering/scaling, so the statistic is invariant to PLINK REF/ALT recoding.
+    The test is deliberately separate from ``omniB``: it asks whether a genuine
+    third-order term remains after every lower-order burden term has been
+    conditioned out.
+
+    Bonferroni is a descriptive analytic screen only.  For an inferential run,
+    the mandatory parametric-bootstrap min-P procedure is the sole formal
+    experiment-wide discovery layer.  This is an experimental statistic, not
+    a claim of a physical three-protein complex.
+    """
+    from joblib import Parallel, delayed
+
+    subs = list(subdata)
+    if len(subs) != 3:
+        raise ValueError(
+            f"triad3 requires exactly 3 subgenomes; got {len(subs)} ({subs})")
+    if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
+        raise ValueError("triad3 bootstrap_B must be an integer")
+    bootstrap_B = int(bootstrap_B)
+    if bootstrap_B < 0:
+        raise ValueError("triad3 bootstrap_B must be >= 0")
+    if inferential and bootstrap_B < TRIAD3_FORMAL_BOOTSTRAP_MIN_B:
+        raise ValueError(
+            "formal inferential triad3 requires bootstrap_B >= "
+            f"{TRIAD3_FORMAL_BOOTSTRAP_MIN_B}; use inferential=False for "
+            "B>=19 QA runs")
+    rng = np.random.default_rng(bootstrap_seed)
+    n_t = int(sample_idx.size)
+    kernels = {
+        s: _build_grm(subdata[s], sample_idx, grm_method, maf_min)
+        for s in subs
+    }
+    C = None
+    cov_meta = dict(policy="none")
+    if covariates:
+        C, cov_meta = build_covariate_block(
+            kernels, n_t, n_pcs=int(covariates.get("n_pcs", 0)),
+            extra=covariates.get("extra"))
+    y = rank_int(y_raw) if transform == "INT" else np.asarray(y_raw, float)
+    W, V, beta, cv = null_lmm_fit(kernels, y, C, seed=42)
+
+    def _gene_snp_gated(sub, gid):
+        idx = np.asarray(subdata[sub].gene_snp[gid], int)
+        mu = np.nanmean(
+            subdata[sub].X[np.ix_(sample_idx, idx)], axis=0) / 2.0
+        return idx[np.minimum(mu, 1.0 - mu) >= burden_maf]
+
+    cols = {s: [] for s in subs}
+    nsnp = {s: [] for s in subs}
+    gated_by_gene = {}
+    burden_by_gene = {}
+    kept = []
+    for triad in triads:
+        gmap = dict(zip(subs, triad, strict=True))
+        if not all(gmap[s] in subdata[s].gene_snp for s in subs):
+            continue
+        gated = {s: _gene_snp_gated(s, gmap[s]) for s in subs}
+        if any(gated[s].size < min_snp for s in subs):
+            continue
+        for s in subs:
+            key = (s, gmap[s])
+            if key not in burden_by_gene:
+                Xg = subdata[s].X[np.ix_(sample_idx, gated[s])]
+                burden_by_gene[key] = block_burden_capped(
+                    Xg, np.arange(gated[s].size), cap, rng, minor=True)
+            cols[s].append(burden_by_gene[key])
+            nsnp[s].append(int(gated[s].size))
+            gated_by_gene[key] = gated[s]
+        kept.append(tuple(triad))
+    G = len(kept)
+    if G < 1:
+        raise ValueError(
+            "no triad retained (need all three copies with >= min_snp "
+            "minor-allele-frequency-gated SNPs)")
+
+    burden = {s: scols_safe(np.column_stack(cols[s])) for s in subs}
+    BA, BB, BD = (burden[s] for s in subs)
+    design_mask, exclusions, design_diag = threeway_design_mask(
+        BA, BB, BD, C=C)
+    if not design_mask.any():
+        raise ValueError(
+            "no triad has an estimable A×B×D term after conditioning on all "
+            "main effects and pairwise interactions")
+
+    ncol = 1 + max(int(bootstrap_B), 0)
+    Yall = np.empty((n_t, ncol))
+    Yall[:, 0] = y
+    if bootstrap_B and bootstrap_B > 0:
+        ystars, _W2, _cv2 = null_replicates(
+            kernels, y, C=C, B=bootstrap_B, method="bootstrap",
+            seed=int(bootstrap_seed), null_fit=(W, V, beta, cv))
+        Yall[:, 1:] = np.column_stack(
+            [np.asarray(value, float) for value in ystars])
+    Yw = W @ Yall
+    Cw = (W @ (np.ones(n_t) if C is None else C)).reshape(n_t, -1)
+
+    def _block(lo_hi):
+        lo, hi = lo_hi
+        out = np.full((hi - lo, ncol), np.nan)
+        a, b, d = BA[:, lo:hi], BB[:, lo:hi], BD[:, lo:hi]
+        # Whiten whole blocks with BLAS matrix-matrix products.  Whitening
+        # seven vectors separately for every triad makes a genome-wide wheat
+        # scan orders of magnitude slower.
+        Aw, Bw, Dw = W @ a, W @ b, W @ d
+        ABw, ADw, BDw = W @ (a * b), W @ (a * d), W @ (b * d)
+        ABDw = W @ (a * b * d)
+        for j, gi in enumerate(range(lo, hi)):
+            if not design_mask[gi]:
+                continue
+            nuisance = np.column_stack([
+                Cw, Aw[:, j], Bw[:, j], Dw[:, j],
+                ABw[:, j], ADw[:, j], BDw[:, j],
+            ])
+            out[j] = _batch_nested_f(
+                Yw, nuisance, ABDw[:, j].reshape(-1, 1))
+        return lo, out
+
+    step = max(1, G // (max(n_jobs, 1) * 8))
+    blocks = [(i, min(i + step, G)) for i in range(0, G, step)]
+    block_results = Parallel(n_jobs=n_jobs, backend="threading")(
+        delayed(_block)(block) for block in blocks)
+    P = np.full((G, ncol), np.nan)
+    for lo, arr in block_results:
+        P[lo:lo + arr.shape[0]] = arr
+
+    late_fail = design_mask & ~np.isfinite(P[:, 0])
+    if late_fail.any():
+        raise ValueError(
+            f"{int(late_fail.sum())} raw-design-estimable triad3 tests lost "
+            "their statistic after whitening")
+    p_obs = P[:, 0]
+    finite = np.isfinite(p_obs)
+    minp_obs = float(np.nanmin(p_obs))
+    bonf = 0.05 / G
+    order = [
+        int(i) for i in np.argsort(np.where(finite, p_obs, np.inf))
+        if finite[i]
+    ]
+
+    residual_ratio = design_diag["target_residual_ratio"]
+    target_sd = design_diag["target_sd"]
+    information_max = design_diag["target_information_max_fraction"]
+    information_top10 = design_diag["target_information_top10_fraction"]
+    information_effective_n = design_diag["target_information_effective_n"]
+
+    minp_adjusted = np.full(G, np.nan)
+
+    def _hit(i):
+        return {
+            "triad": kept[i],
+            "p": float(p_obs[i]),
+            "p_adjusted_bonferroni": float(min(p_obs[i] * G, 1.0)),
+            "p_adjusted_bootstrap_minp": (
+                float(minp_adjusted[i])
+                if np.isfinite(minp_adjusted[i]) else None),
+            "target_residual_ratio": (
+                float(residual_ratio[i]) if np.isfinite(residual_ratio[i])
+                else None),
+            "target_sd": (
+                float(target_sd[i]) if np.isfinite(target_sd[i]) else None),
+            "target_information_max_fraction": (
+                float(information_max[i])
+                if np.isfinite(information_max[i]) else None),
+            "target_information_top10_fraction": (
+                float(information_top10[i])
+                if np.isfinite(information_top10[i]) else None),
+            "target_information_effective_n": (
+                float(information_effective_n[i])
+                if np.isfinite(information_effective_n[i]) else None),
+        }
+
+    analytic_indices = [i for i in order if p_obs[i] < bonf]
+    analytic_sig = [_hit(i) for i in analytic_indices]
+
+    minp_boot_emp = minp_boot_threshold = None
+    minp_boot_rejected = None
+    bootstrap_fwer = None
+    tail_excess = None
+    formal_indices = None
+    if bootstrap_B and bootstrap_B > 0:
+        family_indices = np.flatnonzero(finite)
+        cal = _bootstrap_minp_calibration(
+            p_obs[finite], P[finite, 1:], alpha=0.05)
+        minp_adjusted[finite] = cal["adjusted_p_local"]
+        minp_boot_emp = cal["empirical_p"]
+        minp_boot_threshold = cal["threshold"]
+        minp_boot_rejected = cal["rejected"] if inferential else None
+        formal_indices = (
+            [int(family_indices[i]) for i in cal["rejected_local"]]
+            if inferential else None)
+        bootstrap_fwer = {
+            key: value for key, value in cal.items()
+            if key not in {"rejected_local", "adjusted_p_local"}
+        } | {
+            "inferential": bool(inferential),
+            "rejected": minp_boot_rejected,
+            "n_rejected": (
+                len(formal_indices) if formal_indices is not None else None),
+            "sig": (
+                [_hit(i) for i in formal_indices]
+                if formal_indices is not None else None),
+            "note": (
+                "This bootstrap min-P object is the sole calibrated discovery "
+                "layer. Bonferroni fields are a descriptive analytic screen."),
+        }
+        tail_excess = {}
+        for threshold in tail_thresholds:
+            obs_ct = int((p_obs[finite] < threshold).sum())
+            null_family = P[finite, 1:]
+            null_ct = (null_family < threshold).sum(0).astype(float)
+            degenerate = ~np.isfinite(null_family).all(axis=0)
+            null_ct[degenerate] = float(finite.sum())
+            tail_excess[f"n_below_{threshold:g}"] = {
+                "observed": obs_ct,
+                "null_mean": float(null_ct.mean()),
+                "null_q95": float(np.quantile(null_ct, 0.95)),
+                "empirical_p": float(
+                    (1 + int((null_ct >= obs_ct).sum()))
+                    / (null_ct.size + 1)),
+                "role": "descriptive_tail_diagnostic_not_a_discovery_test",
+            }
+
+    sig = (
+        [_hit(i) for i in formal_indices]
+        if formal_indices is not None else None)
+    n_sig = len(sig) if sig is not None else None
+    top = [_hit(i) for i in order[:5]]
+
+    if full_dump_path:
+        ns = {s: np.asarray(nsnp[s], int) for s in subs}
+        coords = {
+            s: [
+                _gene_coord(
+                    subdata[s],
+                    gated_by_gene[
+                        (s, dict(zip(subs, triad, strict=True))[s])])
+                for triad in kept
+            ]
+            for s in subs
+        }
+        formal_set = set(formal_indices or [])
+        analytic_set = set(analytic_indices)
+        sort_key = np.where(finite, p_obs, np.inf)
+        _, rank_of, tie_of = _rank_with_ties(sort_key, kept)
+        rows = []
+        for i in np.argsort(sort_key, kind="stable"):
+            rows.append([
+                int(rank_of[i]), *kept[i], _tsv_p(p_obs[i]),
+                _tsv_p(_neglog10(np.array([p_obs[i]]))[0]),
+                _tsv_p(residual_ratio[i]), _tsv_p(target_sd[i]),
+                _tsv_p(information_max[i]),
+                _tsv_p(information_top10[i]),
+                _tsv_p(information_effective_n[i]),
+                *[int(ns[s][i]) for s in subs],
+                int(sum(ns[s][i] for s in subs)),
+                int(tie_of[i]), int(not finite[i]),
+                (int(i in formal_set) if inferential else "NA"),
+                int(i in analytic_set),
+                *[value for s in subs for value in coords[s][i]],
+            ])
+        header = (
+            ["rank", *[f"gene_{s}" for s in subs],
+             "p_threeway", "neglog10p", "target_residual_ratio",
+             "target_sd", "target_information_max_fraction",
+             "target_information_top10_fraction",
+             "target_information_effective_n",
+             *[f"n_snp_{s}" for s in subs],
+             "n_snp_triad", "tie_group", "p_unestimable",
+             "primary_sig", "analytic_screen_sig"]
+            + [value for s in subs
+               for value in (f"chrom_{s}", f"pos_{s}")]
+        )
+        _write_ranking_tsv(full_dump_path, header, rows)
+
+    main_terms = " + ".join(subs)
+    pair_terms = " + ".join(":".join(pair)
+                            for pair in itertools.combinations(subs, 2))
+    tested_term = ":".join(subs)
+    return InteractResult(
+        trait="", transform=transform, n=n_t, G=G,
+        pair_acat=float(acat(p_obs)), pair_acat_emp=float("nan"),
+        min_p=minp_obs, lambda_gc_obs=float(lambda_gc(p_obs[finite])),
+        lambda_gc_perm_median=float("nan"), bonferroni_alpha=float(bonf),
+        n_sig=n_sig, sig=sig, top=top,
+        sigma_hat={
+            s: float(cv.get(s, 0.0)) for s in subs
+        } | {"e": float(cv.get("e", 0.0))},
+        weighted=None, covariates=cov_meta,
+        n_planned=G, n_valid=int(finite.sum()),
+        n_unestimable=int((~design_mask).sum()),
+        estimability={
+            **ESTIMABILITY_POLICY,
+            "decided_on": "raw_hierarchical_design",
+            "n_planned": G,
+            "n_valid": int(design_mask.sum()),
+            "n_unestimable": int((~design_mask).sum()),
+            "n_late_fail": int(late_fail.sum()),
+            "exclusions": [
+                {"triad": kept[i], "reason": reason}
+                for i, reason in sorted(exclusions.items())
+            ],
+        },
+        statistic="triad3",
+        calibration_method=("bootstrap" if bootstrap_B else "none"),
+        bootstrap_B=int(bootstrap_B), bootstrap_seed=int(bootstrap_seed),
+        minp_boot_emp=minp_boot_emp,
+        minp_boot_threshold=minp_boot_threshold,
+        minp_boot_rejected=minp_boot_rejected,
+        tail_excess=tail_excess,
+        analytic_screen_n=len(analytic_sig),
+        analytic_screen_sig=analytic_sig,
+        model_diagnostics={
+            "formula": (
+                f"y ~ C + {main_terms} + {pair_terms} + {tested_term}"),
+            "tested_term": tested_term,
+            "encoding": "minor_allele_burden_centered_scaled",
+            "target_residual_ratio_min": (
+                float(np.nanmin(residual_ratio[design_mask]))),
+            "target_residual_ratio_median": (
+                float(np.nanmedian(residual_ratio[design_mask]))),
+            "target_information_max_fraction_median": (
+                float(np.nanmedian(information_max[design_mask]))),
+            "target_information_effective_n_median": (
+                float(np.nanmedian(information_effective_n[design_mask]))),
+            "bootstrap_fwer": bootstrap_fwer,
+            "analytic_screen": {
+                "method": "bonferroni",
+                "alpha": 0.05,
+                "per_test_alpha": float(bonf),
+                "n_screened": len(analytic_sig),
+                "sig": analytic_sig,
+                "role": "descriptive_candidate_screen_not_formal_discovery",
+            },
+            "inference_plan": {
+                "formal_discovery": "parametric_bootstrap_minp_plus_one",
+                "analytic_bonferroni": "descriptive_screen_only",
+                "inferential": bool(inferential),
+            },
+            "interpretation": (
+                "A significant term is statistical third-order non-additivity "
+                "conditional on every lower-order burden term; it is not evidence "
+                "by itself for a physical three-protein complex."),
+        },
+    )
 
 
 def run_clique_scan(
@@ -3206,7 +4143,7 @@ def cmd_interact(args) -> int:
     burden_maf = float(burden.get("maf_min", 0.01))
     dominance_adjust = bool(burden.get("dominance_adjust", False))
     calib = ic.get("calibration", {})
-    # Primary = encoding-invariant omniB + kinship-preserving parametric bootstrap (the paper method);
+    # Production default = encoding-invariant omniB + kinship-preserving parametric bootstrap;
     # the legacy REF-burden product + Freedman-Lane permutation stays available as explicit opt-in.
     statistic = str(ic.get("statistic", "omniB")).lower()
     primary_weighting = str(ic.get("primary_weighting", "unweighted")).lower()
@@ -3402,7 +4339,8 @@ def cmd_interact(args) -> int:
                     inferential=(transform.upper() == primary_transform),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
                     n_jobs=n_jobs, grm_method=grm_method, maf_min=maf_min,
-                    burden_maf=burden_maf, min_snp=min_snp, covariates=cov_arg)
+                    burden_maf=burden_maf, min_snp=min_snp, covariates=cov_arg,
+                    full_dump_path=_dump_path(transform))
                 r.trait = trait
                 results[transform] = r.__dict__
                 te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
@@ -3509,16 +4447,26 @@ def cmd_interact(args) -> int:
                 # encoding-invariant primary: omniB + kinship-preserving parametric bootstrap
                 r = run_pair_scan_omnib(
                     subdata, pairs, y_raw, sample_idx, cap=cap, n_pc=n_pc, transform=transform,
-                    inferential=(transform.upper() == primary_transform),
+                    inferential=(
+                        transform.upper() == primary_transform
+                        and not calibration_qa_only),
                     bootstrap_B=(boot_B if transform == "INT" else 0), bootstrap_seed=boot_seed,
                     n_jobs=n_jobs, pair_subs=(subs[0], subs[1]), grm_method=grm_method,
                     maf_min=maf_min, burden_maf=burden_maf,
-                    min_snp=min_snp, covariates=cov_arg)
+                    min_snp=min_snp, covariates=cov_arg,
+                    full_dump_path=_dump_path(transform),
+                    burden_dump_path=_burden_path(transform),
+                    primary_multiplicity=primary_multiplicity)
                 r.trait = trait
                 results[transform] = r.__dict__
                 te = r.tail_excess.get("n_below_0.001") if r.tail_excess else None
+                decision_label = (
+                    "QA_bootFWER(no formal rejections)"
+                    if calibration_qa_only else
+                    ("formal_bootFWER" if primary_multiplicity == "bootstrap_minp"
+                     else "Bonferroni"))
                 print(f"  [{transform}] G={r.G} statistic=omniB minP={r.min_p:.3g} "
-                      f"λ_obs={r.lambda_gc_obs:.3f} nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
+                      f"λ_obs={r.lambda_gc_obs:.3f} nsig({decision_label})={r.n_sig} "
                       f"bootFWER(minP_emp={r.minp_boot_emp} thr05="
                       f"{r.minp_boot_threshold if r.minp_boot_threshold is None else f'{r.minp_boot_threshold:.2g}'})"
                       + (f" tail(p<1e-3 obs={te['observed']} null={te['null_mean']:.1f} "
@@ -3527,7 +4475,8 @@ def cmd_interact(args) -> int:
                     print(f"      HIT {h['pair']} p={h['p']:.3g}")
                 continue
             r = run_pair_scan(subdata, pairs, y_raw, sample_idx, cap=cap, transform=transform,
-                              inferential=(transform.upper() == primary_transform),
+                              inferential=(transform.upper() == primary_transform
+                                           and not calibration_qa_only),
                               perm_B=(perm_B if transform.upper() == primary_transform
                                       else 0), n_jobs=n_jobs,
                               pair_subs=(subs[0], subs[1]), grm_method=grm_method, maf_min=maf_min,
@@ -3540,9 +4489,13 @@ def cmd_interact(args) -> int:
                               burden_dump_path=_burden_path(transform))
             r.trait = trait
             results[transform] = r.__dict__
+            decision_label = (
+                "QA_permFWER(no formal rejections)" if calibration_qa_only else
+                ("formal_permFWER" if primary_multiplicity == "permutation_minp"
+                 else "Bonferroni"))
             print(f"  [{transform}] G={r.G} pair_ACAT={r.pair_acat:.3g} emp={r.pair_acat_emp} "
                   f"minP={r.min_p:.3g} λ_obs={r.lambda_gc_obs:.3f} λ_perm={r.lambda_gc_perm_median} "
-                  f"nsig(Bonf α={r.bonferroni_alpha:.1e})={r.n_sig} "
+                  f"nsig({decision_label})={r.n_sig} "
                   f"permFWER(minP_emp={r.minp_perm_emp} thr05={r.minp_perm_threshold:.2g})", flush=True)
             for h in (r.sig or []):
                 print(f"      HIT {h['pair']} p={h['p']:.3g}")
