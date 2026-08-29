@@ -405,6 +405,19 @@ def test_material_deletion_scores_only_formal_hits(monkeypatch, tmp_path):
         prepared.inputs.formal_hits["hypothesis_id"])
 
 
+def test_material_deletion_uses_observable_fork_workers(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+
+    deletion = run_material_deletion(prepared, n_folds=4, n_jobs=2)
+
+    execution = deletion.attrs["parallel_execution"]
+    assert execution["backend"] == "fork_shared_memory"
+    assert execution["effective_jobs"] == 2
+    assert execution["process_model"] == "processes"
+    assert len(execution["worker_pids"]) == 2
+    assert execution["inner_threads"] == 1
+
+
 def test_environment_deletion_reaggregates_repeated_rows(monkeypatch, tmp_path):
     prepared = _prepared_toy(monkeypatch, tmp_path)
     base = prepared.phenotype_rows[["sample", prepared.inputs.trait]].copy()
@@ -421,6 +434,24 @@ def test_environment_deletion_reaggregates_repeated_rows(monkeypatch, tmp_path):
     assert status == "COMPLETED"
     assert set(frame["deleted_environment"]) == {"E1", "E2"}
     assert (frame["n"] == len(prepared.analyzed_samples)).all()
+
+
+def test_environment_deletion_uses_observable_fork_workers(monkeypatch, tmp_path):
+    prepared = _prepared_toy(monkeypatch, tmp_path)
+    base = prepared.phenotype_rows[["sample", prepared.inputs.trait]].copy()
+    repeated = replace(prepared, phenotype_rows=pd.concat([
+        base.assign(environment="E1"),
+        base.assign(environment="E2"),
+    ], ignore_index=True))
+
+    frame, status = run_environment_deletion(
+        repeated, "environment", n_jobs=2)
+
+    assert status == "COMPLETED"
+    execution = frame.attrs["parallel_execution"]
+    assert execution["backend"] == "fork_shared_memory"
+    assert execution["effective_jobs"] == 2
+    assert len(execution["worker_pids"]) == 2
 
 
 def test_missing_environment_is_explicit(monkeypatch, tmp_path):

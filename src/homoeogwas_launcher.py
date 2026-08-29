@@ -20,7 +20,7 @@ def _configure_numeric_threads(argv: Sequence[str]) -> None:
     This must run before importing :mod:`homoeogwas`, because NumPy/SciPy may
     initialize a native thread pool while those modules are imported.
     """
-    if argv and argv[0] == "interact":
+    if argv and argv[0] in {"interact", "follow-up"}:
         for name in NUMERIC_THREAD_ENV:
             os.environ[name] = "1"
 

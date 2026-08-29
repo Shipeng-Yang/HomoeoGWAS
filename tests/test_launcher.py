@@ -28,6 +28,22 @@ def test_interact_launcher_forces_numeric_thread_env_before_import(monkeypatch):
     assert imported == [{name: "1" for name in NUMERIC_THREAD_ENV}]
 
 
+def test_followup_launcher_forces_numeric_thread_env_before_import(monkeypatch):
+    import homoeogwas_launcher as launcher
+
+    for name in NUMERIC_THREAD_ENV:
+        monkeypatch.setenv(name, "64")
+    imported = []
+
+    def fake_import():
+        imported.append({name: os.environ.get(name) for name in NUMERIC_THREAD_ENV})
+        return lambda _argv: 0
+
+    monkeypatch.setattr(launcher, "_import_cli_main", fake_import)
+    assert launcher.main(["follow-up", "results", "--n-jobs", "8"]) == 0
+    assert imported == [{name: "1" for name in NUMERIC_THREAD_ENV}]
+
+
 def test_non_interact_launcher_preserves_numeric_thread_env(monkeypatch):
     import homoeogwas_launcher as launcher
 

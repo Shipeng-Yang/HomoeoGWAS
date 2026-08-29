@@ -55,6 +55,93 @@ _RANKING_REQUIRED = {
     "p_adjusted_bootstrap_minp", "primary_sig",
 }
 
+_FOLLOWUP_MATERIAL_STATE = None
+_FOLLOWUP_ENVIRONMENT_STATE = None
+
+
+def _set_followup_material_state(prepared, sample_to_local) -> None:
+    global _FOLLOWUP_MATERIAL_STATE
+    _FOLLOWUP_MATERIAL_STATE = (prepared, sample_to_local)
+
+
+def _clear_followup_material_state() -> None:
+    global _FOLLOWUP_MATERIAL_STATE
+    _FOLLOWUP_MATERIAL_STATE = None
+
+
+def _score_material_deletion_block(block) -> pd.DataFrame:
+    from .omnib_family import score_omnib_subset
+
+    if _FOLLOWUP_MATERIAL_STATE is None:
+        raise RuntimeError("follow-up material worker state is not installed")
+    prepared, sample_to_local = _FOLLOWUP_MATERIAL_STATE
+    index, deleted = block
+    deleted_set = set(deleted)
+    keep = np.asarray([
+        local for sample, local in sample_to_local.items()
+        if sample not in deleted_set
+    ], int)
+    subset = score_omnib_subset(
+        prepared.scores, prepared.family, prepared.expanded,
+        keep, prepared.y_raw[keep], n_jobs=1)
+    frame = extract_primary_scores(subset, prepared)
+    frame.insert(0, "deleted_fold", f"fold_{index + 1:02d}")
+    frame.insert(1, "n", int(keep.size))
+    frame.insert(2, "deleted_samples", ";".join(deleted))
+    return frame
+
+
+def _set_followup_environment_state(
+        prepared, rows, environment_col, sample_col, analyzed_lookup) -> None:
+    global _FOLLOWUP_ENVIRONMENT_STATE
+    _FOLLOWUP_ENVIRONMENT_STATE = (
+        prepared, rows, environment_col, sample_col, analyzed_lookup)
+
+
+def _clear_followup_environment_state() -> None:
+    global _FOLLOWUP_ENVIRONMENT_STATE
+    _FOLLOWUP_ENVIRONMENT_STATE = None
+
+
+def _score_environment_deletion_block(level: str) -> pd.DataFrame:
+    from .omnib_family import score_omnib_subset
+
+    if _FOLLOWUP_ENVIRONMENT_STATE is None:
+        raise RuntimeError("follow-up environment worker state is not installed")
+    prepared, rows, environment_col, sample_col, analyzed_lookup = (
+        _FOLLOWUP_ENVIRONMENT_STATE)
+    environment = rows[environment_col].astype("string")
+    remaining = rows.loc[environment.isna() | (environment.astype(str) != level)]
+    phenotype = remaining.groupby(sample_col, sort=False)[
+        prepared.inputs.trait].mean()
+    kept_samples = [
+        sample for sample in prepared.analyzed_samples
+        if sample in phenotype.index and pd.notna(phenotype.loc[sample])
+    ]
+    if len(kept_samples) < 10:
+        unavailable = prepared.inputs.formal_hits[[
+            "rank", "hypothesis_id"]].copy()
+        unavailable.insert(0, "deleted_environment", level)
+        unavailable.insert(1, "n", int(len(kept_samples)))
+        unavailable.insert(2, "available", 0)
+        unavailable.insert(3, "unavailable_reason", "LT10_RETAINED_SAMPLES")
+        unavailable["p_interaction"] = np.nan
+        unavailable["driving_edge"] = None
+        unavailable["driving_component"] = None
+        unavailable["driving_component_p"] = np.nan
+        return unavailable
+    keep = np.asarray([analyzed_lookup[sample] for sample in kept_samples], int)
+    y_raw = phenotype.loc[kept_samples].to_numpy(float)
+    subset = score_omnib_subset(
+        prepared.scores, prepared.family, prepared.expanded,
+        keep, y_raw, n_jobs=1)
+    frame = extract_primary_scores(subset, prepared)
+    frame.insert(0, "deleted_environment", level)
+    frame.insert(1, "n", int(keep.size))
+    frame.insert(2, "available", 1)
+    frame.insert(3, "unavailable_reason", None)
+    return frame
+
 
 def _one_path(paths: list[Path], label: str) -> Path:
     if not paths:
@@ -595,10 +682,7 @@ def run_material_deletion(
     n_jobs: int = 8,
 ) -> pd.DataFrame:
     """Score formal units after deterministic, disjoint sample-fold deletion."""
-    from joblib import Parallel, delayed
-    from threadpoolctl import threadpool_limits
-
-    from .omnib_family import score_omnib_subset
+    from .parallel import run_fork_blocks
 
     folds = deterministic_folds(
         prepared.analyzed_samples, n_folds=n_folds, seed=2026)
@@ -606,27 +690,16 @@ def run_material_deletion(
         sample: index for index, sample in enumerate(prepared.analyzed_samples)
     }
 
-    def score(index: int, deleted: tuple[str, ...]) -> pd.DataFrame:
-        deleted_set = set(deleted)
-        keep = np.asarray([
-            local for sample, local in sample_to_local.items()
-            if sample not in deleted_set
-        ], int)
-        subset = score_omnib_subset(
-            prepared.scores, prepared.family, prepared.expanded,
-            keep, prepared.y_raw[keep], n_jobs=1)
-        frame = extract_primary_scores(subset, prepared)
-        frame.insert(0, "deleted_fold", f"fold_{index + 1:02d}")
-        frame.insert(1, "n", int(keep.size))
-        frame.insert(2, "deleted_samples", ";".join(deleted))
-        return frame
-
-    with threadpool_limits(limits=1):
-        frames = Parallel(n_jobs=int(n_jobs), backend="threading") (
-            delayed(score)(index, deleted)
-            for index, deleted in enumerate(folds)
-        )
-    return pd.concat(frames, ignore_index=True)
+    frames, execution = run_fork_blocks(
+        list(enumerate(folds)), _score_material_deletion_block,
+        n_jobs=int(n_jobs),
+        state_setter=lambda: _set_followup_material_state(
+            prepared, sample_to_local),
+        state_clearer=_clear_followup_material_state,
+    )
+    result = pd.concat(frames, ignore_index=True)
+    result.attrs["parallel_execution"] = execution.as_dict()
+    return result
 
 
 def run_environment_deletion(
@@ -636,10 +709,7 @@ def run_environment_deletion(
     n_jobs: int = 8,
 ) -> tuple[pd.DataFrame, str]:
     """Delete phenotype records by environment and reaggregate repeated samples."""
-    from joblib import Parallel, delayed
-    from threadpoolctl import threadpool_limits
-
-    from .omnib_family import score_omnib_subset
+    from .parallel import run_fork_blocks
 
     if not environment_col:
         return pd.DataFrame(), "NOT_AVAILABLE_NO_ENVIRONMENT_COLUMN"
@@ -655,43 +725,14 @@ def run_environment_deletion(
         sample: index for index, sample in enumerate(prepared.analyzed_samples)
     }
 
-    def score(level: str):
-        environment = rows[environment_col].astype("string")
-        remaining = rows.loc[environment.isna() | (environment.astype(str) != level)]
-        phenotype = remaining.groupby(sample_col, sort=False)[
-            prepared.inputs.trait].mean()
-        kept_samples = [
-            sample for sample in prepared.analyzed_samples
-            if sample in phenotype.index and pd.notna(phenotype.loc[sample])
-        ]
-        if len(kept_samples) < 10:
-            unavailable = prepared.inputs.formal_hits[[
-                "rank", "hypothesis_id"]].copy()
-            unavailable.insert(0, "deleted_environment", level)
-            unavailable.insert(1, "n", int(len(kept_samples)))
-            unavailable.insert(2, "available", 0)
-            unavailable.insert(3, "unavailable_reason", "LT10_RETAINED_SAMPLES")
-            unavailable["p_interaction"] = np.nan
-            unavailable["driving_edge"] = None
-            unavailable["driving_component"] = None
-            unavailable["driving_component_p"] = np.nan
-            return unavailable
-        keep = np.asarray([analyzed_lookup[sample] for sample in kept_samples], int)
-        y_raw = phenotype.loc[kept_samples].to_numpy(float)
-        subset = score_omnib_subset(
-            prepared.scores, prepared.family, prepared.expanded,
-            keep, y_raw, n_jobs=1)
-        frame = extract_primary_scores(subset, prepared)
-        frame.insert(0, "deleted_environment", level)
-        frame.insert(1, "n", int(keep.size))
-        frame.insert(2, "available", 1)
-        frame.insert(3, "unavailable_reason", None)
-        return frame
-
-    with threadpool_limits(limits=1):
-        values = Parallel(n_jobs=int(n_jobs), backend="threading") (
-            delayed(score)(level) for level in levels)
+    values, execution = run_fork_blocks(
+        levels, _score_environment_deletion_block, n_jobs=int(n_jobs),
+        state_setter=lambda: _set_followup_environment_state(
+            prepared, rows, environment_col, sample_col, analyzed_lookup),
+        state_clearer=_clear_followup_environment_state,
+    )
     frame = pd.concat(values, ignore_index=True)
+    frame.attrs["parallel_execution"] = execution.as_dict()
     n_available = int(frame.loc[frame["available"] == 1,
                                 "deleted_environment"].nunique())
     if n_available == 0:
@@ -1214,6 +1255,9 @@ def run_followup(
         join_candidate_evidence,
         load_evidence_manifest,
     )
+    from .interact import _validate_canonical_parallel_runtime
+
+    _validate_canonical_parallel_runtime(n_jobs=n_jobs)
 
     inputs = load_followup_inputs(results_dir, config=config, ranking=ranking)
     out = (Path(out_dir).expanduser().resolve() if out_dir is not None
@@ -1300,6 +1344,12 @@ def run_followup(
         "formal_hits": int(len(inputs.formal_hits)),
         "independent_loci": int(loci["locus_id"].nunique()),
         "material_folds": int(material["deleted_fold"].nunique()),
+        "parallel_execution": {
+            "material_deletion": material.attrs.get("parallel_execution"),
+            "environment_deletion": (
+                environment.attrs.get("parallel_execution")
+                if not environment.empty else None),
+        },
         "environment_deletion": environment_status,
         "formal_reproduction_max_abs_error": (
             prepared.formal_replay_max_abs_error),

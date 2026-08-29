@@ -100,6 +100,7 @@ def run_fork_blocks(
             else "effective_jobs_bounded_to_one"
         )
 
+    previous_worker = _ACTIVE_WORKER
     state_setter()
     _ACTIVE_WORKER = worker
     try:
@@ -132,5 +133,5 @@ def run_fork_blocks(
             fallback_reason=fallback_reason,
         )
     finally:
-        _ACTIVE_WORKER = None
+        _ACTIVE_WORKER = previous_worker
         state_clearer()

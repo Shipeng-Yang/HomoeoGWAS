@@ -11,6 +11,8 @@
   record a serial fallback. The console launcher now fixes native numeric
   thread limits before NumPy/SciPy import, and canonical parallel omniB refuses
   unsafe bypass invocations whose native pools were already oversubscribed.
+  Candidate follow-up material/environment deletion now uses the same observable
+  fork/shared-memory process runner instead of the former joblib threading path.
 
 ## v2.0.0 — corrected multiplicity for s>=3 homoeolog groups (breaking)
 

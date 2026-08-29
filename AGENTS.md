@@ -203,6 +203,8 @@ launch parallel interaction through the installed `homoeogwas interact`
 command: its lightweight entry point sets OpenBLAS/OpenMP/MKL/NumExpr limits
 before NumPy/SciPy import. A bypassed parallel invocation with an already
 oversubscribed native pool is refused instead of silently multiplying threads.
+The same pre-import limits and fork/shared-memory worker contract apply to
+`homoeogwas follow-up` material/environment deletion stability runs.
 
 ---
 

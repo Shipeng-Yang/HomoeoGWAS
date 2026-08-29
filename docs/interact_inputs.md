@@ -283,6 +283,11 @@ not part of the statistical/checkpoint identity. A platform without `fork`
 runs serially and records the fallback reason instead of silently using an
 ineffective Python thread pool.
 
+Candidate-only `homoeogwas follow-up` material/environment deletion uses the
+same fork/shared-memory process contract and records its execution metadata in
+`followup_summary.json`. Launch it through the installed console entry point so
+native thread limits are applied before numerical-library import.
+
 A complete worked example on an allo-octoploid (strawberry, AABBCCDD,
 2n=8x=56) — one group family with six derived pair edges — is in
 [`examples/strawberry_octoploid.md`](examples/strawberry_octoploid.md).

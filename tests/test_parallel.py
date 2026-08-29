@@ -45,6 +45,21 @@ def _failing_worker(block: int) -> int:
     return block
 
 
+def _noop_state() -> None:
+    return None
+
+
+def _nested_inner_worker(block: int) -> int:
+    return block + 1
+
+
+def _nested_outer_worker(block: int) -> int:
+    values, _execution = run_fork_blocks(
+        [block], _nested_inner_worker, n_jobs=1,
+        state_setter=_noop_state, state_clearer=_noop_state)
+    return values[0]
+
+
 def test_fork_runner_observes_multiple_worker_processes():
     results, execution = run_fork_blocks(
         list(range(16)), _identity_worker, n_jobs=2,
@@ -83,10 +98,18 @@ def test_worker_exception_is_raised_and_state_is_cleared():
     assert _get_state() is None
 
 
+def test_nested_serial_runner_restores_outer_worker():
+    results, execution = run_fork_blocks(
+        list(range(8)), _nested_outer_worker, n_jobs=2,
+        state_setter=_set_state, state_clearer=_clear_state)
+
+    assert results == list(range(1, 9))
+    assert len(execution.worker_pids) == 2
+
+
 @pytest.mark.parametrize("n_jobs", [True, 0, -1, 1.5])
 def test_invalid_job_count_is_rejected(n_jobs):
     with pytest.raises(ValueError, match="n_jobs must be an integer >= 1"):
         run_fork_blocks(
             [0], _serial_worker, n_jobs=n_jobs,
             state_setter=_set_state, state_clearer=_clear_state)
-
