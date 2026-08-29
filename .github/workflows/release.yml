@@ -48,13 +48,31 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         shell: bash
         run: |
+          notes_file="docs/releases/${RELEASE_TAG}.md"
+
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "GitHub Release ${RELEASE_TAG} already exists; nothing to do."
+            if [[ -f "${notes_file}" ]]; then
+              gh release edit "${RELEASE_TAG}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "HomoeoGWAS ${RELEASE_TAG}" \
+                --notes-file "${notes_file}"
+              echo "Updated GitHub Release ${RELEASE_TAG} from ${notes_file}."
+            else
+              echo "GitHub Release ${RELEASE_TAG} already exists; nothing to do."
+            fi
             exit 0
           fi
 
-          gh release create "${RELEASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --verify-tag \
-            --title "HomoeoGWAS ${RELEASE_TAG}" \
-            --generate-notes
+          if [[ -f "${notes_file}" ]]; then
+            gh release create "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "HomoeoGWAS ${RELEASE_TAG}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "HomoeoGWAS ${RELEASE_TAG}" \
+              --generate-notes
+          fi
