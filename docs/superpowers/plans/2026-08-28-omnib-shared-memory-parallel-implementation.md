@@ -336,8 +336,10 @@ blank or duplicate biological group.
 Every config declares `mode: group`, `statistic: omniB`,
 `hypothesis_unit: edge`, `subset_order: 2`, `family_scope: primary_only`,
 `primary_transform: INT`, `primary_multiplicity: bootstrap_minp`,
-`calibration: {method: bootstrap, B: 2000, seed: 2026}`, and a checkpoint root
-inside its new output directory. Cotton traits are `FibLen` and `FibElo` with
+`calibration: {method: bootstrap, B: 2000, seed: 2026}`. All species use the
+canonical `grm_from_X` method; the former cotton `compute_grm_maf` analysis is
+retained as a legacy sensitivity result, not a byte-identical target. Cotton
+traits are `FibLen` and `FibElo` with
 subgenomes `[A,D]`; peanut traits are `hundred_seed_weight` and `seed_length`
 with `[A,B]`.
 
