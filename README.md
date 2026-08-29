@@ -10,6 +10,13 @@
 <!-- DOI badge added after the first Zenodo release:
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
+> **Current release: [v2.0.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.0.1)
+> (29 August 2026).** This release unifies two-, three-, and four-copy
+> homoeolog interaction analysis under one group-omniB engine, one declared
+> bootstrap-minP family, and one auditable cross-species runtime contract.
+> See the [full release notes](docs/releases/v2.0.1.md) and
+> [changelog](CHANGELOG.md).
+
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
 peanut, strawberry, …) by modelling each subgenome explicitly. A new species is added
 through a single YAML config — no framework code changes. The only requirement
@@ -37,11 +44,30 @@ optional research extensions. They are not required for the primary variance
 partition or interaction workflow and should not be treated as discovery
 evidence without a frozen benchmark.
 
+## What's new in v2.0.1
+
+- **One interaction contract across ploidies:** pair edges are the shared
+  primitive for dyads, triads, and four-copy groups, with one experiment-wide
+  bootstrap-minP/FWER calibration.
+- **Publication-grade evidence and stability:** complete component-aware
+  rankings, `homoeogwas audit`, and material/environment deletion follow-up
+  separate discovery, localization, internal stability, and replication.
+- **Reproducible production execution:** observable process workers replace
+  the former near-single-core threading path, while exact BIM-bound marker
+  manifests prevent unverified SNP, PAV, SV, or haplotype inputs.
+
+The formal claim is encoding-robust omnibus **pairwise** interaction evidence
+within a homoeolog group. It is not a direct third- or fourth-order causal or
+physical mechanism. See the [v2.0.1 release notes](docs/releases/v2.0.1.md) for
+validation results and upgrade guidance.
+
 ## Quick start
 
 ```bash
-# 1. Install (CPU)
-pip install homoeogwas            # or: pip install -e ".[dev]" from a checkout
+# 1. Install the current v2.0.1 release (CPU)
+python -m pip install \
+  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
+# Contributors may instead use: python -m pip install -e ".[dev]"
 
 # 2. Verify the install end-to-end (~2 s): synthesise a tiny dataset + run a fit
 homoeogwas demo --keep            # prints acceptance checks + lists the outputs
@@ -52,8 +78,13 @@ homoeogwas fit -c my_run.yaml -o results/my_run
 homoeogwas audit results/my_run       # validity, uncertainty and evidence limits
 
 # (Optional) GPU extras for the per-SNP scan
-pip install "homoeogwas[gpu]"
+python -m pip install \
+  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
 ```
+
+PyPI currently serves the older v1.0.1 package. Until v2.0.1 is published
+there, use the versioned GitHub command above for new analyses; an unpinned
+`pip install homoeogwas` will not install the algorithms described here.
 
 See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. Main CLI
@@ -115,7 +146,9 @@ to connect, pick whichever matches the agent you already use:
 # Code and just ask in plain language — the `homoeogwas` skill auto-activates.
 
 # ── Option B · Any MCP client (Cursor, Cline, Windsurf, Claude Desktop, …) ─────
-pip install "homoeogwas[mcp]"     # adds the MCP dependency
+# Install the current release with the MCP dependency:
+python -m pip install \
+  "homoeogwas[mcp] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
 homoeogwas mcp                    # starts the MCP server (stdio)
 # Then register this server in your client's MCP config. Minimal entry:
 #   {"mcpServers": {"homoeogwas": {"command": "homoeogwas", "args": ["mcp"]}}}
@@ -133,8 +166,8 @@ agent calls the same `src/homoeogwas/workflow.py` engine (high-level inputs →
 auto-generated YAML → run → summary), and it **blocks on common mistakes**
 (wrong chromosome naming, missing homoeolog map, …) before wasting a run.
 
-**No GPU? You're fine — CPU is the default.** Plain `pip install homoeogwas`
-runs everything on CPU; the agent uses `--backend auto`, which silently picks
+**No GPU? You're fine — CPU is the default.** The versioned CPU installation
+above runs everything on CPU; the agent uses `--backend auto`, which silently picks
 GPU *only if one is present* and otherwise falls back to CPU with identical
 results. A GPU is **purely optional acceleration** for the genome-wide per-SNP
 scan — never a requirement. So tell the
