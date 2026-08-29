@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v2.0.1 — unified omniB, evidence audit and input hardening (2026-08-29)
+
 ### Changed
 
 - Canonical `mode: group`, `statistic: omniB` block scoring now uses observable
@@ -23,11 +25,6 @@
   effects and all three pairwise interactions, freezes estimability on the raw
   hierarchical design, reports target residual-information diagnostics, and
   supports kinship-preserving parametric-bootstrap min-P calibration.
-
-## v2.0.1 — evidence audit and non-SNP input hardening (2026-07-25)
-
-### Added
-
 - `homoeogwas audit <result-json-or-directory>` writes JSON, TSV and Markdown
   evidence audits that separate computational validity, internal familywise
   discovery, component-specific interpretation and replication status.

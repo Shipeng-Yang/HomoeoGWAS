@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import csv
 import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def expand_pair_edges(family: MasterGroupFamily) -> ExpandedEdgeFamily:
     edges: list[EdgeRecord] = []
     group_edge_indices: list[tuple[int, ...]] = []
     by_key: dict[tuple[str, str, str, str], int] = {}
-    for group_id, row in zip(family.group_ids, family.genes):
+    for group_id, row in zip(family.group_ids, family.genes, strict=True):
         indices: list[int] = []
         for x, y in itertools.combinations(range(len(family.subgenomes)), 2):
             sub_x, sub_y = family.subgenomes[x], family.subgenomes[y]

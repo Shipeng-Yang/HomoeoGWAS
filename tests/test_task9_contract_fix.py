@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -496,8 +496,8 @@ def test_formal_launch_rejects_dirty_source_before_genotype_loading(
     tmp_path, monkeypatch,
 ):
     """A dirty formal source tree must abort before the first BED is loaded."""
-    from homoeogwas import formal_provenance as P
     import homoeogwas.interact as I
+    from homoeogwas import formal_provenance as P
 
     config_path, cfg, _manifest, source, runtime = (
         _write_formal_identity_fixture(tmp_path))
