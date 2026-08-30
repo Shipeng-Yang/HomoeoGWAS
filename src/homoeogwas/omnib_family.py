@@ -753,6 +753,23 @@ def _score_prepared_responses(
     return edge_p, group_p, edge_components
 
 
+def score_omnib_responses(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    responses: np.ndarray,
+    *,
+    n_jobs: int = 8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Score an explicit response bank through one frozen production design.
+
+    This returns raw edge/group/component p-value matrices. It does not create
+    a discovery family; callers must calibrate a predeclared matrix separately.
+    """
+    return _score_prepared_responses(
+        scores, family, expanded, responses, n_jobs=n_jobs)
+
+
 def score_omnib_observed(
     scores: OmniBFamilyScores,
     family: MasterGroupFamily,

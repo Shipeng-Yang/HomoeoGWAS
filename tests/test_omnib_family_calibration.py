@@ -24,6 +24,30 @@ def _make_sub(rng, n=72, g=12, spg=5):
         samples=[f"sample_{i}" for i in range(n)], chunk=None)
 
 
+def test_public_response_bank_matches_observed_prepared_score(monkeypatch):
+    rng = np.random.default_rng(515)
+    subgenomes = ("A", "B", "D")
+    subdata = {sub: _make_sub(rng, g=2) for sub in subgenomes}
+    family = MasterGroupFamily(
+        subgenomes=subgenomes,
+        group_ids=("group_0", "group_1"),
+        genes=(("g0", "g0", "g0"), ("g1", "g1", "g1")),
+    )
+    scores, expanded = F._prepare_checkpoint_omnib(
+        subdata, family, rng.standard_normal(72), np.arange(72),
+        cap=150, n_pc=3, transform="INT", bootstrap_seed=2026,
+        n_jobs=1, grm_method="grm_from_X", maf_min=0.01,
+        burden_maf=0.01, min_snp=3, covariates=None)
+    F.score_omnib_observed(scores, family, expanded, n_jobs=1)
+    from homoeogwas.omnib_family import score_omnib_responses
+    edge, group, components = score_omnib_responses(
+        scores, family, expanded, scores.y[:, None], n_jobs=1)
+    assert np.array_equal(edge, scores.edge_p[:, :1], equal_nan=True)
+    assert np.array_equal(group, scores.group_p[:, :1], equal_nan=True)
+    assert np.array_equal(components[:, :, 0], scores.edge_components_obs,
+                          equal_nan=True)
+
+
 def _run_small_group_omnib(
         subgenomes, hypothesis_unit, B, full_dump_path, *, n_jobs=1):
     rng = np.random.default_rng(515)
