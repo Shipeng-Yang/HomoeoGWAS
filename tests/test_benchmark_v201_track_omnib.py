@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
 from homoeogwas.interact import SubgenomeData
-from scripts.benchmarks.v201.contracts import Scenario
+from scripts.benchmarks.v201.contracts import Scenario, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_omnib import (
     OmniBBenchmarkContext,
@@ -91,6 +93,24 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
     assert evaluation.calibration_reference["response_hash"] == calibration.response_hash
 
 
+def test_conditional_bank_rejects_duplicate_seeds_and_method_provenance_tampering(
+    tiny_context,
+):
+    """Duplicated seeds or a deleted score hash must not survive serialization."""
+
+    bank = run_conditional_bank(
+        tiny_context,
+        bank="calibration",
+        count=2,
+        design_hash="f" * 64,
+        n_jobs=1,
+    )
+    with pytest.raises(ValueError, match="seeds must be unique"):
+        replace(bank, seeds=(bank.seeds[0], bank.seeds[0]))
+    with pytest.raises(ValueError, match="method sets must match"):
+        replace(bank, score_matrix_hashes={})
+
+
 def test_end_to_end_rejection_uses_group_minp_only(tiny_context):
     result = run_end_to_end_null(
         tiny_context,
@@ -109,6 +129,20 @@ def test_end_to_end_rejection_uses_group_minp_only(tiny_context):
     assert result["direct_higher_order_term"] is False
     assert result["bootstrap_B"] == 19
     assert result["failure"]["failed"] is False
+
+    # Replacing the serialized bootstrap stream by a self-consistent decision
+    # triple must be detectable from these actual null-family minima.
+    minima = np.asarray(result["null_minima"], dtype=float)
+    observed = np.asarray(result["observed_group_p"], dtype=float)
+    assert minima.shape == (19,)
+    expected_adjusted = (
+        1 + (minima[None, :] <= observed[:, None]).sum(axis=1)
+    ) / 20
+    np.testing.assert_allclose(result["adjusted_p"], expected_adjusted)
+    threshold_index = int(np.floor(0.05 * 20)) - 1
+    assert result["bootstrap_minp"]["threshold"] == pytest.approx(
+        np.sort(minima)[threshold_index]
+    )
 
 
 def test_empirical_threshold_is_learned_once_and_applied_strictly():
@@ -156,6 +190,46 @@ def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
     assert result["direct_higher_order_term"] is False
     assert result["causal_group_ids"] == ["group_0"]
     assert set(result["thresholds"]) == set(result["rejections_by_method"])
+
+    assert result["calibration_response_ids"] == result["calibration_seed_ids"]
+    assert result["target_response_ids"] == result["target_seed_ids"]
+    assert result["failed_calibration_response_indices"] == []
+    assert result["failed_target_response_indices"] == []
+    assert set(result["calibration_minima_by_method"]) == set(
+        result["calibration_minima_hashes"]
+    )
+    assert set(result["target_minima_by_method"]) == set(
+        result["target_minima_hashes"]
+    )
+    assert set(result["causal_minima_by_method"]) == set(
+        result["causal_minima_hashes"]
+    )
+    for method, calibration_minima in result["calibration_minima_by_method"].items():
+        target_minima = result["target_minima_by_method"][method]
+        causal = np.asarray(result["causal_minima_by_method"][method], dtype=float)
+        assert len(calibration_minima) == 19
+        assert len(target_minima) == 2
+        assert causal.shape == (1, 2)
+        threshold = empirical_threshold(np.asarray(calibration_minima)[None, :])
+        assert result["thresholds"][method] == pytest.approx(threshold)
+        assert result["rejections_by_method"][method] == [
+            value < threshold for value in target_minima
+        ]
+        assert result["causal_detection_by_method"][method] == [
+            value < threshold for value in causal[0]
+        ]
+        assert result["recall_by_method"][method] == [
+            float(value < threshold) for value in causal[0]
+        ]
+        assert result["calibration_minima_hashes"][method] == sha256_payload(
+            calibration_minima
+        )
+        assert result["target_minima_hashes"][method] == sha256_payload(
+            target_minima
+        )
+        assert result["causal_minima_hashes"][method] == sha256_payload(
+            result["causal_minima_by_method"][method]
+        )
 
 
 def test_exact_encoding_check_restores_primary_family(tiny_context):
@@ -353,7 +427,12 @@ def test_conditional_dispatcher_builds_the_complete_declared_bank(tiny_context):
         "pilot",
         2,
         0,
-        {"experiment": "conditional", "bank": "heldout", "qa_only": True},
+        {
+            "experiment": "conditional",
+            "bank": "heldout",
+            "null_model": "student_t5",
+            "qa_only": True,
+        },
     )
     result = run_omnib_replicate(
         scenario,
@@ -364,6 +443,38 @@ def test_conditional_dispatcher_builds_the_complete_declared_bank(tiny_context):
     )
     assert result["bank"]["response_shape"] == [72, 2]
     assert len(result["bank"]["seed_ids"]) == scenario.replicates
+    assert {
+        row["canonical_kind"] for row in result["bank"]["response_metadata"]
+    } == {"t5"}
+
+
+def test_encoding_dispatcher_runs_one_declared_batch(tiny_context):
+    """Reject a dispatcher that registers encoding but cannot execute it."""
+
+    scenario = Scenario(
+        "B.encoding.wheat",
+        "omnib",
+        "pilot",
+        1,
+        1,
+        {
+            "experiment": "encoding",
+            "backbone": "wheat",
+            "include_robustness": False,
+            "qa_only": True,
+        },
+    )
+    result = run_omnib_replicate(
+        scenario,
+        tiny_context,
+        replicate=0,
+        design_hash="1" * 64,
+        n_jobs=1,
+    )
+    assert result["experiment"] == "encoding"
+    assert result["scenario_id"] == scenario.scenario_id
+    assert result["replicate"] == 0
+    assert result["failure"]["failed"] is (not result["all_required_exact"])
 
 
 def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
@@ -432,6 +543,41 @@ def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
         original.tested_family_hashes["snpxsnp"]
         != reordered.tested_family_hashes["snpxsnp"]
     )
+    payload = original.to_payload(include_scores=False)
+    assert set(payload["score_matrix_hashes"]) == set(
+        payload["tested_family_members"]
+    )
+    for method, members in payload["tested_family_members"].items():
+        assert len(members) == payload["tested_family_sizes"][method]
+        assert payload["tested_family_hashes"][method] == sha256_payload(
+            {"method": method, "ordered_member_ids": members}
+        )
+        values = np.ascontiguousarray(original.p_by_method[method])
+        digest = hashlib.sha256()
+        digest.update(str(values.dtype).encode("ascii"))
+        digest.update(repr(values.shape).encode("ascii"))
+        digest.update(values.tobytes())
+        assert payload["score_matrix_hashes"][method] == digest.hexdigest()
+
+
+def test_base_manifests_are_the_complete_hash_inputs(tiny_context):
+    """Changing a manifest without changing its digest must be auditable."""
+
+    result = run_end_to_end_null(
+        tiny_context,
+        replicate=0,
+        bootstrap_B=1,
+        qa_only=True,
+        n_jobs=1,
+    )
+    assert result["family_hash"] == sha256_payload(result["family_manifest"])
+    assert result["context_fingerprint"] == sha256_payload(
+        result["context_manifest"]
+    )
+    assert result["context_manifest"]["family"] == result["family_manifest"]
+    for subgenome in result["context_manifest"]["subgenomes"]:
+        assert set(subgenome["X"]) == {"shape", "dtype", "sha256"}
+        assert all(set(row) == {"gene", "indices"} for row in subgenome["gene_snp"])
 
 
 def test_conditional_execution_is_from_response_scoring(tiny_context):

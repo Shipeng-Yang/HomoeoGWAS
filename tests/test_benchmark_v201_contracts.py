@@ -23,7 +23,12 @@ def test_registry_ids_are_unique_and_counts_are_locked():
     formal = build_scenarios("formal")
     assert len({row.scenario_id for row in pilot}) == len(pilot)
     assert len({row.scenario_id for row in formal}) == len(formal)
-    assert all(row.replicates == 20 for row in pilot if row.track in {"fit", "omnib"})
+    assert all(
+        row.replicates == 20
+        for row in pilot
+        if row.track in {"fit", "omnib"}
+        and row.parameters.get("experiment") != "encoding"
+    )
     assert any(row.replicates == 500 and row.bootstrap_B == 2000 for row in formal)
     assert sha256_payload([row.to_dict() for row in formal]) == sha256_payload(
         [row.to_dict() for row in formal]
@@ -55,6 +60,17 @@ def test_fixed_scaling_anchors_and_budgets():
         "stage": "pilot", "cpu_hours": 1000, "elapsed_hours": 12,
         "output_gb": 200,
     }
+
+
+def test_scaling_anchor_repeats_match_stage_execution_budget():
+    """Pilot anchors carrying formal repeats would overstate the QA contract."""
+
+    pilot = [row.parameters["anchor"] for row in build_scenarios("pilot")
+             if row.track == "scaling"]
+    formal = [row.parameters["anchor"] for row in build_scenarios("formal")
+              if row.track == "scaling"]
+    assert {anchor.repeats for anchor in pilot} == {1}
+    assert {anchor.repeats for anchor in formal} == {3}
 
 
 def test_pilot_uses_qa_settings_without_changing_scenario_identity():
@@ -110,6 +126,75 @@ def test_power_scenarios_declare_independent_calibration_bank_size():
         ]
         assert power
         assert {row.parameters["calibration_count"] for row in power} == {expected}
+
+
+def test_conditional_registry_locks_complete_null_matrix_and_gate_roles():
+    """Dropping a null arm or promoting a stress arm into core must fail."""
+
+    expected_nulls = {
+        "gaussian",
+        "student_t5",
+        "heteroscedastic_pc1",
+        "contamination_1pct_6sd",
+        "additive_only",
+        "omitted_kernel",
+    }
+    rows = [
+        row for row in build_scenarios("formal")
+        if row.track == "omnib" and row.parameters["experiment"] == "conditional"
+    ]
+    assert len(rows) == 3 * 6 * 2
+    observed = {
+        (
+            row.parameters["backbone"],
+            row.parameters["null_model"],
+            row.parameters["bank"],
+        )
+        for row in rows
+    }
+    assert observed == {
+        (backbone, null_model, bank)
+        for backbone in ("cotton", "wheat", "quartet")
+        for null_model in expected_nulls
+        for bank in ("calibration", "heldout")
+    }
+    for row in rows:
+        null_model = row.parameters["null_model"]
+        assert row.parameters["core"] is (
+            null_model in {"gaussian", "additive_only"}
+        )
+        assert row.parameters["stress"] is (
+            null_model
+            in {
+                "student_t5",
+                "heteroscedastic_pc1",
+                "contamination_1pct_6sd",
+                "omitted_kernel",
+            }
+        )
+        assert row.parameters["descriptive"] is (not row.parameters["core"])
+        assert row.parameters["acceptance_eligible"] is row.parameters["core"]
+        assert row.parameters["failure_boundary"] is (
+            null_model == "omitted_kernel"
+        )
+
+
+def test_registry_has_one_encoding_batch_per_backbone():
+    """Omitting a ploidy backbone from the encoding dispatcher must fail."""
+
+    rows = [
+        row for row in build_scenarios("formal")
+        if row.track == "omnib" and row.parameters["experiment"] == "encoding"
+    ]
+    assert [row.scenario_id for row in rows] == [
+        "B.encoding.cotton",
+        "B.encoding.wheat",
+        "B.encoding.quartet",
+    ]
+    assert [row.parameters["backbone"] for row in rows] == [
+        "cotton", "wheat", "quartet",
+    ]
+    assert all(row.replicates == 1 for row in rows)
 
 
 def test_application_scenarios_are_read_only_and_never_rescan():

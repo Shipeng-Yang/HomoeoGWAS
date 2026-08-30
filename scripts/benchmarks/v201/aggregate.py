@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,16 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import canonical_json, sha256_payload
+from .scenarios import build_scenarios
+
+MASTER_SEED = 20260830
+ACCEPTANCE_RULES = {
+    "wilson_level": 0.95,
+    "core_fwer_upper_wilson_max": 0.075,
+    "core_failure_rate_max": 0.01,
+    "stress_contributes_to_overall": False,
+    "pilot_inference_status": "noninferential_do_not_threshold",
+}
 
 
 class BenchmarkAggregateError(RuntimeError):
@@ -190,6 +201,109 @@ def _expected_replicates(row: RegistryRow) -> range:
     return range(row.replicates)
 
 
+def _file_sha256(path: Path, label: str) -> str:
+    try:
+        if not path.is_file() or path.is_symlink():
+            raise OSError("not a regular file")
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise BenchmarkAggregateError(f"{label} is missing or unreadable") from error
+
+
+def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if reader.fieldnames != ["path", "sha256"]:
+                raise BenchmarkAggregateError("config manifest schema mismatch")
+            rows = list(reader)
+    except OSError as error:
+        raise BenchmarkAggregateError("config manifest is missing or unreadable") from error
+    if not rows:
+        raise BenchmarkAggregateError("config manifest is empty")
+    hashes: dict[str, str] = {}
+    for row in rows:
+        relative = row["path"]
+        if not relative or relative in hashes:
+            raise BenchmarkAggregateError("config manifest has invalid or duplicate paths")
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise BenchmarkAggregateError("config manifest path escapes benchmark root") from error
+        digest = _sha256_hex(row["sha256"], "config hash")
+        if _file_sha256(candidate, "declared config") != digest:
+            raise BenchmarkAggregateError("declared config hash mismatch")
+        hashes[relative] = digest
+    return hashes
+
+
+def _current_git_commit() -> str:
+    repository = Path(__file__).resolve().parents[3]
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise BenchmarkAggregateError("cannot resolve current software commit") from error
+    commit = completed.stdout.strip()
+    if len(commit) != 40 or any(character not in _HEX for character in commit):
+        raise BenchmarkAggregateError("current software commit is invalid")
+    return commit
+
+
+def _validate_locked_root(
+    root: Path,
+    lock: Mapping[str, Any],
+    registry: Sequence[RegistryRow],
+    registry_hash: str,
+) -> None:
+    stage = registry[0].stage
+    canonical = build_scenarios(stage)
+    actual_rows = [
+        {
+            "scenario_id": row.scenario_id, "track": row.track, "stage": row.stage,
+            "replicates": row.replicates, "bootstrap_B": row.bootstrap_B,
+            "parameters": dict(row.parameters),
+        }
+        for row in registry
+    ]
+    expected_rows = [row.to_dict() for row in canonical]
+    if actual_rows != expected_rows:
+        raise BenchmarkAggregateError("scenario registry differs from canonical design")
+    expected_ids = [row.scenario_id for row in canonical]
+    if lock.get("stage") != stage:
+        raise BenchmarkAggregateError("design lock stage differs from registry")
+    if lock.get("ordered_scenario_ids") != expected_ids:
+        raise BenchmarkAggregateError("design scenario order mismatch")
+    if lock.get("scenario_registry_sha256") != registry_hash:
+        raise BenchmarkAggregateError("scenario registry hash mismatch")
+    if lock.get("master_seed") != MASTER_SEED:
+        raise BenchmarkAggregateError("design master seed mismatch")
+    software = lock.get("software")
+    if not isinstance(software, Mapping):
+        raise BenchmarkAggregateError("design software identity is missing")
+    from homoeogwas import __version__
+
+    if software.get("version") != __version__ or software.get("git_commit") != _current_git_commit():
+        raise BenchmarkAggregateError("design software version/commit mismatch")
+    locked_files = {
+        "input_manifest_sha256": root / "inputs" / "manifest.tsv",
+        "comparator_preflight_sha256": root / "inputs" / "comparator_preflight.tsv",
+        "config_manifest_sha256": root / "configs" / "manifest.tsv",
+    }
+    for field, path in locked_files.items():
+        digest = _file_sha256(path, field)
+        if lock.get(field) != digest:
+            raise BenchmarkAggregateError(f"{field} mismatch")
+    config_hashes = _validate_config_manifest(root, locked_files["config_manifest_sha256"])
+    if lock.get("config_hashes") != config_hashes:
+        raise BenchmarkAggregateError("design config hashes mismatch")
+    if lock.get("acceptance_rules") != ACCEPTANCE_RULES:
+        raise BenchmarkAggregateError("design acceptance rules mismatch")
+
+
 def load_evidence(root: str | Path) -> LoadedEvidence:
     """Load and validate a complete immutable evidence set in canonical order."""
 
@@ -205,14 +319,8 @@ def load_evidence(root: str | Path) -> LoadedEvidence:
         raise BenchmarkAggregateError("design hash mismatch")
     registry = _read_registry(registry_path)
     stage = registry[0].stage
-    if lock.get("stage") not in {None, stage}:
-        raise BenchmarkAggregateError("design lock stage differs from registry")
-    ordered_ids = lock.get("ordered_scenario_ids")
-    if ordered_ids is not None and ordered_ids != [row.scenario_id for row in registry]:
-        raise BenchmarkAggregateError("design scenario order mismatch")
     registry_hash = hashlib.sha256(registry_path.read_bytes()).hexdigest()
-    if lock.get("scenario_registry_sha256") not in {None, registry_hash}:
-        raise BenchmarkAggregateError("scenario registry hash mismatch")
+    _validate_locked_root(benchmark_root, lock, registry, registry_hash)
 
     expected: dict[tuple[str, str, int], RegistryRow] = {}
     expected_paths: dict[tuple[str, str, int], Path] = {}
@@ -346,6 +454,7 @@ def _fit_rows(payload: Mapping[str, Any], registry: RegistryRow) -> tuple[str, l
         name = "fit_pve_recovery.tsv"
         true = payload.get("true_pve") or payload.get("target_pve") or {}
         estimated = payload.get("estimated_pve") or {}
+        derived = payload.get("audit_derived") or {}
         rows = []
         for subgenome in sorted((set(true) | set(estimated)) - {"e"}):
             true_value, estimate = true.get(subgenome), estimated.get(subgenome)
@@ -354,8 +463,8 @@ def _fit_rows(payload: Mapping[str, Any], registry: RegistryRow) -> tuple[str, l
                 bias=(estimate - true_value if isinstance(estimate, (int, float))
                       and isinstance(true_value, (int, float)) else None),
                 optimizer_status=payload.get("optimizer_status"),
-                dominant_correct=payload.get("dominant_subgenome_correct"),
-                boundary_fit=payload.get("boundary_fit")))
+                dominant_correct=derived.get("dominant_correct"),
+                boundary_fit=derived.get("boundary_fit")))
         return name, rows or [_empty(name, common, panel=panel, allocation=allocation)]
     if experiment == "coverage":
         name = "fit_pve_coverage.tsv"
@@ -390,15 +499,18 @@ def _fit_rows(payload: Mapping[str, Any], registry: RegistryRow) -> tuple[str, l
                         covered=covered,
                         interval_width=(high - low if isinstance(low, (int, float))
                                         and isinstance(high, (int, float)) else None),
-                        bootstrap_failures=uncertainty.get("B_failed")))
+                        bootstrap_failures=uncertainty.get("B_failed"),
+                        successes=int(bool(covered)), total=1,
+                        estimate=float(bool(covered)), failures=0))
         return name, rows or [_empty(name, common, panel=panel, allocation=allocation)]
     name = "fit_scan_metrics.tsv"
     comparators = payload.get("comparators") or {}
+    derived = payload.get("audit_derived") or {}
     rows = []
     if isinstance(comparators, Mapping):
         for method in sorted(comparators):
             record = comparators[method]
-            fwer = record.get("fwer", {}) if isinstance(record, Mapping) else {}
+            fwer = derived.get(method, {}) if isinstance(derived, Mapping) else {}
             rows.append(_empty(name, common, panel=panel,
                 scan_arm=payload.get("scan_arm", experiment), method=method,
                 scan_pve=registry.parameters.get("scan_pve"),
@@ -487,11 +599,13 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 raise BenchmarkAggregateError("conditional score matrix is invalid")
             for index in range(len(seed_ids)):
                 column = [row[index] for row in matrix]
+                finite = [value for value in column if value is not None]
                 output[name].append(_empty(name, common, method=method,
                     null_model=registry.parameters.get("null_model", "gaussian"),
                     stress=bool(registry.parameters.get("stress", False)),
                     bank_role=bank.get("canonical_role"), response_index=index,
-                    minimum_p=min(column), family_size=len(matrix), family_hash=family_hash,
+                    minimum_p=min(finite) if finite else None,
+                    family_size=len(matrix), family_hash=family_hash,
                     family_order_hash=order_hash, response_seed_id=seed_ids[index]))
             tested = bank.get("tested_family_hashes", {}).get(method)
             output[manifest].append(_empty(manifest, common, method=method,
@@ -526,14 +640,14 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                     interaction_pve=payload.get("interaction_pve"),
                     causal_groups=len(payload.get("causal_group_ids", [])),
                     response_index=index, detected=detected,
-                    recall=payload.get("recall_by_method", {}).get(method),
+                    recall=(payload.get("recall_by_method", {}).get(method) or [None])[index],
                     threshold=thresholds.get(method), family_hash=family_hash,
                     calibration_response_hash=payload.get("calibration_response_hash"),
                     target_response_hash=payload.get("target_response_hash")))
     elif experiment == "encoding":
         name = "omnib_encoding_robustness.tsv"
         for kind, checks in (("exact", payload.get("exact_checks", {})),
-                             ("robustness", payload.get("robustness", {}))):
+                             ("robustness", payload.get("robustness_checks", {}))):
             for perturbation in sorted(checks):
                 record = checks[perturbation]
                 output[name].append(_empty(name, common, perturbation=perturbation,

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from scripts.benchmarks.v201.contracts import Scenario, derive_seed
+from scripts.benchmarks.v201.contracts import Scenario, derive_seed, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_fit import (
     build_fit_config,
@@ -309,6 +309,8 @@ def _scan_truth_metadata(*, scan_pve=0.05, placement="one_subgenome"):
         "causal_variants": causal,
         "realized_signal_pve": scan_pve,
     }
+
+
 def test_pilot_sample_selection_is_pc1_spanning_and_deterministic():
     ids = np.array([f"s{i:03d}" for i in range(250)])
     pc1 = np.linspace(-3, 3, 250)[::-1]
@@ -950,6 +952,19 @@ def test_coverage_binds_simulated_y_truth_and_bed_derived_kernels(tmp_path):
     assert result["released_input_binding"]["phenotype_max_abs_difference"] <= (
         8.0 * np.finfo(np.float64).eps
     )
+    assert result["context_fingerprint"] == sha256_payload(
+        result["fit_context_manifest"]
+    )
+    assert result["request_hash"] == sha256_payload(result["request_manifest"])
+    assert result["truth_hash"] == sha256_payload(result["truth_manifest"])
+    assert result["request_manifest"]["seed"] == result["seed"]
+    assert result["request_manifest"]["truth_hash"] == truth["truth_hash"]
+    assert result["request_manifest"]["released_source_manifest"] == result[
+        "released_source_manifest"
+    ]
+    assert result["request_manifest"]["released_request_binding"] == result[
+        "released_request_binding"
+    ]
     assert phenotype.shape == (24,)
 
 def test_run_fit_replicate_resumes_only_same_sample_and_request(tmp_path):
@@ -988,6 +1003,14 @@ def test_run_fit_replicate_resumes_only_same_sample_and_request(tmp_path):
     assert set(first["pve_bias"]) == {"A", "D", "e"}
     assert first["sample_manifest"]["ordered_sample_ids"][0] == "0000"
     assert len(first["request_hash"]) == len(first["context_fingerprint"]) == 64
+    assert first["context_fingerprint"] == sha256_payload(
+        first["fit_context_manifest"]
+    )
+    assert first["request_hash"] == sha256_payload(first["request_manifest"])
+    assert first["truth_hash"] == sha256_payload(first["truth_manifest"])
+    assert first["truth_hash"] == first["truth"]["truth_hash"]
+    assert first["request_manifest"]["seed"] == first["seed"]
+    assert first["request_manifest"]["truth_hash"] == first["truth_hash"]
     with pytest.raises(ShardConflict):
         run_fit_replicate(
             scenario,
@@ -1243,6 +1266,7 @@ def test_independent_scans_use_one_experiment_wide_fwer_family():
     result = experiment_wide_scan_fwer(
         {"A": np.array([0.03]), "D": np.array([0.03])},
         variant_ids={"A": ["a1"], "D": ["d1"]},
+        variant_positions_bp={"A": [1100], "D": [2200]},
         alpha=0.05,
     )
 
@@ -1250,24 +1274,33 @@ def test_independent_scans_use_one_experiment_wide_fwer_family():
     assert result["family_size"] == 2
     assert result["adjusted_p"] == {"A": [0.06], "D": [0.06]}
     assert result["rejected"] == {"A": [False], "D": [False]}
+    assert result["distance_unit"] == "bp"
+    assert result["ordered_family"] == [
+        {"subgenome": "A", "variant_id": "a1", "position_bp": 1100},
+        {"subgenome": "D", "variant_id": "d1", "position_bp": 2200},
+    ]
     assert len(result["ordered_family_hash"]) == 64
 
 
 def test_scan_fwer_rejects_empty_family_and_retains_nonfinite_planned_tests():
     with pytest.raises(ValueError, match="empty"):
         experiment_wide_scan_fwer(
-            {"A": np.array([])}, variant_ids={"A": []}, alpha=0.05
+            {"A": np.array([])}, variant_ids={"A": []},
+            variant_positions_bp={"A": []}, alpha=0.05
         )
 
     result = experiment_wide_scan_fwer(
         {"A": np.array([0.025]), "D": np.array([np.nan])},
         variant_ids={"A": ["a1"], "D": ["d1"]},
+        variant_positions_bp={"A": [1100], "D": [2200]},
         alpha=0.05,
     )
 
     assert result["planned_count"] == 2
     assert result["finite_count"] == 1
-    assert result["nonfinite_ids"] == [{"subgenome": "D", "variant_id": "d1"}]
+    assert result["nonfinite_ids"] == [
+        {"subgenome": "D", "variant_id": "d1", "position_bp": 2200}
+    ]
     assert result["adjusted_p"] == {"A": [0.05], "D": [None]}
     assert result["rejected"] == {"A": [True], "D": [False]}
     assert result["failure"]["error_type"] == "MissingPValues"
@@ -1568,6 +1601,119 @@ def test_scan_resume_binds_every_current_mapping(monkeypatch, tmp_path, mutation
             shard_path=shard,
             scan_comparators=comparators,
         )
+
+
+def test_scan_bp_positions_are_serialized_and_bound_into_request_hash(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "scripts.benchmarks.v201.track_fit.run_scan_replicate",
+        lambda *args, **kwargs: {
+            "scan_arm": "primary",
+            "failure": {"failed": False, "error_type": None, "message": None},
+        },
+    )
+    n = 12
+    kernels = _toy_kernels(n=n)
+    rng = np.random.default_rng(45)
+    sample_ids = np.asarray([f"s{i:02d}" for i in range(n)])
+    variant_ids = {"A": ["a1"], "D": ["d1"]}
+    positions = {"A": [10100], "D": [20200]}
+
+    def build(current_positions):
+        return build_scan_comparators(
+            kernels,
+            sample_ids=sample_ids,
+            variant_ids=variant_ids,
+            variant_positions_bp=current_positions,
+            standardized_variants={
+                "A": rng.normal(size=(n, 1)),
+                "D": rng.normal(size=(n, 1)),
+            },
+            phenotype=rng.normal(size=n),
+            covariates=np.ones((n, 1)),
+            truth_metadata=_scan_truth_metadata(scan_pve=0.0),
+        )
+
+    comparators = build(positions)
+    scenario = Scenario(
+        "A.scan.cotton.one_subgenome.pve_0",
+        "fit",
+        "pilot",
+        1,
+        0,
+        {"experiment": "scan", "placement": "one_subgenome", "scan_pve": 0.0},
+    )
+    first = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="6" * 64,
+        sample_ids=sample_ids,
+        scan_comparators=comparators,
+    )
+
+    assert first["failure"]["failed"] is False
+    assert first["scan_request_manifest"]["variant_positions_bp"] == positions
+    assert first["scan_request_manifest"]["distance_unit"] == "bp"
+    assert first["request_hash"] == sha256_payload(first["request_manifest"])
+    original_hash = first["request_hash"]
+    comparators["context"]["variant_positions_bp"]["A"][0] += 1
+    second = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="6" * 64,
+        sample_ids=sample_ids,
+        scan_comparators=comparators,
+    )
+    assert second["request_hash"] != original_hash
+
+
+def test_formal_scan_without_explicit_bp_positions_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.benchmarks.v201.track_fit.run_scan_replicate",
+        lambda *args, **kwargs: {
+            "scan_arm": "primary",
+            "failure": {"failed": False, "error_type": None, "message": None},
+        },
+    )
+    n = 12
+    kernels = _toy_kernels(n=n)
+    rng = np.random.default_rng(46)
+    sample_ids = np.asarray([f"s{i:02d}" for i in range(n)])
+    comparators = build_scan_comparators(
+        kernels,
+        sample_ids=sample_ids,
+        variant_ids={"A": ["a1"], "D": ["d1"]},
+        standardized_variants={
+            "A": rng.normal(size=(n, 1)),
+            "D": rng.normal(size=(n, 1)),
+        },
+        phenotype=rng.normal(size=n),
+        covariates=np.ones((n, 1)),
+        truth_metadata=_scan_truth_metadata(scan_pve=0.0),
+    )
+    scenario = Scenario(
+        "A.scan.cotton.one_subgenome.pve_0",
+        "fit",
+        "formal",
+        1,
+        0,
+        {"experiment": "scan", "placement": "one_subgenome", "scan_pve": 0.0},
+    )
+
+    result = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="7" * 64,
+        sample_ids=sample_ids,
+        scan_comparators=comparators,
+    )
+
+    assert result["failure"]["failed"] is True
+    assert "explicit bp positions" in result["failure"]["message"]
 
 
 def test_comparator_preflight_is_two_row_frozen_and_hash_checked(tmp_path):

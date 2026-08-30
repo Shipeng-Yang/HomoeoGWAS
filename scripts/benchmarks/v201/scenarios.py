@@ -105,13 +105,34 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
             ))
 
     # The calibration and held-out banks are disjoint, score-level banks.
+    conditional_nulls = (
+        "gaussian",
+        "student_t5",
+        "heteroscedastic_pc1",
+        "contamination_1pct_6sd",
+        "additive_only",
+        "omitted_kernel",
+    )
     for backbone in ("cotton", "wheat", "quartet"):
-        for bank in ("calibration", "heldout"):
-            rows.append(omnib_row(
-                f"B.conditional.{backbone}.{bank}",
-                20 if stage == "pilot" else 2_000, 199 if stage == "pilot" else 0,
-                backbone=backbone, experiment="conditional", bank=bank,
-            ))
+        for null_model in conditional_nulls:
+            core = null_model in {"gaussian", "additive_only"}
+            for bank in ("calibration", "heldout"):
+                rows.append(omnib_row(
+                    f"B.conditional.{backbone}.{null_model}.{bank}",
+                    20 if stage == "pilot" else 2_000,
+                    199 if stage == "pilot" else 0,
+                    backbone=backbone, experiment="conditional", bank=bank,
+                    null_model=null_model, core=core, stress=not core,
+                    descriptive=not core, acceptance_eligible=core,
+                    failure_boundary=null_model == "omitted_kernel",
+                ))
+
+    for backbone in ("cotton", "wheat", "quartet"):
+        rows.append(omnib_row(
+            f"B.encoding.{backbone}", 1, 199,
+            backbone=backbone, experiment="encoding",
+            include_robustness=True,
+        ))
 
     architectures = (
         "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
@@ -134,11 +155,12 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
 
 
 def _scaling_scenarios(stage: str) -> list[Scenario]:
+    repeats = 1 if stage == "pilot" else 3
     anchors = (
-        ScalingAnchor("small_qa", 192, 192, 3, 3, 199, (1, 4, 8)),
-        ScalingAnchor("cotton_like", 419, 500, 2, 1, 999, (1, 4, 8, 16)),
-        ScalingAnchor("wheat_formal", 827, 2_143, 3, 3, 2_000, (1, 8, 16, 32)),
-        ScalingAnchor("quartet_stress", 500, 500, 4, 6, 999, (1, 8, 16)),
+        ScalingAnchor("small_qa", 192, 192, 3, 3, 199, (1, 4, 8), repeats),
+        ScalingAnchor("cotton_like", 419, 500, 2, 1, 999, (1, 4, 8, 16), repeats),
+        ScalingAnchor("wheat_formal", 827, 2_143, 3, 3, 2_000, (1, 8, 16, 32), repeats),
+        ScalingAnchor("quartet_stress", 500, 500, 4, 6, 999, (1, 8, 16), repeats),
     )
     return [
         _scenario(

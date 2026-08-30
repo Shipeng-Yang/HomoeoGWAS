@@ -1133,6 +1133,20 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _truth_manifest(truth: Mapping[str, Any]) -> dict[str, Any]:
+    """Return and validate the complete serialized input to ``truth_hash``."""
+
+    if not isinstance(truth, Mapping):
+        raise ValueError("truth must be a mapping")
+    declared = truth.get("truth_hash")
+    manifest = _json_safe(
+        {name: value for name, value in truth.items() if name != "truth_hash"}
+    )
+    if not isinstance(declared, str) or sha256_payload(manifest) != declared:
+        raise ValueError("truth hash differs from its serialized manifest")
+    return manifest
+
+
 def _released_source_manifest(
     out_dir: str | Path,
     trait: str,
@@ -1222,6 +1236,9 @@ def _parse_released_scan_evidence(
         raise ValueError("released scan marker count is empty or inconsistent")
     pvalues: dict[str, list[float]] = {name: [] for name in subgenomes}
     variant_ids: dict[str, list[str]] = {name: [] for name in subgenomes}
+    variant_positions_bp: dict[str, list[int]] = {
+        name: [] for name in subgenomes
+    }
     seen: set[str] = set()
     for row in rows:
         name = row["subgenome"]
@@ -1230,15 +1247,22 @@ def _parse_released_scan_evidence(
             raise ValueError("released scan variant family is invalid")
         try:
             pvalue = float(row["p"])
-            int(row["pos"])
+            position = int(row["pos"])
         except (TypeError, ValueError) as error:
             raise ValueError("released scan sumstats values are invalid") from error
-        if math.isinf(pvalue) or (math.isfinite(pvalue) and not 0.0 <= pvalue <= 1.0):
+        if position < 0 or math.isinf(pvalue) or (
+            math.isfinite(pvalue) and not 0.0 <= pvalue <= 1.0
+        ):
             raise ValueError("released scan p-values must be in [0,1] or NaN")
         seen.add(marker)
         variant_ids[name].append(marker)
+        variant_positions_bp[name].append(position)
         pvalues[name].append(pvalue)
-    fwer = experiment_wide_scan_fwer(pvalues, variant_ids=variant_ids)
+    fwer = experiment_wide_scan_fwer(
+        pvalues,
+        variant_ids=variant_ids,
+        variant_positions_bp=variant_positions_bp,
+    )
     with lambda_path.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         if reader.fieldnames != ["scope", "level", "n_markers", "lambda_gc"]:
@@ -1331,7 +1355,14 @@ def run_scan_replicate(
     X = np.asarray(comparators["covariates"], dtype=float)
     variants = comparators["standardized_variants"]
     variant_ids = context_record.get("variant_ids")
-    if not isinstance(variants, Mapping) or not isinstance(variant_ids, Mapping):
+    variant_positions_bp = context_record.get("variant_positions_bp")
+    if (
+        not isinstance(variants, Mapping)
+        or not isinstance(variant_ids, Mapping)
+        or not isinstance(variant_positions_bp, Mapping)
+        or context_record.get("distance_unit") != "bp"
+        or type(context_record.get("bp_positions_explicit")) is not bool
+    ):
         raise ValueError("primary scan variants are invalid")
     if expected_subgenomes is not None and list(variant_ids) != list(
         expected_subgenomes
@@ -1349,6 +1380,11 @@ def run_scan_replicate(
         comparators["canonical_multi_kernel"],
         sample_ids=sample_ids,
         variant_ids=variant_ids,
+        variant_positions_bp=(
+            variant_positions_bp
+            if context_record["bp_positions_explicit"]
+            else None
+        ),
         standardized_variants=variants,
         phenotype=y,
         covariates=X,
@@ -1414,7 +1450,7 @@ def run_scan_replicate(
                 samples=np.asarray(sample_ids, dtype=object),
                 variant_ids=np.asarray(ids, dtype=object),
                 chrom=np.asarray([name] * len(ids), dtype=object),
-                pos=np.arange(1, len(ids) + 1, dtype=np.int64),
+                pos=np.asarray(variant_positions_bp[name], dtype=np.int64),
                 dosage=np.asarray(variants[name], dtype=np.float32),
             )
             scanned = scan_snps(
@@ -1463,17 +1499,25 @@ def run_scan_replicate(
         "canonical_multi_kernel": {
             "fit": canonical_fit,
             "fwer": experiment_wide_scan_fwer(
-                canonical_p, variant_ids=variant_ids
+                canonical_p,
+                variant_ids=variant_ids,
+                variant_positions_bp=variant_positions_bp,
             ),
         },
         "pooled_trace_sum": {
             "fit": pooled_fit,
-            "fwer": experiment_wide_scan_fwer(pooled_p, variant_ids=variant_ids),
+            "fwer": experiment_wide_scan_fwer(
+                pooled_p,
+                variant_ids=variant_ids,
+                variant_positions_bp=variant_positions_bp,
+            ),
         },
         "independent_subgenome": {
             "fit_by_subgenome": independent_fits,
             "fwer": experiment_wide_scan_fwer(
-                independent_p, variant_ids=variant_ids
+                independent_p,
+                variant_ids=variant_ids,
+                variant_positions_bp=variant_positions_bp,
             ),
             "one_experiment_wide_family": True,
         },
@@ -1566,12 +1610,14 @@ def run_fit_replicate(
     fingerprints = {
         name: _kernel_fingerprint(value) for name, value in checked.items()
     }
-    context_fingerprint = sha256_payload(
-        {
-            "kernel_order": list(checked),
-            "kernel_fingerprints": fingerprints,
-            "sample_manifest": samples,
-        }
+    fit_context_manifest = {
+        "kernel_order": list(checked),
+        "kernel_fingerprints": fingerprints,
+        "sample_manifest": samples,
+    }
+    context_fingerprint = sha256_payload(fit_context_manifest)
+    seed = derive_seed(
+        design_hash, "fit", scenario.scenario_id, replicate, scenario.stage
     )
     preflight = None
     preflight_evidence = _preflight_request_evidence(
@@ -1584,36 +1630,43 @@ def run_fit_replicate(
     coverage_truth: dict[str, Any] | None = None
     coverage_request_binding: dict[str, Any] | None = None
     coverage_setup_error: str | None = None
-    if experiment == "coverage":
+    recovery_y: np.ndarray | None = None
+    recovery_truth: dict[str, Any] | None = None
+    recovery_setup_error: str | None = None
+    if experiment in {"recovery", "coverage"}:
         try:
             if "allocation" not in scenario.parameters:
-                raise ValueError("coverage scenario is missing its allocation")
-            coverage_y, coverage_truth = simulate_fit_truth(
+                raise ValueError(
+                    f"{experiment} scenario is missing its allocation"
+                )
+            simulated_y, simulated_truth = simulate_fit_truth(
                 checked,
                 scenario.parameters["allocation"],
-                seed=derive_seed(
-                    design_hash,
-                    "fit",
-                    scenario.scenario_id,
-                    replicate,
-                    scenario.stage,
-                ),
+                seed=seed,
                 total_pve=scenario.parameters.get("total_pve"),
                 dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
                 null_subgenome=scenario.parameters.get("null_subgenome"),
             )
-            coverage_request_binding = {
-                "sample_ids_sha256": samples["ordered_sample_ids_sha256"],
-                "phenotype": _exact_array_fingerprint(coverage_y),
-                "truth_hash": coverage_truth["truth_hash"],
-                "kernel_order": list(checked),
-                "kernel_fingerprints": fingerprints,
-            }
-            coverage_request_binding["sha256"] = sha256_payload(
-                coverage_request_binding
-            )
+            if experiment == "coverage":
+                coverage_y, coverage_truth = simulated_y, simulated_truth
+                coverage_request_binding = {
+                    "sample_ids_sha256": samples["ordered_sample_ids_sha256"],
+                    "phenotype": _exact_array_fingerprint(coverage_y),
+                    "truth_hash": coverage_truth["truth_hash"],
+                    "kernel_order": list(checked),
+                    "kernel_fingerprints": fingerprints,
+                }
+                coverage_request_binding["sha256"] = sha256_payload(
+                    coverage_request_binding
+                )
+            else:
+                recovery_y, recovery_truth = simulated_y, simulated_truth
         except Exception as error:
-            coverage_setup_error = f"{type(error).__name__}: {error}"
+            setup_error = f"{type(error).__name__}: {error}"
+            if experiment == "coverage":
+                coverage_setup_error = setup_error
+            else:
+                recovery_setup_error = setup_error
     released_source = (
         _released_source_manifest(fit_output_dir, trait, experiment)
         if fit_output_dir is not None
@@ -1659,24 +1712,47 @@ def run_fit_replicate(
         if scan_comparators is not None
         else "fit_multi_reml"
     )
-    request_hash = sha256_payload(
-        {
-            "design_hash": design_hash,
-            "context_fingerprint": context_fingerprint,
-            "scenario": scenario.to_dict(),
-            "replicate": replicate,
-            "source": source,
-            "released_source_manifest": released_source,
-            "released_request_binding": released_request_binding,
-            "released_binding_error": released_binding_error,
-            "coverage_request_binding": coverage_request_binding,
-            "coverage_setup_error": coverage_setup_error,
-            "scan_context_fingerprint": scan_context_hash,
-            "scan_request_manifest": scan_request_manifest,
-            "trait": trait,
-            "comparator_preflight": preflight_evidence,
-        }
+    request_truth: Mapping[str, Any] | None = (
+        recovery_truth
+        if recovery_truth is not None
+        else coverage_truth
+        if coverage_truth is not None
+        else scan_comparators.get("truth")
+        if scan_comparators is not None
+        and isinstance(scan_comparators.get("truth"), Mapping)
+        else None
     )
+    truth_manifest: dict[str, Any] | None = None
+    truth_hash: str | None = None
+    truth_manifest_error: str | None = None
+    if request_truth is not None:
+        try:
+            truth_manifest = _truth_manifest(request_truth)
+            truth_hash = str(request_truth["truth_hash"])
+        except Exception as error:
+            truth_manifest_error = f"{type(error).__name__}: {error}"
+    request_manifest = {
+        "design_hash": design_hash,
+        "context_fingerprint": context_fingerprint,
+        "scenario": scenario.to_dict(),
+        "replicate": replicate,
+        "seed": int(seed),
+        "source": source,
+        "released_source_manifest": released_source,
+        "released_request_binding": released_request_binding,
+        "released_binding_error": released_binding_error,
+        "coverage_request_binding": coverage_request_binding,
+        "coverage_setup_error": coverage_setup_error,
+        "recovery_setup_error": recovery_setup_error,
+        "truth_hash": truth_hash,
+        "truth_manifest": truth_manifest,
+        "truth_manifest_error": truth_manifest_error,
+        "scan_context_fingerprint": scan_context_hash,
+        "scan_request_manifest": scan_request_manifest,
+        "trait": trait,
+        "comparator_preflight": preflight_evidence,
+    }
+    request_hash = sha256_payload(request_manifest)
     if shard_path is not None and Path(shard_path).exists():
         existing = load_shard(
             Path(shard_path), ShardKey("fit", scenario.scenario_id, replicate)
@@ -1689,7 +1765,6 @@ def run_fit_replicate(
             raise ShardConflict(f"existing shard differs: {Path(shard_path)}")
         return existing
 
-    seed = derive_seed(design_hash, "fit", scenario.scenario_id, replicate, scenario.stage)
     base = {
         "track": "fit",
         "scenario_id": scenario.scenario_id,
@@ -1702,8 +1777,12 @@ def run_fit_replicate(
         "seed": int(seed),
         "sample_manifest": samples,
         "kernel_fingerprints": fingerprints,
+        "fit_context_manifest": fit_context_manifest,
         "context_fingerprint": context_fingerprint,
+        "request_manifest": request_manifest,
         "request_hash": request_hash,
+        "truth_manifest": truth_manifest,
+        "truth_hash": truth_hash,
         "result_source": source,
         "released_source_manifest": released_source,
         "released_request_binding": released_request_binding,
@@ -1725,6 +1804,8 @@ def run_fit_replicate(
             raise ValueError("comparator_preflight_hash requires its frozen TSV")
         if released_binding_error is not None:
             raise ValueError(released_binding_error)
+        if truth_manifest_error is not None:
+            raise ValueError(truth_manifest_error)
         if comparator_preflight_path is not None:
             if comparator_preflight_hash is None:
                 raise ValueError("comparator preflight requires its frozen hash")
@@ -1770,19 +1851,25 @@ def run_fit_replicate(
                 )
         if experiment not in {"recovery", "coverage", "scan", "loco"}:
             raise ValueError(f"unknown Track A experiment: {experiment!r}")
+        if (
+            experiment == "scan"
+            and scenario.stage == "formal"
+            and (
+                scan_request_manifest is None
+                or scan_request_manifest.get("bp_positions_explicit") is not True
+            )
+        ):
+            raise ValueError("formal scan requires explicit bp positions")
         if experiment == "recovery":
             if fit_output_dir is not None or scan_comparators is not None:
                 raise ValueError("recovery does not accept released or scan inputs")
             if "allocation" not in scenario.parameters:
                 raise ValueError("recovery scenario is missing its allocation")
-            y, truth = simulate_fit_truth(
-                checked,
-                scenario.parameters["allocation"],
-                seed=seed,
-                total_pve=scenario.parameters.get("total_pve"),
-                dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
-                null_subgenome=scenario.parameters.get("null_subgenome"),
-            )
+            if recovery_setup_error is not None:
+                raise ValueError(recovery_setup_error)
+            if recovery_y is None or recovery_truth is None:
+                raise ValueError("recovery request simulation binding is missing")
+            y, truth = recovery_y, recovery_truth
             fitted = fit_pve_replicate(y, checked, seed)
             true = dict(truth["target_pve"])
             estimated = dict(fitted["estimated_pve"])
@@ -1923,6 +2010,11 @@ def _scan_request_manifest(comparators: Mapping[str, Any]) -> dict[str, Any]:
     manifest = {
         "sample_ids": sample_ids.astype(str).tolist(),
         "variant_ids": _json_safe(context.get("variant_ids")),
+        "variant_positions_bp": _json_safe(
+            context.get("variant_positions_bp")
+        ),
+        "distance_unit": context.get("distance_unit"),
+        "bp_positions_explicit": context.get("bp_positions_explicit"),
         "qc_declaration": _json_safe(context.get("qc_declaration")),
         "truth": _json_safe(context.get("truth")),
         "top_level_truth": _json_safe(comparators.get("truth")),
@@ -2007,6 +2099,7 @@ def build_scan_comparators(
     *,
     sample_ids: Sequence[str] | np.ndarray,
     variant_ids: Mapping[str, Sequence[str]],
+    variant_positions_bp: Mapping[str, Sequence[int]] | None = None,
     standardized_variants: Mapping[str, np.ndarray],
     phenotype: Sequence[float] | np.ndarray,
     covariates: np.ndarray,
@@ -2038,8 +2131,17 @@ def build_scan_comparators(
             "standardized_variants must contain exactly the kernel subgenomes"
         )
     ordered_variants: dict[str, list[str]] = {}
+    ordered_positions: dict[str, list[int]] = {}
     frozen_variants: dict[str, np.ndarray] = {}
     all_variants: list[str] = []
+    positions_explicit = variant_positions_bp is not None
+    if variant_positions_bp is not None and (
+        not isinstance(variant_positions_bp, Mapping)
+        or set(variant_positions_bp) != set(checked)
+    ):
+        raise ValueError(
+            "variant_positions_bp must contain exactly the kernel subgenomes"
+        )
     for name in checked:
         raw = list(variant_ids[name])
         if not raw or any(not isinstance(value, str) or not value for value in raw):
@@ -2056,6 +2158,24 @@ def build_scan_comparators(
         frozen_variants[name] = np.array(block, copy=True)
         frozen_variants[name].setflags(write=False)
         ordered_variants[name] = raw
+        raw_positions = (
+            list(variant_positions_bp[name])
+            if variant_positions_bp is not None
+            else list(range(1, len(raw) + 1))
+        )
+        if (
+            len(raw_positions) != len(raw)
+            or any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or int(value) < 0
+                for value in raw_positions
+            )
+        ):
+            raise ValueError(
+                "variant_positions_bp must be aligned non-negative integers"
+            )
+        ordered_positions[name] = [int(value) for value in raw_positions]
         all_variants.extend(raw)
     if len(set(all_variants)) != len(all_variants):
         raise ValueError("variant IDs must be unique across the experiment")
@@ -2073,6 +2193,9 @@ def build_scan_comparators(
     context = {
         "sample_manifest": samples,
         "variant_ids": ordered_variants,
+        "variant_positions_bp": ordered_positions,
+        "distance_unit": "bp",
+        "bp_positions_explicit": positions_explicit,
         "variant_order_hash": sha256_payload(ordered_variants),
         "standardized_variant_fingerprints": {
             name: _numeric_fingerprint(value)
@@ -2120,6 +2243,7 @@ def experiment_wide_scan_fwer(
     pvalues_by_subgenome: Mapping[str, Sequence[float] | np.ndarray],
     *,
     variant_ids: Mapping[str, Sequence[str]],
+    variant_positions_bp: Mapping[str, Sequence[int]],
     alpha: float = 0.05,
 ) -> dict[str, Any]:
     """Bonferroni-correct independent scans as one subgenome-union family."""
@@ -2131,21 +2255,41 @@ def experiment_wide_scan_fwer(
     names = list(pvalues_by_subgenome)
     if not isinstance(variant_ids, Mapping) or set(variant_ids) != set(names):
         raise ValueError("variant_ids must match pvalue subgenomes")
+    if (
+        not isinstance(variant_positions_bp, Mapping)
+        or set(variant_positions_bp) != set(names)
+    ):
+        raise ValueError("variant_positions_bp must match pvalue subgenomes")
     arrays: dict[str, np.ndarray] = {}
-    ordered_members: list[dict[str, str]] = []
+    ordered_members: list[dict[str, Any]] = []
     for name in names:
         values = np.asarray(pvalues_by_subgenome[name], dtype=float)
         ids = list(variant_ids[name])
-        if values.ndim != 1 or values.size != len(ids):
-            raise ValueError("p-values and variant IDs must be aligned vectors")
+        positions = list(variant_positions_bp[name])
+        if values.ndim != 1 or values.size != len(ids) or len(positions) != len(ids):
+            raise ValueError(
+                "p-values, variant IDs, and bp positions must be aligned vectors"
+            )
         finite = values[np.isfinite(values)]
         if np.any((finite < 0.0) | (finite > 1.0)) or np.isinf(values).any():
             raise ValueError("p-values must be in [0, 1] or NaN")
         if any(not isinstance(value, str) or not value for value in ids):
             raise ValueError("variant IDs must be non-empty strings")
+        if any(
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < 0
+            for value in positions
+        ):
+            raise ValueError("variant bp positions must be non-negative integers")
         arrays[name] = values
         ordered_members.extend(
-            {"subgenome": name, "variant_id": variant_id} for variant_id in ids
+            {
+                "subgenome": name,
+                "variant_id": variant_id,
+                "position_bp": int(position),
+            }
+            for variant_id, position in zip(ids, positions, strict=True)
         )
     member_ids = [item["variant_id"] for item in ordered_members]
     if len(set(member_ids)) != len(member_ids):
@@ -2177,6 +2321,7 @@ def experiment_wide_scan_fwer(
     return {
         "method": "bonferroni",
         "family_scope": "experiment_wide_subgenome_union",
+        "distance_unit": "bp",
         "alpha": float(alpha),
         "family_size": family_size,
         "planned_count": family_size,

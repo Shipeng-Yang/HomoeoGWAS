@@ -102,7 +102,9 @@ class ConditionalBank:
     family_hash: str
     design_hash: str
     score_bank: MethodScoreBank
+    tested_family_members: Mapping[str, tuple[str, ...]]
     tested_family_hashes: Mapping[str, str]
+    score_matrix_hashes: Mapping[str, str]
     calibration_reference: Mapping[str, Any]
     execution: Mapping[str, Any]
     runtime_seconds: float
@@ -117,8 +119,18 @@ class ConditionalBank:
             raise ValueError("seed_ids and seeds must have the same length")
         if len(set(self.seed_ids)) != len(self.seed_ids):
             raise ValueError("seed_ids must be unique within a bank")
+        if len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("seeds must be unique within a bank")
         if self.canonical_role not in {"calibration", "heldout", "power"}:
             raise ValueError("invalid canonical response-bank role")
+        methods = set(self.score_bank.p_by_method)
+        if not (
+            methods
+            == set(self.tested_family_members)
+            == set(self.tested_family_hashes)
+            == set(self.score_matrix_hashes)
+        ):
+            raise ValueError("score and tested-family method sets must match")
         values.setflags(write=False)
         object.__setattr__(self, "responses", values)
 
@@ -142,7 +154,12 @@ class ConditionalBank:
             "family_hash": self.family_hash,
             "design_hash": self.design_hash,
             "tested_family_sizes": dict(self.score_bank.tested_family_sizes),
+            "tested_family_members": {
+                method: list(members)
+                for method, members in self.tested_family_members.items()
+            },
             "tested_family_hashes": dict(self.tested_family_hashes),
+            "score_matrix_hashes": dict(self.score_matrix_hashes),
             "calibration_reference": dict(self.calibration_reference),
             "execution": dict(self.execution),
             "requested_jobs": self.execution.get("requested_jobs", 1),
@@ -197,17 +214,19 @@ def _array_hash(values: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _family_manifest(family: MasterGroupFamily) -> dict[str, Any]:
+    return {
+        "subgenomes": list(family.subgenomes),
+        "group_ids": list(family.group_ids),
+        "genes": [list(row) for row in family.genes],
+    }
+
+
 def _family_hash(family: MasterGroupFamily) -> str:
-    return sha256_payload(
-        {
-            "subgenomes": list(family.subgenomes),
-            "group_ids": list(family.group_ids),
-            "genes": [list(row) for row in family.genes],
-        }
-    )
+    return sha256_payload(_family_manifest(family))
 
 
-def _context_fingerprint(context: OmniBBenchmarkContext) -> str:
+def _context_manifest(context: OmniBBenchmarkContext) -> dict[str, Any]:
     subgenomes = []
     for label in context.family.subgenomes:
         data = context.subdata[label]
@@ -230,25 +249,23 @@ def _context_fingerprint(context: OmniBBenchmarkContext) -> str:
                 ],
             }
         )
-    return sha256_payload(
-        {
-            "subgenomes": subgenomes,
-            "family": {
-                "subgenomes": list(context.family.subgenomes),
-                "group_ids": list(context.family.group_ids),
-                "genes": [list(row) for row in context.family.genes],
-            },
-            "sample_idx": {
-                "values": context.sample_idx.tolist(),
-                "sha256": _array_hash(context.sample_idx),
-            },
-            "phenotype": {
-                "shape": list(context.phenotype.shape),
-                "dtype": str(context.phenotype.dtype),
-                "sha256": _array_hash(context.phenotype),
-            },
-        }
-    )
+    return {
+        "subgenomes": subgenomes,
+        "family": _family_manifest(context.family),
+        "sample_idx": {
+            "values": context.sample_idx.tolist(),
+            "sha256": _array_hash(context.sample_idx),
+        },
+        "phenotype": {
+            "shape": list(context.phenotype.shape),
+            "dtype": str(context.phenotype.dtype),
+            "sha256": _array_hash(context.phenotype),
+        },
+    }
+
+
+def _context_fingerprint(context: OmniBBenchmarkContext) -> str:
+    return sha256_payload(_context_manifest(context))
 
 
 def _request_hash(
@@ -752,7 +769,12 @@ def _bank_from_prepared(
         family_hash=prepared.family_hash,
         design_hash=design_hash,
         score_bank=score_bank,
+        tested_family_members=members,
         tested_family_hashes=tested_hashes,
+        score_matrix_hashes={
+            method: _array_hash(values)
+            for method, values in score_bank.p_by_method.items()
+        },
         calibration_reference=dict(calibration_reference),
         execution=response_execution,
         runtime_seconds=float(time.perf_counter() - started),
@@ -899,6 +921,8 @@ def _base_replicate_payload(
     scenario_id: str,
     n_jobs: int,
 ) -> dict[str, Any]:
+    family_manifest = _family_manifest(context.family)
+    context_manifest = _context_manifest(context)
     return {
         "track": "omnib",
         "scenario_id": scenario_id,
@@ -916,8 +940,10 @@ def _base_replicate_payload(
         "direct_higher_order_term": False,
         "requested_jobs": int(n_jobs),
         "family_ids": list(context.family.group_ids),
-        "family_hash": _family_hash(context.family),
-        "context_fingerprint": _context_fingerprint(context),
+        "family_manifest": family_manifest,
+        "family_hash": sha256_payload(family_manifest),
+        "context_manifest": context_manifest,
+        "context_fingerprint": sha256_payload(context_manifest),
     }
 
 
@@ -1067,6 +1093,17 @@ def run_end_to_end_null(
                 "adjusted_decisions": (adjusted <= 0.05).tolist(),
                 "qa_diagnostic_rejections": qa_rejections,
                 "bootstrap_minp": _json_safe(calibration),
+                "null_minima": _json_safe(
+                    np.where(
+                        np.isfinite(scores.group_p[:, 1:]).all(axis=0),
+                        np.where(
+                            np.isfinite(scores.group_p[:, 1:]),
+                            scores.group_p[:, 1:],
+                            np.inf,
+                        ).min(axis=0),
+                        0.0,
+                    )
+                ),
                 "family_order_hash": sha256_payload(list(context.family.group_ids)),
                 "observed_group_p_hash": _array_hash(scores.group_p[:, 0]),
                 "bootstrap_group_p_hash": _array_hash(scores.group_p[:, 1:]),
@@ -1273,6 +1310,46 @@ def run_power_replicate(
         else [False] * response_count
         for method in METHOD_NAMES
     }
+    calibration_minima = {
+        method: np.where(
+            np.isfinite(values).any(axis=0),
+            np.where(np.isfinite(values), values, np.inf).min(axis=0),
+            np.nan,
+        )
+        for method, values in calibration.p_by_method.items()
+    }
+    target_minima = {
+        method: np.where(
+            np.isfinite(values).any(axis=0),
+            np.where(np.isfinite(values), values, np.inf).min(axis=0),
+            np.nan,
+        )
+        for method, values in target.p_by_method.items()
+    }
+    causal_minima = {
+        method: np.asarray(values[causal_index], dtype=float)
+        for method, values in target.p_by_method.items()
+    }
+    calibration_minima_hashes = {
+        method: sha256_payload(_json_safe(values))
+        for method, values in calibration_minima.items()
+    }
+    target_minima_hashes = {
+        method: sha256_payload(_json_safe(values))
+        for method, values in target_minima.items()
+    }
+    causal_minima_hashes = {
+        method: sha256_payload(_json_safe(values))
+        for method, values in causal_minima.items()
+    }
+    recall = {
+        method: (
+            np.mean(causal_minima[method] < thresholds[method], axis=0).tolist()
+            if thresholds[method] is not None
+            else [0.0] * response_count
+        )
+        for method in METHOD_NAMES
+    }
     payload = _base_replicate_payload(
         context,
         replicate=replicate,
@@ -1293,12 +1370,27 @@ def run_power_replicate(
             "target_role": target.canonical_role,
             "calibration_seed_ids": list(calibration.seed_ids),
             "target_seed_ids": list(target.seed_ids),
+            "calibration_response_ids": list(calibration.seed_ids),
+            "target_response_ids": list(target.seed_ids),
+            "failed_calibration_response_indices": list(
+                calibration.failure.get("failed_response_indices", [])
+            ),
+            "failed_target_response_indices": list(
+                target.failure.get("failed_response_indices", [])
+            ),
             "calibration_response_hash": calibration.response_hash,
             "target_response_hash": target.response_hash,
             "threshold_source": "independent_calibration_bank",
             "thresholds": thresholds,
             "rejections_by_method": rejections,
             "causal_detection_by_method": causal_detection,
+            "recall_by_method": recall,
+            "calibration_minima_by_method": calibration_minima,
+            "target_minima_by_method": target_minima,
+            "causal_minima_by_method": causal_minima,
+            "calibration_minima_hashes": calibration_minima_hashes,
+            "target_minima_hashes": target_minima_hashes,
+            "causal_minima_hashes": causal_minima_hashes,
             "calibration_bank": calibration.to_payload(include_scores=False),
             "target_bank": target.to_payload(include_scores=False),
             "effective_jobs": target.execution.get("effective_jobs", 1),
@@ -1625,11 +1717,15 @@ def run_encoding_check(
     n_jobs: int = 1,
     parallel_jobs: int = 2,
     include_robustness: bool = True,
+    qa_only: bool = True,
+    scenario_id: str = "B.encoding.synthetic",
+    replicate: int = 0,
 ) -> dict[str, Any]:
     """Run exact invariance challenges and separately labelled robustness checks."""
 
     bootstrap_B = _validate_count(bootstrap_B, "bootstrap_B")
     started = time.perf_counter()
+    stage = _stage(qa_only)
     request_hash = _request_hash(
         design_hash=design_hash,
         context=context,
@@ -1639,10 +1735,13 @@ def run_encoding_check(
             "n_jobs": n_jobs,
             "parallel_jobs": parallel_jobs,
             "include_robustness": include_robustness,
+            "qa_only": qa_only,
+            "scenario_id": scenario_id,
+            "replicate": replicate,
         },
     )
     seed, seed_id = _seed(
-        design_hash, "B.encoding.synthetic", 0, "pilot", "calibration"
+        design_hash, scenario_id, replicate, stage, "calibration"
     )
     baseline = _score_fixed_context(
         context,
@@ -1734,15 +1833,17 @@ def run_encoding_check(
     )
     return _json_safe(
         {
-            "track": "omnib",
+            **_base_replicate_payload(
+                context,
+                replicate=replicate,
+                design_hash=design_hash,
+                stage=stage,
+                scenario_id=scenario_id,
+                n_jobs=n_jobs,
+            ),
             "experiment": "encoding",
-            "stage": "pilot",
-            "formal": False,
-            "qa_only": True,
             "inference_status": "noninferential_do_not_threshold",
-            "design_hash": design_hash,
             "request_hash": request_hash,
-            "context_fingerprint": _context_fingerprint(context),
             "seed_id": seed_id,
             "response_hash": baseline["response_hash"],
             "bootstrap_B": bootstrap_B,
@@ -1750,8 +1851,6 @@ def run_encoding_check(
             "family_scope": "primary_only",
             "pair_edges_per_group": _edge_count_per_group(context),
             "direct_higher_order_term": False,
-            "family_ids": list(context.family.group_ids),
-            "family_hash": _family_hash(context.family),
             "null_covariance": baseline["null_covariance"],
             "exact_checks": exact_checks,
             "all_required_exact": all_required_exact,
@@ -1769,7 +1868,6 @@ def run_encoding_check(
             },
             "robustness_checks": robustness,
             "robustness_is_exact_invariance": False,
-            "requested_jobs": n_jobs,
             "effective_jobs": baseline["execution"].get("effective_jobs", 1),
             "parallel_backend": baseline["execution"].get("backend", "serial"),
             "worker_pids": list(baseline["execution"].get("worker_pids", [])),
@@ -1794,7 +1892,7 @@ def run_omnib_replicate(
     if replicate < 0 or replicate >= scenario.replicates:
         raise ValueError("replicate is outside the scenario registry range")
     experiment = scenario.parameters.get("experiment")
-    if experiment not in {"end2end", "conditional", "power"}:
+    if experiment not in {"end2end", "conditional", "power", "encoding"}:
         raise ValueError(f"unsupported Track B experiment: {experiment!r}")
     canonical_bank = (
         _canonical_role(str(scenario.parameters.get("bank", "heldout")))
@@ -1844,6 +1942,7 @@ def run_omnib_replicate(
                 design_hash=design_hash,
                 n_jobs=n_jobs,
                 qa_only=qa_only,
+                null_model=str(scenario.parameters.get("null_model", "gaussian")),
                 scenario_id=scenario.scenario_id,
                 replicate_offset=0,
             )
@@ -1860,7 +1959,7 @@ def run_omnib_replicate(
                 "bank": bank.to_payload(),
                 "failure": dict(bank.failure),
             }
-        else:
+        elif experiment == "power":
             payload = run_power_replicate(
                 context,
                 replicate=replicate,
@@ -1872,7 +1971,24 @@ def run_omnib_replicate(
                 design_hash=design_hash,
                 qa_only=qa_only,
                 n_jobs=n_jobs,
+                null_model=str(scenario.parameters.get("null_model", "gaussian")),
                 scenario_id=scenario.scenario_id,
+            )
+        else:
+            payload = run_encoding_check(
+                context,
+                bootstrap_B=scenario.bootstrap_B,
+                design_hash=design_hash,
+                n_jobs=n_jobs,
+                parallel_jobs=int(
+                    scenario.parameters.get("parallel_jobs", max(2, n_jobs))
+                ),
+                include_robustness=bool(
+                    scenario.parameters.get("include_robustness", True)
+                ),
+                qa_only=qa_only,
+                scenario_id=scenario.scenario_id,
+                replicate=replicate,
             )
     except Exception as error:
         payload = {
