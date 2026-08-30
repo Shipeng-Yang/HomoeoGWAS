@@ -128,6 +128,7 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                         backbone=backbone, experiment="power",
                         architecture=architecture, causal_groups=causal_groups,
                         interaction_pve=pve,
+                        calibration_count=20 if stage == "pilot" else 2_000,
                     ))
     return rows
 

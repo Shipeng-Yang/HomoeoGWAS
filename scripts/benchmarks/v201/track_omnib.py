@@ -26,7 +26,13 @@ from homoeogwas.omnib_family import (
     score_omnib_responses,
 )
 
-from .comparators import METHOD_NAMES, MethodScoreBank, group_component_p, score_snpxsnp_family
+from .comparators import (
+    METHOD_NAMES,
+    MethodScoreBank,
+    _nested_snp_product_design,
+    group_component_p,
+    score_snpxsnp_family,
+)
 from .contracts import Scenario, derive_seed, sha256_payload
 from .shards import ShardConflict, ShardKey, load_shard, write_shard_exclusive
 from .simulation import compose_exact_pve, draw_null, interaction_signal, standardize
@@ -97,6 +103,7 @@ class ConditionalBank:
     design_hash: str
     score_bank: MethodScoreBank
     tested_family_hashes: Mapping[str, str]
+    calibration_reference: Mapping[str, Any]
     execution: Mapping[str, Any]
     runtime_seconds: float
     null_covariance: Mapping[str, Any]
@@ -136,6 +143,7 @@ class ConditionalBank:
             "design_hash": self.design_hash,
             "tested_family_sizes": dict(self.score_bank.tested_family_sizes),
             "tested_family_hashes": dict(self.tested_family_hashes),
+            "calibration_reference": dict(self.calibration_reference),
             "execution": dict(self.execution),
             "requested_jobs": self.execution.get("requested_jobs", 1),
             "effective_jobs": self.execution.get("effective_jobs", 1),
@@ -195,6 +203,65 @@ def _family_hash(family: MasterGroupFamily) -> str:
             "subgenomes": list(family.subgenomes),
             "group_ids": list(family.group_ids),
             "genes": [list(row) for row in family.genes],
+        }
+    )
+
+
+def _context_fingerprint(context: OmniBBenchmarkContext) -> str:
+    subgenomes = []
+    for label in context.family.subgenomes:
+        data = context.subdata[label]
+        values = np.asarray(data.X)
+        subgenomes.append(
+            {
+                "label": label,
+                "samples": [str(sample) for sample in data.samples],
+                "X": {
+                    "shape": list(values.shape),
+                    "dtype": str(values.dtype),
+                    "sha256": _array_hash(values),
+                },
+                "gene_snp": [
+                    {
+                        "gene": str(gene),
+                        "indices": np.asarray(indices, dtype=int).tolist(),
+                    }
+                    for gene, indices in sorted(data.gene_snp.items())
+                ],
+            }
+        )
+    return sha256_payload(
+        {
+            "subgenomes": subgenomes,
+            "family": {
+                "subgenomes": list(context.family.subgenomes),
+                "group_ids": list(context.family.group_ids),
+                "genes": [list(row) for row in context.family.genes],
+            },
+            "sample_idx": {
+                "values": context.sample_idx.tolist(),
+                "sha256": _array_hash(context.sample_idx),
+            },
+            "phenotype": {
+                "shape": list(context.phenotype.shape),
+                "dtype": str(context.phenotype.dtype),
+                "sha256": _array_hash(context.phenotype),
+            },
+        }
+    )
+
+
+def _request_hash(
+    *,
+    design_hash: str,
+    context: OmniBBenchmarkContext,
+    request: Mapping[str, Any],
+) -> str:
+    return sha256_payload(
+        {
+            "design_hash": design_hash,
+            "context_fingerprint": _context_fingerprint(context),
+            "request": _json_safe(request),
         }
     )
 
@@ -401,7 +468,7 @@ def _method_scores(
     *,
     n_jobs: int,
     calibration_responses: np.ndarray | None = None,
-) -> MethodScoreBank:
+) -> tuple[MethodScoreBank, dict[str, Any]]:
     _edge, group, components = score_omnib_responses(
         prepared.scores,
         prepared.context.family,
@@ -409,6 +476,7 @@ def _method_scores(
         responses,
         n_jobs=n_jobs,
     )
+    response_execution = dict(prepared.scores.parallel_execution)
     component_scores = [
         group_component_p(components, prepared.expanded, component_index=index)
         for index in range(3)
@@ -424,25 +492,71 @@ def _method_scores(
         ),
     )
     group_count = len(prepared.context.family.group_ids)
-    return MethodScoreBank(
-        family_ids=prepared.context.family.group_ids,
-        p_by_method={
-            "omnib": group,
-            "minor_burden": component_scores[0],
-            "pc1": component_scores[1],
-            "kernel_hadamard": component_scores[2],
-            "legacy_burden_product": component_scores[0].copy(),
-            "snpxsnp": snpxsnp,
-        },
-        tested_family_sizes={
-            "omnib": group_count,
-            "minor_burden": group_count,
-            "pc1": group_count,
-            "kernel_hadamard": group_count,
-            "legacy_burden_product": group_count,
-            "snpxsnp": snpxsnp_size,
-        },
+    return (
+        MethodScoreBank(
+            family_ids=prepared.context.family.group_ids,
+            p_by_method={
+                "omnib": group,
+                "minor_burden": component_scores[0],
+                "pc1": component_scores[1],
+                "kernel_hadamard": component_scores[2],
+                "legacy_burden_product": component_scores[0].copy(),
+                "snpxsnp": snpxsnp,
+            },
+            tested_family_sizes={
+                "omnib": group_count,
+                "minor_burden": group_count,
+                "pc1": group_count,
+                "kernel_hadamard": group_count,
+                "legacy_burden_product": group_count,
+                "snpxsnp": snpxsnp_size,
+            },
+        ),
+        response_execution,
     )
+
+
+def _tested_family_members(prepared: _PreparedScenario) -> dict[str, tuple[str, ...]]:
+    local_members = tuple(
+        f"{group_id}|edges="
+        + ",".join(
+            prepared.expanded.edges[edge_index].edge_id
+            + f":estimable={int(prepared.scores.edge_estimable[edge_index])}"
+            for edge_index in prepared.expanded.group_edge_indices[group_index]
+        )
+        for group_index, group_id in enumerate(prepared.context.family.group_ids)
+    )
+    snpxsnp_members: list[str] = []
+    W = np.asarray(prepared.scores.W, dtype=float)
+    Cw = W @ np.asarray(prepared.scores.null_design, dtype=float)
+    for edge in prepared.expanded.edges:
+        left_key = (edge.sub_x, edge.gene_x)
+        right_key = (edge.sub_y, edge.gene_y)
+        left = prepared.gene_blocks[left_key]
+        right = prepared.gene_blocks[right_key]
+        left_columns = np.asarray(prepared.scores.gated_snp[left_key], dtype=int)
+        right_columns = np.asarray(prepared.scores.gated_snp[right_key], dtype=int)
+        for left_local, left_column in enumerate(left_columns):
+            for right_local, right_column in enumerate(right_columns):
+                if _nested_snp_product_design(
+                    W,
+                    Cw,
+                    left[:, left_local],
+                    right[:, right_local],
+                ) is None:
+                    continue
+                snpxsnp_members.append(
+                    f"{edge.edge_id}|{int(left_column)}|{int(right_column)}"
+                )
+    members = {
+        "omnib": local_members,
+        "minor_burden": local_members,
+        "pc1": local_members,
+        "kernel_hadamard": local_members,
+        "legacy_burden_product": local_members,
+        "snpxsnp": tuple(snpxsnp_members),
+    }
+    return members
 
 
 def _draw_bank_responses(
@@ -520,6 +634,7 @@ def _bank_from_prepared(
     n_jobs: int,
     response_factory: Any = None,
     calibration_responses: np.ndarray | None = None,
+    calibration_reference: Mapping[str, Any] | None = None,
 ) -> ConditionalBank:
     started = time.perf_counter()
     canonical_role = _canonical_role(bank)
@@ -535,9 +650,40 @@ def _bank_from_prepared(
         null_model=null_model,
         response_factory=response_factory,
     )
+    response_hash = _array_hash(responses)
+    if canonical_role == "calibration" and calibration_responses is None:
+        calibration_responses = responses
+        calibration_reference = {
+            "requested_role": bank,
+            "canonical_role": "calibration",
+            "seed_ids": list(seed_ids),
+            "response_hash": response_hash,
+            "shares_memory": True,
+            "self_calibration_allowed": True,
+        }
+    elif calibration_responses is None or calibration_reference is None:
+        raise ValueError(
+            "heldout/power response scoring requires an independent calibration bank"
+        )
+    else:
+        reference_seed_ids = set(calibration_reference.get("seed_ids", []))
+        if set(seed_ids) & reference_seed_ids:
+            raise RuntimeError("target and calibration response banks share seed IDs")
+        if np.shares_memory(responses, calibration_responses):
+            raise RuntimeError("target and calibration response banks share ndarray memory")
+        calibration_hash = _array_hash(calibration_responses)
+        if response_hash == calibration_hash:
+            raise RuntimeError("target and calibration response banks share a response hash")
+        if calibration_reference.get("response_hash") != calibration_hash:
+            raise RuntimeError("calibration response hash does not match its provenance")
+        calibration_reference = {
+            **dict(calibration_reference),
+            "shares_memory": False,
+            "self_calibration_allowed": False,
+        }
     failure: dict[str, Any] = {"failed": False, "failed_response_indices": []}
     try:
-        score_bank = _method_scores(
+        score_bank, response_execution = _method_scores(
             prepared,
             responses,
             n_jobs=n_jobs,
@@ -551,19 +697,45 @@ def _bank_from_prepared(
             "message": str(error),
         }
         raise RuntimeError(f"conditional bank scoring failed: {error}") from error
-    failed_by_method = {
+    nonfinite_by_method = {
         method: np.flatnonzero(~np.isfinite(values).all(axis=0)).astype(int).tolist()
         for method, values in score_bank.p_by_method.items()
     }
-    failure["failed_response_indices_by_method"] = failed_by_method
-    failure["any_nonfinite"] = any(failed_by_method.values())
+    all_nan_by_method = {
+        method: np.flatnonzero(~np.isfinite(values).any(axis=0)).astype(int).tolist()
+        for method, values in score_bank.p_by_method.items()
+    }
+    failed_indices = sorted(
+        {
+            index
+            for indices in nonfinite_by_method.values()
+            for index in indices
+        }
+    )
+    failure.update(
+        {
+            "failed": bool(failed_indices),
+            "status": (
+                "failed"
+                if len(failed_indices) == count
+                else "partial_failure" if failed_indices else "completed"
+            ),
+            "failed_response_indices": failed_indices,
+            "nonfinite_response_indices_by_method": nonfinite_by_method,
+            "all_nan_response_indices_by_method": all_nan_by_method,
+            "any_nonfinite": bool(failed_indices),
+        }
+    )
+    members = _tested_family_members(prepared)
+    for method in METHOD_NAMES:
+        if len(members[method]) != score_bank.tested_family_sizes[method]:
+            raise RuntimeError(
+                f"tested-family member count disagrees for {method}: "
+                f"{len(members[method])} != {score_bank.tested_family_sizes[method]}"
+            )
     tested_hashes = {
         method: sha256_payload(
-            {
-                "method": method,
-                "ordered_group_ids": list(score_bank.family_ids),
-                "tested_family_size": score_bank.tested_family_sizes[method],
-            }
+            {"method": method, "ordered_member_ids": list(members[method])}
         )
         for method in METHOD_NAMES
     }
@@ -574,14 +746,15 @@ def _bank_from_prepared(
         seed_ids=seed_ids,
         seeds=seeds,
         responses=responses,
-        response_hash=_array_hash(responses),
+        response_hash=response_hash,
         response_metadata=response_metadata,
         family_ids=score_bank.family_ids,
         family_hash=prepared.family_hash,
         design_hash=design_hash,
         score_bank=score_bank,
         tested_family_hashes=tested_hashes,
-        execution=dict(prepared.scores.parallel_execution),
+        calibration_reference=dict(calibration_reference),
+        execution=response_execution,
         runtime_seconds=float(time.perf_counter() - started),
         null_covariance={
             "components": dict(prepared.scores.covariance_components),
@@ -590,6 +763,29 @@ def _bank_from_prepared(
         },
         failure=failure,
     )
+
+
+def _calibration_scenario_id(scenario_id: str) -> str:
+    for suffix in (".heldout", ".evaluation", ".power"):
+        if scenario_id.endswith(suffix):
+            return scenario_id.removesuffix(suffix) + ".calibration"
+    if scenario_id.endswith(".calibration"):
+        return scenario_id
+    return scenario_id + ".calibration"
+
+
+def _calibration_reference(
+    responses: np.ndarray,
+    seed_ids: Sequence[str],
+    scenario_id: str,
+) -> dict[str, Any]:
+    return {
+        "requested_role": "calibration",
+        "canonical_role": "calibration",
+        "scenario_id": scenario_id,
+        "seed_ids": list(seed_ids),
+        "response_hash": _array_hash(responses),
+    }
 
 
 def run_conditional_bank(
@@ -607,7 +803,7 @@ def run_conditional_bank(
     """Prepare once, then score one role-separated conditional response bank."""
 
     count = _validate_count(count)
-    _canonical_role(bank)
+    canonical_role = _canonical_role(bank)
     _require_formal_budget(count, qa_only, "conditional bank")
     stage = _stage(qa_only)
     prepared = _prepare_scenario(
@@ -617,6 +813,31 @@ def run_conditional_bank(
         scenario_id=scenario_id,
         n_jobs=n_jobs,
     )
+    calibration_responses = None
+    calibration_reference = None
+    if canonical_role != "calibration":
+        reference_scenario_id = _calibration_scenario_id(scenario_id)
+        (
+            calibration_responses,
+            _calibration_seeds,
+            calibration_seed_ids,
+            _calibration_metadata,
+        ) = _draw_bank_responses(
+            prepared,
+            requested_role="calibration",
+            canonical_role="calibration",
+            count=count,
+            design_hash=design_hash,
+            stage=stage,
+            scenario_id=reference_scenario_id,
+            replicate_offset=0,
+            null_model=null_model,
+        )
+        calibration_reference = _calibration_reference(
+            calibration_responses,
+            calibration_seed_ids,
+            reference_scenario_id,
+        )
     return _bank_from_prepared(
         prepared,
         bank=bank,
@@ -627,6 +848,8 @@ def run_conditional_bank(
         replicate_offset=replicate_offset,
         null_model=null_model,
         n_jobs=n_jobs,
+        calibration_responses=calibration_responses,
+        calibration_reference=calibration_reference,
     )
 
 
@@ -639,8 +862,13 @@ def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None
     if not 0.0 < float(alpha) < 1.0:
         raise ValueError("alpha must be strictly between zero and one")
     finite = np.isfinite(values)
+    all_nan_columns = np.flatnonzero(~finite.any(axis=0)).astype(int).tolist()
+    if all_nan_columns:
+        raise ValueError(
+            "calibration contains all-NaN response columns: "
+            + ",".join(str(index) for index in all_nan_columns)
+        )
     family_min = np.where(finite, values, np.inf).min(axis=0)
-    family_min[~finite.any(axis=0)] = np.nan
     k = int(np.floor(float(alpha) * (family_min.size + 1)))
     return None if k < 1 else float(np.sort(family_min)[k - 1])
 
@@ -689,6 +917,7 @@ def _base_replicate_payload(
         "requested_jobs": int(n_jobs),
         "family_ids": list(context.family.group_ids),
         "family_hash": _family_hash(context.family),
+        "context_fingerprint": _context_fingerprint(context),
     }
 
 
@@ -698,6 +927,7 @@ def _resume_existing_shard(
     scenario_id: str,
     replicate: int,
     design_hash: str,
+    request_hash: str,
 ) -> dict[str, Any] | None:
     if shard_path is None or not Path(shard_path).exists():
         return None
@@ -705,7 +935,10 @@ def _resume_existing_shard(
         Path(shard_path),
         ShardKey("omnib", scenario_id, replicate),
     )
-    if existing["design_hash"] != design_hash:
+    if (
+        existing["design_hash"] != design_hash
+        or existing.get("request_hash") != request_hash
+    ):
         raise ShardConflict(f"existing shard differs: {Path(shard_path)}")
     return existing
 
@@ -730,16 +963,31 @@ def run_end_to_end_null(
     """
 
     bootstrap_B = _validate_count(bootstrap_B, "bootstrap_B")
-    _require_formal_budget(bootstrap_B, qa_only, "end-to-end calibration")
+    stage = _stage(qa_only)
+    request_hash = _request_hash(
+        design_hash=design_hash,
+        context=context,
+        request={
+            "entrypoint": "run_end_to_end_null",
+            "scenario_id": scenario_id,
+            "replicate": replicate,
+            "stage": stage,
+            "qa_only": qa_only,
+            "bootstrap_B": bootstrap_B,
+            "null_model": null_model,
+            "n_jobs": n_jobs,
+        },
+    )
     existing = _resume_existing_shard(
         shard_path,
         scenario_id=scenario_id,
         replicate=replicate,
         design_hash=design_hash,
+        request_hash=request_hash,
     )
     if existing is not None:
         return existing
-    stage = _stage(qa_only)
+    _require_formal_budget(bootstrap_B, qa_only, "end-to-end calibration")
     observed_seed, observed_seed_id = _seed(
         design_hash, scenario_id, replicate, stage, "heldout"
     )
@@ -763,6 +1011,7 @@ def run_end_to_end_null(
     payload.update(
         {
             "experiment": "end2end",
+            "request_hash": request_hash,
             "bootstrap_B": bootstrap_B,
             "response_role": "heldout",
             "response_seed": observed_seed,
@@ -915,16 +1164,35 @@ def run_power_replicate(
 
     calibration_count = _validate_count(calibration_count, "calibration_count")
     response_count = _validate_count(response_count, "response_count")
-    _require_formal_budget(calibration_count, qa_only, "power calibration bank")
+    stage = _stage(qa_only)
+    request_hash = _request_hash(
+        design_hash=design_hash,
+        context=context,
+        request={
+            "entrypoint": "run_power_replicate",
+            "scenario_id": scenario_id,
+            "replicate": replicate,
+            "stage": stage,
+            "qa_only": qa_only,
+            "architecture": architecture,
+            "interaction_pve": interaction_pve,
+            "causal_groups": causal_groups,
+            "calibration_count": calibration_count,
+            "response_count": response_count,
+            "null_model": null_model,
+            "n_jobs": n_jobs,
+        },
+    )
     existing = _resume_existing_shard(
         shard_path,
         scenario_id=scenario_id,
         replicate=replicate,
         design_hash=design_hash,
+        request_hash=request_hash,
     )
     if existing is not None:
         return existing
-    stage = _stage(qa_only)
+    _require_formal_budget(calibration_count, qa_only, "power calibration bank")
     started = time.perf_counter()
     prepared = _prepare_scenario(
         context,
@@ -974,12 +1242,21 @@ def run_power_replicate(
         n_jobs=n_jobs,
         response_factory=causal_response,
         calibration_responses=calibration.responses,
+        calibration_reference=_calibration_reference(
+            calibration.responses,
+            calibration.seed_ids,
+            scenario_id,
+        ),
     )
     _assert_independent_banks(calibration, target)
-    thresholds = {
-        method: empirical_threshold(calibration.p_by_method[method])
-        for method in METHOD_NAMES
-    }
+    thresholds: dict[str, float | None] = {}
+    threshold_failures: dict[str, str] = {}
+    for method in METHOD_NAMES:
+        try:
+            thresholds[method] = empirical_threshold(calibration.p_by_method[method])
+        except ValueError as error:
+            thresholds[method] = None
+            threshold_failures[method] = str(error)
     rejections = {
         method: apply_threshold(target.p_by_method[method], thresholds[method]).tolist()
         for method in METHOD_NAMES
@@ -1007,6 +1284,7 @@ def run_power_replicate(
     payload.update(
         {
             "experiment": "power",
+            "request_hash": request_hash,
             "architecture": architecture,
             "interaction_pve": float(interaction_pve),
             "causal_group_ids": causal_ids,
@@ -1032,7 +1310,19 @@ def run_power_replicate(
                 "sha256": _array_hash(prepared.scores.null_covariance),
             },
             "failure": {
-                "failed": False,
+                "failed": bool(
+                    calibration.failure.get("failed")
+                    or target.failure.get("failed")
+                    or threshold_failures
+                ),
+                "status": (
+                    "partial_failure"
+                    if calibration.failure.get("failed")
+                    or target.failure.get("failed")
+                    or threshold_failures
+                    else "completed"
+                ),
+                "threshold_failures": threshold_failures,
                 "calibration": dict(calibration.failure),
                 "target": dict(target.failure),
             },
@@ -1088,6 +1378,7 @@ def _score_fixed_context(
     )
     return {
         "group_ids": group_ids,
+        "response_hash": _array_hash(np.asarray(phenotype, dtype=float)),
         "observed": np.asarray(scores.group_p[:, 0], dtype=float),
         "adjusted": adjusted,
         "decisions": adjusted <= 0.05,
@@ -1095,6 +1386,11 @@ def _score_fixed_context(
         "ranking_hash": sha256_payload([group_ids[index] for index in order]),
         "execution": dict(scores.parallel_execution),
         "estimable": np.asarray(scores.group_estimable, dtype=bool),
+        "null_covariance": {
+            "components": dict(scores.covariance_components),
+            "shape": list(scores.null_covariance.shape),
+            "sha256": _array_hash(scores.null_covariance),
+        },
     }
 
 
@@ -1334,6 +1630,17 @@ def run_encoding_check(
 
     bootstrap_B = _validate_count(bootstrap_B, "bootstrap_B")
     started = time.perf_counter()
+    request_hash = _request_hash(
+        design_hash=design_hash,
+        context=context,
+        request={
+            "entrypoint": "run_encoding_check",
+            "bootstrap_B": bootstrap_B,
+            "n_jobs": n_jobs,
+            "parallel_jobs": parallel_jobs,
+            "include_robustness": include_robustness,
+        },
+    )
     seed, seed_id = _seed(
         design_hash, "B.encoding.synthetic", 0, "pilot", "calibration"
     )
@@ -1421,6 +1728,10 @@ def run_encoding_check(
         "ranking_hash_identical",
         "rejection_sets_identical",
     )
+    all_required_exact = all(
+        all(bool(check[field]) for field in exact_fields)
+        for check in required_checks
+    )
     return _json_safe(
         {
             "track": "omnib",
@@ -1430,7 +1741,10 @@ def run_encoding_check(
             "qa_only": True,
             "inference_status": "noninferential_do_not_threshold",
             "design_hash": design_hash,
+            "request_hash": request_hash,
+            "context_fingerprint": _context_fingerprint(context),
             "seed_id": seed_id,
+            "response_hash": baseline["response_hash"],
             "bootstrap_B": bootstrap_B,
             "hypothesis_unit": "group",
             "family_scope": "primary_only",
@@ -1438,11 +1752,21 @@ def run_encoding_check(
             "direct_higher_order_term": False,
             "family_ids": list(context.family.group_ids),
             "family_hash": _family_hash(context.family),
+            "null_covariance": baseline["null_covariance"],
             "exact_checks": exact_checks,
-            "all_required_exact": all(
-                all(bool(check[field]) for field in exact_fields)
-                for check in required_checks
-            ),
+            "all_required_exact": all_required_exact,
+            "failure": {
+                "failed": not all_required_exact,
+                "status": (
+                    "completed" if all_required_exact else "failed_exact_invariance"
+                ),
+                "failed_checks": [
+                    name
+                    for name, check in exact_checks.items()
+                    if check["required"]
+                    and not all(bool(check[field]) for field in exact_fields)
+                ],
+            },
             "robustness_checks": robustness,
             "robustness_is_exact_invariance": False,
             "requested_jobs": n_jobs,
@@ -1469,17 +1793,35 @@ def run_omnib_replicate(
         raise ValueError("run_omnib_replicate requires an omnib scenario")
     if replicate < 0 or replicate >= scenario.replicates:
         raise ValueError("replicate is outside the scenario registry range")
+    experiment = scenario.parameters.get("experiment")
+    if experiment not in {"end2end", "conditional", "power"}:
+        raise ValueError(f"unsupported Track B experiment: {experiment!r}")
+    canonical_bank = (
+        _canonical_role(str(scenario.parameters.get("bank", "heldout")))
+        if experiment == "conditional"
+        else None
+    )
+    request_hash = _request_hash(
+        design_hash=design_hash,
+        context=context,
+        request={
+            "entrypoint": "run_omnib_replicate",
+            "scenario": scenario.to_dict(),
+            "replicate": replicate,
+            "experiment": experiment,
+            "canonical_bank": canonical_bank,
+            "n_jobs": n_jobs,
+        },
+    )
     existing = _resume_existing_shard(
         shard_path,
         scenario_id=scenario.scenario_id,
         replicate=replicate,
         design_hash=design_hash,
+        request_hash=request_hash,
     )
     if existing is not None:
         return existing
-    experiment = scenario.parameters.get("experiment")
-    if experiment not in {"end2end", "conditional", "power"}:
-        raise ValueError(f"unsupported Track B experiment: {experiment!r}")
     qa_only = scenario.stage == "pilot"
     started = time.perf_counter()
     try:
@@ -1498,12 +1840,12 @@ def run_omnib_replicate(
             bank = run_conditional_bank(
                 context,
                 bank=str(scenario.parameters.get("bank", "heldout")),
-                count=1,
+                count=scenario.replicates,
                 design_hash=design_hash,
                 n_jobs=n_jobs,
                 qa_only=qa_only,
                 scenario_id=scenario.scenario_id,
-                replicate_offset=replicate,
+                replicate_offset=0,
             )
             payload = {
                 **_base_replicate_payload(
@@ -1525,7 +1867,7 @@ def run_omnib_replicate(
                 architecture=str(scenario.parameters["architecture"]),
                 interaction_pve=float(scenario.parameters["interaction_pve"]),
                 causal_groups=int(scenario.parameters["causal_groups"]),
-                calibration_count=(19 if qa_only else _FORMAL_BOOTSTRAP_MINIMUM),
+                calibration_count=int(scenario.parameters["calibration_count"]),
                 response_count=1,
                 design_hash=design_hash,
                 qa_only=qa_only,
@@ -1553,6 +1895,8 @@ def run_omnib_replicate(
                 "message": str(error),
             },
         }
+    payload["request_hash"] = request_hash
+    payload["context_fingerprint"] = _context_fingerprint(context)
     result = _json_safe(payload)
     if shard_path is not None:
         write_shard_exclusive(Path(shard_path), result)

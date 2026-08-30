@@ -102,6 +102,16 @@ def test_omnib_scenarios_carry_canonical_group_edge_contract():
         assert parameters["direct_four_way"] is False
 
 
+def test_power_scenarios_declare_independent_calibration_bank_size():
+    for stage, expected in (("pilot", 20), ("formal", 2_000)):
+        power = [
+            row for row in build_scenarios(stage)
+            if row.track == "omnib" and row.parameters["experiment"] == "power"
+        ]
+        assert power
+        assert {row.parameters["calibration_count"] for row in power} == {expected}
+
+
 def test_application_scenarios_are_read_only_and_never_rescan():
     rows = [row for row in build_scenarios("formal") if row.track == "application"]
     assert len(rows) == 4

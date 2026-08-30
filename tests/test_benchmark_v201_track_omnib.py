@@ -44,6 +44,7 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
         count=3,
         design_hash="a" * 64,
         n_jobs=1,
+        scenario_id="B.conditional.synthetic.calibration",
     )
     evaluation = run_conditional_bank(
         tiny_context,
@@ -51,6 +52,7 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
         count=3,
         design_hash="a" * 64,
         n_jobs=1,
+        scenario_id="B.conditional.synthetic.heldout",
     )
     power = run_conditional_bank(
         tiny_context,
@@ -58,6 +60,7 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
         count=3,
         design_hash="a" * 64,
         n_jobs=1,
+        scenario_id="B.conditional.synthetic.power",
     )
 
     assert calibration.requested_role == calibration.canonical_role == "calibration"
@@ -79,6 +82,13 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
     assert calibration_payload["formal"] is False
     assert calibration_payload["qa_only"] is True
     assert calibration_payload["requested_jobs"] == 1
+    assert evaluation.calibration_reference["canonical_role"] == "calibration"
+    assert set(evaluation.seed_ids).isdisjoint(
+        evaluation.calibration_reference["seed_ids"]
+    )
+    assert evaluation.response_hash != evaluation.calibration_reference["response_hash"]
+    assert evaluation.calibration_reference["shares_memory"] is False
+    assert evaluation.calibration_reference["response_hash"] == calibration.response_hash
 
 
 def test_end_to_end_rejection_uses_group_minp_only(tiny_context):
@@ -121,6 +131,8 @@ def test_empirical_threshold_is_learned_once_and_applied_strictly():
     np.testing.assert_array_equal(
         apply_threshold(partial_missing, threshold), np.array([True, False])
     )
+    with pytest.raises(ValueError, match="all-NaN"):
+        empirical_threshold(np.full((2, 19), np.nan))
 
 
 def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
@@ -182,6 +194,11 @@ def test_exact_encoding_check_restores_primary_family(tiny_context):
         )
         for check in required
     )
+    assert result["failure"]["failed"] is (not result["all_required_exact"])
+    assert result["response_hash"]
+    assert result["request_hash"]
+    assert result["context_fingerprint"]
+    assert result["null_covariance"]["sha256"]
 
 
 def test_robustness_checks_are_not_mislabeled_as_exact():
@@ -249,6 +266,7 @@ def test_replicate_orchestration_writes_one_immutable_canonical_shard(
     )
     assert first == second
     assert json.loads(path.read_text()) == first
+    assert len(first["request_hash"]) == 64
     with pytest.raises(ShardConflict):
         run_omnib_replicate(
             scenario,
@@ -258,6 +276,176 @@ def test_replicate_orchestration_writes_one_immutable_canonical_shard(
             n_jobs=1,
             shard_path=path,
         )
+
+
+def test_resume_conflicts_when_context_or_scientific_request_changes(
+    tiny_context, tmp_path
+):
+    path = tmp_path / "bound.json"
+    scenario = Scenario(
+        "B.end2end.synthetic.gaussian",
+        "omnib",
+        "pilot",
+        1,
+        3,
+        {"experiment": "end2end", "null_model": "gaussian", "qa_only": True},
+    )
+    run_omnib_replicate(
+        scenario,
+        tiny_context,
+        replicate=0,
+        design_hash="6" * 64,
+        n_jobs=1,
+        shard_path=path,
+    )
+    changed_context = build_synthetic_omnib_context(
+        n=72, groups=2, copies=3, seed=2
+    )
+    with pytest.raises(ShardConflict):
+        run_omnib_replicate(
+            scenario,
+            changed_context,
+            replicate=0,
+            design_hash="6" * 64,
+            n_jobs=1,
+            shard_path=path,
+        )
+    changed_b = Scenario(
+        scenario.scenario_id,
+        "omnib",
+        "pilot",
+        1,
+        4,
+        scenario.parameters,
+    )
+    with pytest.raises(ShardConflict):
+        run_omnib_replicate(
+            changed_b,
+            tiny_context,
+            replicate=0,
+            design_hash="6" * 64,
+            n_jobs=1,
+            shard_path=path,
+        )
+    changed_stage = Scenario(
+        scenario.scenario_id,
+        "omnib",
+        "formal",
+        1,
+        2_000,
+        {**scenario.parameters, "qa_only": False},
+    )
+    with pytest.raises(ShardConflict):
+        run_omnib_replicate(
+            changed_stage,
+            tiny_context,
+            replicate=0,
+            design_hash="6" * 64,
+            n_jobs=1,
+            shard_path=path,
+        )
+
+
+def test_conditional_dispatcher_builds_the_complete_declared_bank(tiny_context):
+    scenario = Scenario(
+        "B.conditional.synthetic.heldout",
+        "omnib",
+        "pilot",
+        2,
+        0,
+        {"experiment": "conditional", "bank": "heldout", "qa_only": True},
+    )
+    result = run_omnib_replicate(
+        scenario,
+        tiny_context,
+        replicate=0,
+        design_hash="5" * 64,
+        n_jobs=1,
+    )
+    assert result["bank"]["response_shape"] == [72, 2]
+    assert len(result["bank"]["seed_ids"]) == scenario.replicates
+
+
+def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
+    scenario = Scenario(
+        "B.power.synthetic.minor",
+        "omnib",
+        "pilot",
+        1,
+        0,
+        {
+            "experiment": "power",
+            "architecture": "minor_burden_aligned",
+            "causal_groups": 1,
+            "interaction_pve": 0.05,
+            "calibration_count": 3,
+            "qa_only": True,
+        },
+    )
+    result = run_omnib_replicate(
+        scenario,
+        tiny_context,
+        replicate=0,
+        design_hash="4" * 64,
+        n_jobs=1,
+    )
+    assert len(result["calibration_seed_ids"]) == 3
+
+
+def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
+    original = run_conditional_bank(
+        tiny_context,
+        bank="calibration",
+        count=1,
+        design_hash="3" * 64,
+        n_jobs=1,
+    )
+    permuted = OmniBBenchmarkContext(
+        {
+            label: SubgenomeData(
+                X=data.X,
+                gene_snp={
+                    gene: np.asarray(indices)[::-1]
+                    for gene, indices in data.gene_snp.items()
+                },
+                samples=data.samples,
+                chunk=None,
+            )
+            for label, data in tiny_context.subdata.items()
+        },
+        tiny_context.family,
+        tiny_context.phenotype,
+        tiny_context.sample_idx,
+    )
+    reordered = run_conditional_bank(
+        permuted,
+        bank="calibration",
+        count=1,
+        design_hash="3" * 64,
+        n_jobs=1,
+    )
+    assert (
+        original.score_bank.tested_family_sizes["snpxsnp"]
+        == reordered.score_bank.tested_family_sizes["snpxsnp"]
+    )
+    assert (
+        original.tested_family_hashes["snpxsnp"]
+        != reordered.tested_family_hashes["snpxsnp"]
+    )
+
+
+def test_conditional_execution_is_from_response_scoring(tiny_context):
+    result = run_conditional_bank(
+        tiny_context,
+        bank="calibration",
+        count=2,
+        design_hash="2" * 64,
+        n_jobs=2,
+    )
+    assert result.execution["requested_jobs"] == 2
+    assert result.execution["effective_jobs"] == 2
+    assert result.execution["backend"] == "fork_shared_memory"
+    assert len(result.execution["worker_pids"]) == 2
 
 
 def test_direct_end_to_end_resume_does_not_recompute_volatile_runtime(
@@ -281,6 +469,24 @@ def test_direct_end_to_end_resume_does_not_recompute_volatile_runtime(
         shard_path=path,
     )
     assert second == first
+    with pytest.raises(ShardConflict):
+        run_end_to_end_null(
+            tiny_context,
+            replicate=0,
+            bootstrap_B=4,
+            qa_only=True,
+            design_hash="8" * 64,
+            shard_path=path,
+        )
+    with pytest.raises(ShardConflict):
+        run_end_to_end_null(
+            tiny_context,
+            replicate=0,
+            bootstrap_B=3,
+            qa_only=False,
+            design_hash="8" * 64,
+            shard_path=path,
+        )
 
 
 def test_failed_replicate_is_serialized_instead_of_dropped(tiny_context, tmp_path):
