@@ -277,7 +277,7 @@ def _validate_edges(
         normalized.append(tuple(sorted((left, right))))
     if len(set(normalized)) != len(normalized) or set(normalized) != set(complete):
         raise ValueError("pair edges must be the complete unique copy-pair family")
-    return normalized
+    return complete
 
 
 def _select_causal_edges(
@@ -300,8 +300,16 @@ def _select_causal_edges(
     return selected
 
 
-def _minor_burden(block: np.ndarray) -> np.ndarray:
-    return standardize(block.sum(axis=1))
+def _minor_burden(block: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    if np.any((block < 0.0) | (block > 2.0)):
+        raise ValueError("minor burden requires finite 0/1/2 dosage values in [0, 2]")
+    empirical_af = block.mean(axis=0) / 2.0
+    flip = empirical_af > 0.5
+    oriented = np.where(flip[None, :], 2.0 - block, block)
+    return standardize(oriented.sum(axis=1)), {
+        "empirical_af": empirical_af.tolist(),
+        "flipped_columns": np.flatnonzero(flip).tolist(),
+    }
 
 
 def _mixed_score(block: np.ndarray) -> np.ndarray:
@@ -330,13 +338,22 @@ def _edge_signal(
     *,
     left_index: int = 0,
     right_index: int = 0,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, dict[str, Any] | None]:
     if architecture in {"minor_burden_aligned", "multi_edge_group", "mispaired"}:
-        return standardize(_minor_burden(left) * _minor_burden(right)), 1
+        left_burden, left_orientation = _minor_burden(left)
+        right_burden, right_orientation = _minor_burden(right)
+        return (
+            standardize(left_burden * right_burden),
+            1,
+            {
+                "left": left_orientation,
+                "right": right_orientation,
+            },
+        )
     if architecture == "pc1_distributed":
         left_pc = standardize(_pc_scores(left, 1)[:, 0])
         right_pc = standardize(_pc_scores(right, 1)[:, 0])
-        return standardize(left_pc * right_pc), 1
+        return standardize(left_pc * right_pc), 1, None
     if architecture == "kernel_multidimensional":
         dimensions = min(3, left.shape[1], right.shape[1])
         left_scores = _pc_scores(left, dimensions)
@@ -346,13 +363,17 @@ def _edge_signal(
             standardize(left_scores[:, index] * right_scores[:, index])
             for index in range(dimensions)
         ]
-        return standardize(np.sum(cross_products, axis=0)), dimensions
+        return standardize(np.sum(cross_products, axis=0)), dimensions, None
     if architecture == "single_snp_pair":
         if not 0 <= left_index < left.shape[1] or not 0 <= right_index < right.shape[1]:
             raise ValueError("snp index is outside its gene block")
-        return standardize(standardize(left[:, left_index]) * standardize(right[:, right_index])), 1
+        return (
+            standardize(standardize(left[:, left_index]) * standardize(right[:, right_index])),
+            1,
+            None,
+        )
     if architecture == "mixed_sign":
-        return standardize(_mixed_score(left) * _mixed_score(right)), 1
+        return standardize(_mixed_score(left) * _mixed_score(right)), 1, None
     raise AssertionError(f"unhandled edge architecture: {architecture}")
 
 
@@ -374,6 +395,10 @@ def interaction_signal(
 
     if architecture not in _ARCHITECTURES:
         raise ValueError(f"unknown interaction architecture: {architecture!r}")
+    if snp_indices is not None and architecture != "single_snp_pair":
+        raise ValueError("snp_indices is only valid for single_snp_pair")
+    if wrong_partner is not None and architecture != "mispaired":
+        raise ValueError("wrong_partner is only valid for mispaired")
     blocks, labels, n = _validate_gene_blocks(gene_blocks)
     available = _validate_edges(pair_edges, labels)
     components = {
@@ -395,7 +420,7 @@ def interaction_signal(
         "direct_higher_order_term": False,
         "standardized": True,
         "negative_control": architecture in {"additive_only", "mispaired"},
-        "interaction_present": architecture != "additive_only",
+        "interaction_present": architecture not in {"additive_only", "mispaired"},
     }
 
     if architecture == "additive_only":
@@ -412,14 +437,9 @@ def interaction_signal(
         )
         return signal, metadata
 
-    if architecture == "multi_edge_group":
-        if len(available) < 2:
-            raise ValueError("multi_edge_group requires a three- or four-copy group")
-        selected = _select_causal_edges(causal_edges, available, 2)
-    else:
-        selected = _select_causal_edges(causal_edges, available, 1)
-
     if architecture == "mispaired":
+        if causal_edges is not None:
+            raise ValueError("mispaired has no causal pair edges within the tested group")
         if wrong_partner is None:
             raise ValueError("mispaired architecture requires a predeclared wrong_partner")
         wrong = np.asarray(wrong_partner, dtype=np.float64)
@@ -427,17 +447,45 @@ def interaction_signal(
             raise ValueError("wrong_partner must be a non-empty matrix with matching samples")
         if not np.all(np.isfinite(wrong)):
             raise ValueError("wrong_partner must contain only finite values")
-        left_label = selected[0][0]
-        signal, dimensions = _edge_signal(architecture, blocks[left_label], wrong)
+        reference_copy = labels[0]
+        signal, dimensions, orientation = _edge_signal(architecture, blocks[reference_copy], wrong)
+        assert orientation is not None
         metadata.update(
             {
-                "causal_pair_edges": [list(selected[0])],
-                "causal_pair_edge_count": 1,
+                "causal_pair_edges": [],
+                "causal_pair_edge_count": 0,
+                "reference_copy": reference_copy,
                 "partner_source": "predeclared_wrong_homoeolog",
+                "out_of_group_interaction_present": True,
                 "score_dimensions": dimensions,
+                "minor_allele_orientation": {
+                    "rule": "flip_to_2_minus_dosage_when_empirical_af_gt_0.5",
+                    "by_edge": [
+                        {
+                            "edge": None,
+                            "reference_copy": reference_copy,
+                            "partner_source": "predeclared_wrong_homoeolog",
+                            "empirical_af": {
+                                reference_copy: orientation["left"]["empirical_af"],
+                                "wrong_partner": orientation["right"]["empirical_af"],
+                            },
+                            "flipped_columns": {
+                                reference_copy: orientation["left"]["flipped_columns"],
+                                "wrong_partner": orientation["right"]["flipped_columns"],
+                            },
+                        }
+                    ],
+                },
             }
         )
         return signal, metadata
+
+    if architecture == "multi_edge_group":
+        if len(available) < 2:
+            raise ValueError("multi_edge_group requires a three- or four-copy group")
+        selected = _select_causal_edges(causal_edges, available, 2)
+    else:
+        selected = _select_causal_edges(causal_edges, available, 1)
 
     index_map: dict[str, int] = {}
     if snp_indices is not None:
@@ -454,10 +502,11 @@ def interaction_signal(
 
     edge_signals: list[np.ndarray] = []
     dimensions_by_edge: list[int] = []
+    orientation_by_edge: list[dict[str, Any]] = []
     for left_label, right_label in selected:
         left_index = index_map.get(left_label, 0)
         right_index = index_map.get(right_label, 0)
-        edge_signal, dimensions = _edge_signal(
+        edge_signal, dimensions, orientation = _edge_signal(
             architecture,
             blocks[left_label],
             blocks[right_label],
@@ -466,6 +515,20 @@ def interaction_signal(
         )
         edge_signals.append(edge_signal)
         dimensions_by_edge.append(dimensions)
+        if orientation is not None:
+            orientation_by_edge.append(
+                {
+                    "edge": [left_label, right_label],
+                    "empirical_af": {
+                        left_label: orientation["left"]["empirical_af"],
+                        right_label: orientation["right"]["empirical_af"],
+                    },
+                    "flipped_columns": {
+                        left_label: orientation["left"]["flipped_columns"],
+                        right_label: orientation["right"]["flipped_columns"],
+                    },
+                }
+            )
     signal = standardize(np.sum(edge_signals, axis=0))
     metadata.update(
         {
@@ -474,6 +537,11 @@ def interaction_signal(
             "score_dimensions_by_edge": dimensions_by_edge,
         }
     )
+    if orientation_by_edge:
+        metadata["minor_allele_orientation"] = {
+            "rule": "flip_to_2_minus_dosage_when_empirical_af_gt_0.5",
+            "by_edge": orientation_by_edge,
+        }
     if architecture == "single_snp_pair":
         used_labels = {label for edge in selected for label in edge}
         used_indices = {label: index_map.get(label, 0) for label in sorted(used_labels)}

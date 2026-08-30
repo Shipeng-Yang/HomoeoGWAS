@@ -197,6 +197,20 @@ def test_multi_edge_group_aggregates_two_of_six_pair_edges_without_four_way_term
     assert metadata["direct_higher_order_term"] is False
 
 
+def test_pair_edge_input_order_does_not_change_default_causal_truth():
+    blocks = _gene_blocks()
+    signal, metadata = interaction_signal(
+        "minor_burden_aligned",
+        blocks,
+        pair_edges=[("D", "B"), ("D", "A"), ("B", "A")],
+    )
+    canonical, canonical_metadata = interaction_signal("minor_burden_aligned", blocks)
+    np.testing.assert_array_equal(signal, canonical)
+    assert metadata["available_pair_edges"] == [["A", "B"], ["A", "D"], ["B", "D"]]
+    assert metadata["causal_pair_edges"] == [["A", "B"]]
+    assert metadata["causal_pair_edges"] == canonical_metadata["causal_pair_edges"]
+
+
 def test_mispaired_uses_predeclared_wrong_homoeolog_block():
     blocks = _gene_blocks(copies=("A", "B"))
     wrong = np.roll(blocks["B"], 17, axis=0)
@@ -204,7 +218,68 @@ def test_mispaired_uses_predeclared_wrong_homoeolog_block():
     expected = standardize(standardize(blocks["A"].sum(axis=1)) * standardize(wrong.sum(axis=1)))
     np.testing.assert_allclose(signal, expected, atol=1e-14)
     assert metadata["negative_control"] is True
+    assert metadata["interaction_present"] is False
+    assert metadata["causal_pair_edges"] == []
+    assert metadata["causal_pair_edge_count"] == 0
+    assert metadata["reference_copy"] == "A"
     assert metadata["partner_source"] == "predeclared_wrong_homoeolog"
+
+
+def test_minor_burden_orients_each_column_to_empirical_minor_dosage():
+    blocks = {
+        "A": np.array(
+            [
+                [2, 0],
+                [2, 1],
+                [2, 0],
+                [1, 0],
+                [2, 1],
+                [1, 0],
+                [2, 0],
+                [2, 1],
+            ],
+            dtype=float,
+        ),
+        "B": np.array(
+            [
+                [0, 2],
+                [1, 2],
+                [0, 1],
+                [0, 2],
+                [1, 2],
+                [0, 1],
+                [0, 2],
+                [1, 2],
+            ],
+            dtype=float,
+        ),
+    }
+    signal, metadata = interaction_signal("minor_burden_aligned", blocks)
+    oriented_a = np.column_stack((2.0 - blocks["A"][:, 0], blocks["A"][:, 1]))
+    oriented_b = np.column_stack((blocks["B"][:, 0], 2.0 - blocks["B"][:, 1]))
+    expected = standardize(
+        standardize(oriented_a.sum(axis=1)) * standardize(oriented_b.sum(axis=1))
+    )
+    np.testing.assert_allclose(signal, expected, atol=1e-14)
+    orientation = metadata["minor_allele_orientation"]
+    assert orientation["rule"] == "flip_to_2_minus_dosage_when_empirical_af_gt_0.5"
+    assert orientation["by_edge"][0]["flipped_columns"] == {"A": [0], "B": [1]}
+
+
+@pytest.mark.parametrize("bad_value", [-0.01, 2.01])
+def test_minor_burden_rejects_dosage_outside_zero_to_two(bad_value):
+    blocks = _gene_blocks(copies=("A", "B"))
+    blocks["A"][0, 0] = bad_value
+    with pytest.raises(ValueError, match="0/1/2 dosage"):
+        interaction_signal("minor_burden_aligned", blocks)
+
+
+def test_architecture_specific_arguments_are_not_silently_ignored():
+    blocks = _gene_blocks(copies=("A", "B"))
+    with pytest.raises(ValueError, match="snp_indices.*single_snp_pair"):
+        interaction_signal("minor_burden_aligned", blocks, snp_indices={"A": 0})
+    with pytest.raises(ValueError, match="wrong_partner.*mispaired"):
+        interaction_signal("minor_burden_aligned", blocks, wrong_partner=blocks["B"])
 
 
 def test_interaction_signal_rejects_invalid_blocks_edges_and_architectures():
