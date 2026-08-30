@@ -141,6 +141,11 @@ def draw_null(
         raise ValueError(f"unknown null kind: {kind!r}")
     root, pc = _validate_null_inputs(root_V, rng, pc1)
     canonical_kind = _NULL_ALIASES[kind]
+    if canonical_kind == "omitted_kernel":
+        raise NotImplementedError(
+            "omitted_kernel requires an explicit held-out subgenome kernel; "
+            "the PC1 surrogate is forbidden"
+        )
     n, rank = root.shape
     metadata: dict[str, Any] = {
         "kind": kind,
@@ -160,9 +165,6 @@ def draw_null(
             "standardize(standardize(root_V @ standard_normal) + signed_six_sd_outliers)"
         ),
         "additive_only": ("standardize(standardize(root_V @ standard_normal) + standardize(pc1))"),
-        "omitted_kernel": (
-            "standardize(standardize(root_V @ standard_normal) + signed_standardize(pc1))"
-        ),
     }
     metadata["response_generation"] = generation[canonical_kind]
 
@@ -219,18 +221,6 @@ def draw_null(
                 "main_effect_scale": 1.0,
             }
         )
-    elif canonical_kind == "omitted_kernel":
-        omitted_score = standardize(pc)
-        coefficient = float(rng.choice(np.array([-1.0, 1.0])))
-        response = standardize(response) + coefficient * omitted_score
-        metadata.update(
-            {
-                "misspecified": True,
-                "omitted_component": "pc1_rank_one_kernel",
-                "omitted_component_coefficient": coefficient,
-            }
-        )
-
     return standardize(response), metadata
 
 

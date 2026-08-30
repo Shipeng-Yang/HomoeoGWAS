@@ -126,6 +126,13 @@ def test_power_scenarios_declare_independent_calibration_bank_size():
         ]
         assert power
         assert {row.parameters["calibration_count"] for row in power} == {expected}
+        assert {row.parameters["response_count"] for row in power} == {1}
+        assert {row.parameters["null_model"] for row in power} == {"gaussian"}
+        assert all(
+            row.parameters["calibration_scenario_id"]
+            == f"B.conditional.{row.parameters['backbone']}.gaussian.calibration"
+            for row in power
+        )
 
 
 def test_conditional_registry_locks_complete_null_matrix_and_gate_roles():

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from homoeogwas.interact import SubgenomeData
+from scripts.benchmarks.v201.comparators import METHOD_NAMES
 from scripts.benchmarks.v201.contracts import Scenario, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_omnib import (
@@ -170,14 +171,21 @@ def test_empirical_threshold_is_learned_once_and_applied_strictly():
 
 
 def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
+    calibration = run_conditional_bank(
+        tiny_context, bank="calibration", count=19,
+        design_hash="b" * 64, qa_only=True, null_model="gaussian",
+        scenario_id="B.conditional.synthetic.gaussian.calibration", n_jobs=1,
+    )
     result = run_power_replicate(
         tiny_context,
+        calibration_bank=calibration,
+        calibration_scenario_id="B.conditional.synthetic.gaussian.calibration",
         replicate=2,
         architecture="minor_burden_aligned",
         interaction_pve=0.05,
         causal_groups=1,
         calibration_count=19,
-        response_count=2,
+        response_count=1,
         design_hash="b" * 64,
         qa_only=True,
         n_jobs=1,
@@ -208,8 +216,8 @@ def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
         target_minima = result["target_minima_by_method"][method]
         causal = np.asarray(result["causal_minima_by_method"][method], dtype=float)
         assert len(calibration_minima) == 19
-        assert len(target_minima) == 2
-        assert causal.shape == (1, 2)
+        assert len(target_minima) == 1
+        assert causal.shape == (1, 1)
         threshold = empirical_threshold(np.asarray(calibration_minima)[None, :])
         assert result["thresholds"][method] == pytest.approx(threshold)
         assert result["rejections_by_method"][method] == [
@@ -477,6 +485,32 @@ def test_encoding_dispatcher_runs_one_declared_batch(tiny_context):
     assert result["failure"]["failed"] is (not result["all_required_exact"])
 
 
+def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
+    result = run_encoding_check(
+        tiny_context, bootstrap_B=1, design_hash="1" * 64,
+        n_jobs=1, parallel_jobs=2, include_robustness=True,
+    )
+    assert set(result["exact_checks"]) == {
+        "allele_flip_25pct", "allele_flip_50pct", "allele_flip_100pct",
+        "within_gene_snp_column_permutation",
+        "group_row_permutation_restored_ids", "serial_vs_admitted_parallel",
+    }
+    assert set(result["robustness_checks"]) == {
+        "missingness_2pct", "missingness_5pct", "miscoding_1pct",
+        "markers_per_gene_3", "markers_per_gene_10", "markers_per_gene_30",
+        "maf_0p01_0p05", "maf_0p05_0p20", "maf_above_0p20",
+        "unbalanced_marker_counts",
+    }
+    expected = all(
+        not check["required"] or all(check[field] is True for field in (
+            "observed_arrays_identical", "adjusted_decisions_identical",
+            "ranking_hash_identical", "rejection_sets_identical",
+        ))
+        for check in result["exact_checks"].values()
+    )
+    assert result["all_required_exact"] is expected
+
+
 def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
     scenario = Scenario(
         "B.power.synthetic.minor",
@@ -490,8 +524,18 @@ def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
             "causal_groups": 1,
             "interaction_pve": 0.05,
             "calibration_count": 3,
+            "response_count": 1,
+            "null_model": "gaussian",
+            "calibration_scenario_id": (
+                "B.conditional.synthetic.gaussian.calibration"
+            ),
             "qa_only": True,
         },
+    )
+    calibration = run_conditional_bank(
+        tiny_context, bank="calibration", count=3,
+        design_hash="4" * 64, qa_only=True, null_model="gaussian",
+        scenario_id="B.conditional.synthetic.gaussian.calibration", n_jobs=1,
     )
     result = run_omnib_replicate(
         scenario,
@@ -499,8 +543,33 @@ def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
         replicate=0,
         design_hash="4" * 64,
         n_jobs=1,
+        power_calibration_bank=calibration,
     )
     assert len(result["calibration_seed_ids"]) == 3
+
+
+def test_power_cells_share_one_frozen_backbone_calibration_bank(tiny_context):
+    design_hash = "5" * 64
+    calibration_id = "B.conditional.synthetic.gaussian.calibration"
+    calibration = run_conditional_bank(
+        tiny_context, bank="calibration", count=3,
+        design_hash=design_hash, qa_only=True, null_model="gaussian",
+        scenario_id=calibration_id, n_jobs=1,
+    )
+    hashes = []
+    for index, (architecture, pve) in enumerate((
+        ("minor_burden_aligned", 0.02), ("mixed_sign", 0.10),
+    )):
+        payload = run_power_replicate(
+            tiny_context, calibration_bank=calibration,
+            calibration_scenario_id=calibration_id, replicate=index,
+            architecture=architecture, interaction_pve=pve, causal_groups=1,
+            calibration_count=3, response_count=1, design_hash=design_hash,
+            qa_only=True, n_jobs=1,
+            scenario_id=f"B.power.synthetic.{architecture}",
+        )
+        hashes.append(payload["calibration_bank_manifest_hash"])
+    assert hashes[0] == hashes[1]
 
 
 def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
@@ -558,6 +627,25 @@ def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
         digest.update(repr(values.shape).encode("ascii"))
         digest.update(values.tobytes())
         assert payload["score_matrix_hashes"][method] == digest.hexdigest()
+
+    # The score bank stays group x response while SNPxSNP calibration covers
+    # the complete, independently larger raw SNP-pair family.
+    assert original.p_by_method["snpxsnp"].shape[0] == len(original.family_ids)
+    assert len(original.tested_family_members["snpxsnp"]) > len(original.family_ids)
+
+
+def test_every_conditional_payload_has_exact_canonical_method_set(tiny_context):
+    bank = run_conditional_bank(
+        tiny_context, bank="calibration", count=2,
+        design_hash="9" * 64, n_jobs=1,
+    )
+    payload = bank.to_payload()
+    assert set(payload["p_by_method"]) == set(METHOD_NAMES)
+    assert set(payload["tested_family_members"]) == set(METHOD_NAMES)
+    tampered = dict(payload["p_by_method"])
+    tampered.pop("pc1")
+    with pytest.raises(ValueError, match="method names"):
+        replace(bank.score_bank, p_by_method=tampered)
 
 
 def test_base_manifests_are_the_complete_hash_inputs(tiny_context):

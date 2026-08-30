@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
+from scripts.benchmarks.v201.audit import _audit_fit_scenario
 from scripts.benchmarks.v201.contracts import Scenario, derive_seed, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_fit import (
@@ -1375,6 +1376,63 @@ def test_fit_runner_dispatches_loco_only_to_strict_released_loco_output(tmp_path
         "planned_count"
     ] == 2
     assert result["released_source_manifest"]["files"]["sumstats"]["exists"]
+
+
+@pytest.mark.parametrize(
+    ("scan_pve", "causal_variants"),
+    [
+        (0.0, []),
+        (0.05, [{"variant_id": "a1", "subgenome": "A", "position_bp": 10}]),
+    ],
+)
+def test_formal_released_loco_binds_explicit_truth_and_bp_family(
+    tmp_path, scan_pve, causal_variants,
+):
+    output = tmp_path / f"formal-loco-{scan_pve}"
+    sample_ids = [f"s{i:02d}" for i in range(24)]
+    _write_released_fit_output(
+        output, sample_ids=sample_ids, bootstrap=False, loco=True
+    )
+    _, _, kernels = _production_released_inputs(output)
+    scenario = Scenario(
+        f"A.loco.cotton.pve_{scan_pve}", "fit", "formal", 1, 0,
+        {"experiment": "loco", "scan_pve": scan_pve, "panel": "cotton"},
+    )
+    truth = {
+        "scan_pve": scan_pve, "distance_unit": "bp",
+        "causal_variants": causal_variants,
+    }
+    truth["truth_hash"] = sha256_payload(truth)
+    result = run_fit_replicate(
+        scenario, kernels, replicate=0, design_hash="9" * 64,
+        sample_ids=np.asarray(sample_ids), fit_output_dir=output,
+        released_scan_truth=truth,
+    )
+    assert result["failure"]["failed"] is False
+    assert result["released_scan_truth_binding"]["distance_unit"] == "bp"
+    assert result["scan_request_manifest"]["bp_positions_explicit"] is True
+    assert _audit_fit_scenario(result, scenario) is True
+
+
+def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
+    output = tmp_path / "loco-no-comparator"
+    sample_ids = [f"s{i:02d}" for i in range(24)]
+    _write_released_fit_output(
+        output, sample_ids=sample_ids, bootstrap=False, loco=True
+    )
+    _, _, kernels = _production_released_inputs(output)
+    scenario = Scenario(
+        "A.loco.cotton.pve_0", "fit", "formal", 1, 0,
+        {"experiment": "loco", "scan_pve": 0.0, "panel": "cotton"},
+    )
+    truth = {"scan_pve": 0.0, "distance_unit": "bp", "causal_variants": []}
+    truth["truth_hash"] = sha256_payload(truth)
+    result = run_fit_replicate(
+        scenario, kernels, replicate=0, design_hash="8" * 64,
+        sample_ids=np.asarray(sample_ids), fit_output_dir=output,
+        released_scan_truth=truth, scan_comparators={},
+    )
+    assert result["failure"]["failed"] is True
 
 
 def test_released_loco_rejects_stale_sumstats_provenance(tmp_path):

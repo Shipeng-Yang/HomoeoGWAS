@@ -1184,6 +1184,8 @@ def _assert_independent_banks(left: ConditionalBank, right: ConditionalBank) -> 
 def run_power_replicate(
     context: OmniBBenchmarkContext,
     *,
+    calibration_bank: ConditionalBank,
+    calibration_scenario_id: str,
     replicate: int,
     architecture: str,
     interaction_pve: float,
@@ -1196,29 +1198,55 @@ def run_power_replicate(
     null_model: str = "gaussian",
     scenario_id: str = "B.power.synthetic",
     shard_path: str | Path | None = None,
+    request_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Learn thresholds on calibration nulls, freeze them, then score causal responses."""
 
     calibration_count = _validate_count(calibration_count, "calibration_count")
     response_count = _validate_count(response_count, "response_count")
+    if response_count != 1:
+        raise ValueError("each power shard must contain exactly one target response")
     stage = _stage(qa_only)
+    if not isinstance(calibration_bank, ConditionalBank):
+        raise ValueError("power requires a frozen ConditionalBank")
+    if (
+        calibration_bank.canonical_role != "calibration"
+        or calibration_bank.stage != stage
+        or calibration_bank.design_hash != design_hash
+        or len(calibration_bank.seed_ids) != calibration_count
+        or calibration_bank.family_ids != context.family.group_ids
+        or calibration_bank.family_hash != _family_hash(context.family)
+        or calibration_bank.failure.get("failed") is not False
+        or any(
+            metadata.get("canonical_kind") != null_model
+            for metadata in calibration_bank.response_metadata
+        )
+        or not calibration_scenario_id.endswith(".gaussian.calibration")
+        or null_model != "gaussian"
+    ):
+        raise ValueError("power calibration bank differs from the frozen Gaussian bank")
+    calibration_payload = calibration_bank.to_payload(include_scores=False)
+    calibration_manifest_hash = sha256_payload(calibration_payload)
+    request_record = request_identity or {
+        "entrypoint": "run_power_replicate",
+        "scenario_id": scenario_id,
+        "replicate": replicate,
+        "stage": stage,
+        "qa_only": qa_only,
+        "architecture": architecture,
+        "interaction_pve": interaction_pve,
+        "causal_groups": causal_groups,
+        "calibration_count": calibration_count,
+        "response_count": response_count,
+        "null_model": null_model,
+        "calibration_scenario_id": calibration_scenario_id,
+        "calibration_bank_manifest_hash": calibration_manifest_hash,
+        "n_jobs": n_jobs,
+    }
     request_hash = _request_hash(
         design_hash=design_hash,
         context=context,
-        request={
-            "entrypoint": "run_power_replicate",
-            "scenario_id": scenario_id,
-            "replicate": replicate,
-            "stage": stage,
-            "qa_only": qa_only,
-            "architecture": architecture,
-            "interaction_pve": interaction_pve,
-            "causal_groups": causal_groups,
-            "calibration_count": calibration_count,
-            "response_count": response_count,
-            "null_model": null_model,
-            "n_jobs": n_jobs,
-        },
+        request=request_record,
     )
     existing = _resume_existing_shard(
         shard_path,
@@ -1238,17 +1266,7 @@ def run_power_replicate(
         scenario_id=scenario_id,
         n_jobs=n_jobs,
     )
-    calibration = _bank_from_prepared(
-        prepared,
-        bank="calibration",
-        count=calibration_count,
-        design_hash=design_hash,
-        stage=stage,
-        scenario_id=scenario_id,
-        replicate_offset=0,
-        null_model=null_model,
-        n_jobs=n_jobs,
-    )
+    calibration = calibration_bank
     signal, causal_ids, signal_metadata = _group_signal(
         prepared, architecture, causal_groups
     )
@@ -1282,7 +1300,7 @@ def run_power_replicate(
         calibration_reference=_calibration_reference(
             calibration.responses,
             calibration.seed_ids,
-            scenario_id,
+            calibration_scenario_id,
         ),
     )
     _assert_independent_banks(calibration, target)
@@ -1379,6 +1397,8 @@ def run_power_replicate(
                 target.failure.get("failed_response_indices", [])
             ),
             "calibration_response_hash": calibration.response_hash,
+            "calibration_scenario_id": calibration_scenario_id,
+            "calibration_bank_manifest_hash": calibration_manifest_hash,
             "target_response_hash": target.response_hash,
             "threshold_source": "independent_calibration_bank",
             "thresholds": thresholds,
@@ -1884,6 +1904,7 @@ def run_omnib_replicate(
     design_hash: str,
     n_jobs: int = 1,
     shard_path: str | Path | None = None,
+    power_calibration_bank: ConditionalBank | None = None,
 ) -> dict[str, Any]:
     """Dispatch one Track B scenario and optionally create its immutable shard."""
 
@@ -1899,17 +1920,23 @@ def run_omnib_replicate(
         if experiment == "conditional"
         else None
     )
+    request_record = {
+        "entrypoint": "run_omnib_replicate",
+        "scenario": scenario.to_dict(),
+        "replicate": replicate,
+        "experiment": experiment,
+        "canonical_bank": canonical_bank,
+        "n_jobs": n_jobs,
+    }
+    if experiment == "power":
+        request_record["calibration_bank_manifest_hash"] = (
+            sha256_payload(power_calibration_bank.to_payload(include_scores=False))
+            if isinstance(power_calibration_bank, ConditionalBank) else None
+        )
     request_hash = _request_hash(
         design_hash=design_hash,
         context=context,
-        request={
-            "entrypoint": "run_omnib_replicate",
-            "scenario": scenario.to_dict(),
-            "replicate": replicate,
-            "experiment": experiment,
-            "canonical_bank": canonical_bank,
-            "n_jobs": n_jobs,
-        },
+        request=request_record,
     )
     existing = _resume_existing_shard(
         shard_path,
@@ -1962,6 +1989,10 @@ def run_omnib_replicate(
         elif experiment == "power":
             payload = run_power_replicate(
                 context,
+                calibration_bank=power_calibration_bank,
+                calibration_scenario_id=str(
+                    scenario.parameters["calibration_scenario_id"]
+                ),
                 replicate=replicate,
                 architecture=str(scenario.parameters["architecture"]),
                 interaction_pve=float(scenario.parameters["interaction_pve"]),
@@ -1973,6 +2004,7 @@ def run_omnib_replicate(
                 n_jobs=n_jobs,
                 null_model=str(scenario.parameters.get("null_model", "gaussian")),
                 scenario_id=scenario.scenario_id,
+                request_identity=request_record,
             )
         else:
             payload = run_encoding_check(
@@ -2011,6 +2043,10 @@ def run_omnib_replicate(
                 "message": str(error),
             },
         }
+    if experiment == "power" and payload.get("request_hash") not in {
+        None, request_hash,
+    }:
+        raise RuntimeError("inner omniB request identity differs from dispatcher")
     payload["request_hash"] = request_hash
     payload["context_fingerprint"] = _context_fingerprint(context)
     result = _json_safe(payload)

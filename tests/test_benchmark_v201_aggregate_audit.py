@@ -3,6 +3,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,12 +18,16 @@ from scripts.benchmarks.v201.audit import (
     BenchmarkAuditError,
     _audit_application_scenario,
     _audit_fit_scenario,
+    _audit_power_evidence,
     _audit_scaling_scenario,
+    _conditional_score_matrices,
+    _fit_scan_gates,
     _validate_bank_envelope,
     audit_benchmark,
     summarize_binomial,
 )
 from scripts.benchmarks.v201.contracts import (
+    ScalingAnchor,
     Scenario,
     canonical_json,
     derive_seed,
@@ -30,6 +35,16 @@ from scripts.benchmarks.v201.contracts import (
 )
 from scripts.benchmarks.v201.shards import write_shard_exclusive
 from scripts.benchmarks.v201.track_fit import run_fit_replicate
+from scripts.benchmarks.v201.track_omnib import (
+    build_synthetic_omnib_context,
+    run_conditional_bank,
+    run_power_replicate,
+)
+from scripts.benchmarks.v201.track_scaling import (
+    NUMERIC_THREAD_ENV,
+    ScalingAnchorRun,
+    summarize_anchor,
+)
 
 
 def _write_registry(root: Path, *, stage: str, total: int) -> Path:
@@ -73,9 +88,26 @@ def _write_null_shards(
     configs = root / "configs"
     inputs.mkdir(exist_ok=True)
     configs.mkdir(exist_ok=True)
-    (inputs / "manifest.tsv").write_text("input\tsha256\nfixture\t" + "1" * 64 + "\n")
+    fixture_input = inputs / "fixture.txt"
+    fixture_input.write_text("fixture\n", encoding="utf-8")
     (inputs / "comparator_preflight.tsv").write_text(
         "comparator\tstatus\nfixture\tUNAVAILABLE_OR_NONCOMPARABLE\n"
+    )
+    input_records = {}
+    manifest_lines = ["path\tsize\tsha256\ttype"]
+    for path, input_type in (
+        (fixture_input, "fixture"),
+        (inputs / "comparator_preflight.tsv", "comparator_preflight"),
+    ):
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest_lines.append(f"{relative}\t{size}\t{digest}\t{input_type}")
+        input_records[relative] = {
+            "size": size, "sha256": digest, "type": input_type,
+        }
+    (inputs / "manifest.tsv").write_text(
+        "\n".join(manifest_lines) + "\n", encoding="utf-8",
     )
     config = configs / "fixture.yaml"
     config.write_text("fixture: true\n", encoding="utf-8")
@@ -90,8 +122,11 @@ def _write_null_shards(
         "ordered_scenario_ids": ["core"],
         "scenario_registry_sha256": hashlib.sha256(registry.read_bytes()).hexdigest(),
         "master_seed": 20260830,
-        "software": {
-            "version": "2.0.1",
+        "target_release": {
+            "version": "2.0.1", "tag": "v2.0.1",
+            "git_commit": "015e023439addf2cca658cd01720ff6f856023be",
+        },
+        "harness": {
             "git_commit": subprocess.run(
                 ["git", "rev-parse", "HEAD"], check=True, capture_output=True,
                 text=True,
@@ -107,6 +142,9 @@ def _write_null_shards(
             (configs / "manifest.tsv").read_bytes()
         ).hexdigest(),
         "config_hashes": {"configs/fixture.yaml": config_hash},
+        "input_records": input_records,
+        "scenario_config_bindings": {"core": "configs/fixture.yaml"},
+        "benchmark_contexts": {},
         "acceptance_rules": ACCEPTANCE_RULES,
     }
     design_hash = sha256_payload(design_payload)
@@ -171,6 +209,10 @@ def _write_null_shards(
                 else "noninferential_do_not_threshold"
             ),
             "experiment": "end2end",
+            "null_model": "gaussian",
+            "null_generation": {
+                "kind": "gaussian", "canonical_kind": "gaussian",
+            },
             "mode": "group",
             "statistic": "omniB",
             "hypothesis_unit": "group",
@@ -341,6 +383,36 @@ def test_extra_opposite_stage_shard_is_rejected(tmp_path, monkeypatch):
         audit_benchmark(root)
 
 
+def test_input_manifest_rehashes_files_and_rejects_directory_drift(
+    tmp_path, monkeypatch,
+):
+    root = _write_null_shards(tmp_path, monkeypatch, rejections=0, total=20)
+    (root / "inputs" / "fixture.txt").write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAuditError, match="input size/hash"):
+        audit_benchmark(root)
+
+    root = _write_null_shards(
+        tmp_path / "extra", monkeypatch, rejections=0, total=20,
+    )
+    (root / "inputs" / "undeclared.txt").write_text("extra\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAuditError, match="input directory"):
+        audit_benchmark(root)
+
+
+def test_design_lock_distinguishes_target_release_from_harness(
+    tmp_path, monkeypatch,
+):
+    root = _write_null_shards(tmp_path, monkeypatch, rejections=0, total=20)
+    lock_path = root / "design_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["target_release"]["git_commit"] = lock["harness"]["git_commit"]
+    payload = {key: value for key, value in lock.items() if key != "design_hash"}
+    lock["design_hash"] = sha256_payload(payload)
+    lock_path.write_text(canonical_json(lock) + "\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAuditError, match="release target/harness"):
+        audit_benchmark(root)
+
+
 @pytest.mark.parametrize("fake_track", ["fit", "application", "scaling", "conditional"])
 def test_self_selected_formal_registry_cannot_pass_as_canonical(
     tmp_path, monkeypatch, fake_track,
@@ -453,3 +525,147 @@ def test_underfilled_conditional_bank_is_rejected():
     }
     with pytest.raises(BenchmarkAuditError, match="count/identity"):
         _validate_bank_envelope(bank, 2_000, "heldout")
+
+
+def test_real_conditional_snpxsnp_group_rows_and_raw_family_are_distinct():
+    context = build_synthetic_omnib_context(n=72, groups=2, copies=3, seed=1)
+    bank = run_conditional_bank(
+        context, bank="calibration", count=2,
+        design_hash="a" * 64, n_jobs=1,
+    ).to_payload()
+    failed, _ids = _validate_bank_envelope(bank, 2, "calibration")
+    checked = _conditional_score_matrices(bank, 2, failed)
+    assert len(checked["snpxsnp"]) == len(bank["family_ids"])
+    assert bank["tested_family_sizes"]["snpxsnp"] > len(checked["snpxsnp"])
+
+
+def _real_scaling_payload(*, native_valid=True):
+    anchor = ScalingAnchor("small_qa", 192, 192, 3, 3, 199, (1, 4), 3)
+    runs = []
+    for jobs in anchor.jobs:
+        for repeat in range(3):
+            runs.append(ScalingAnchorRun(
+                anchor_id="small_qa", jobs=jobs, repeat=repeat,
+                effective_jobs=jobs, backend=("serial" if jobs == 1 else "fork_shared_memory"),
+                worker_pids=tuple(range(100 * jobs, 100 * jobs + jobs)),
+                wall_seconds=10.0 / jobs, cpu_seconds=9.0,
+                aggregate_cpu_percent=90.0 * jobs,
+                peak_aggregate_pss_bytes=1_000, peak_aggregate_rss_bytes=1_200,
+                max_process_threads=1,
+                max_process_threads_by_pid=tuple(
+                    (pid, 1) for pid in range(100 * jobs, 100 * jobs + jobs)
+                ),
+                numeric_threadpool_max_threads=1,
+                numeric_threadpool_info_json='[{"num_threads":1}]',
+                runtime_oversubscription_guard_passed=native_valid,
+                result_sha256="1" * 64, family_sha256="2" * 64,
+                ranking_sha256="3" * 64,
+                numeric_thread_env=tuple(
+                    (name, "1") for name in NUMERIC_THREAD_ENV
+                ),
+                numeric_thread_limit_ok=True,
+                command=("fixture",),
+            ))
+    summary = summarize_anchor(anchor, runs)
+    scenario = Scenario(
+        "C.small_qa", "scaling", "formal", 3, 199,
+        {"qa_only": False, "anchor": anchor.to_dict()},
+    )
+    return {"failure": {"failed": False}, "summary": summary}, scenario
+
+
+def test_real_scaling_producer_fields_are_used_for_contract_gate():
+    payload, scenario = _real_scaling_payload(native_valid=True)
+    recomputed = _audit_scaling_scenario(payload, scenario)
+    assert recomputed["native_thread_contract_valid"] is True
+    assert recomputed["parallel_execution_contract_valid"] is True
+
+    bad_payload, bad_scenario = _real_scaling_payload(native_valid=False)
+    recomputed_bad = _audit_scaling_scenario(bad_payload, bad_scenario)
+    assert recomputed_bad["native_thread_contract_valid"] is False
+
+
+def test_track_a_true_pve_cannot_diverge_from_frozen_truth():
+    rng = np.random.default_rng(91)
+    kernels = {}
+    for name in ("A", "D"):
+        values = rng.normal(size=(36, 18))
+        values -= values.mean(axis=0)
+        kernel = values @ values.T / values.shape[1]
+        kernels[name] = kernel / (np.trace(kernel) / 36)
+    scenario = Scenario(
+        "A.recovery.cotton.balanced", "fit", "pilot", 1, 199,
+        {"qa_only": True, "panel": "cotton", "experiment": "recovery",
+         "allocation": "balanced", "total_pve": 0.4},
+    )
+    payload = run_fit_replicate(
+        scenario, kernels, replicate=0, design_hash="d" * 64,
+        sample_ids=np.asarray([f"sample-{index}" for index in range(36)]),
+    )
+    payload["true_pve"]["A"] += 0.1
+    payload["pve_bias"]["A"] = payload["estimated_pve"]["A"] - payload["true_pve"]["A"]
+    with pytest.raises(BenchmarkAuditError, match="truth"):
+        _audit_fit_scenario(payload, scenario)
+
+
+def test_power_registry_metadata_and_single_response_are_fail_closed():
+    context = build_synthetic_omnib_context(n=72, groups=2, copies=3, seed=7)
+    design_hash = "c" * 64
+    calibration_id = "B.conditional.synthetic.gaussian.calibration"
+    calibration = run_conditional_bank(
+        context, bank="calibration", count=3, design_hash=design_hash,
+        qa_only=True, null_model="gaussian", scenario_id=calibration_id,
+        n_jobs=1,
+    )
+    payload = run_power_replicate(
+        context, calibration_bank=calibration,
+        calibration_scenario_id=calibration_id, replicate=0,
+        architecture="minor_burden_aligned", interaction_pve=0.05,
+        causal_groups=1, calibration_count=3, response_count=1,
+        design_hash=design_hash, qa_only=True, n_jobs=1,
+    )
+    scenario = Scenario(
+        "B.power.synthetic", "omnib", "pilot", 1, 0,
+        {"experiment": "power", "architecture": "minor_burden_aligned",
+         "interaction_pve": 0.05, "causal_groups": 1,
+         "calibration_count": 3, "response_count": 1,
+         "null_model": "gaussian", "calibration_scenario_id": calibration_id},
+    )
+    _audit_power_evidence(payload, scenario)
+    payload["architecture"] = "mixed_sign"
+    with pytest.raises(BenchmarkAuditError, match="registry"):
+        _audit_power_evidence(payload, scenario)
+    with pytest.raises(ValueError, match="exactly one"):
+        run_power_replicate(
+            context, calibration_bank=calibration,
+            calibration_scenario_id=calibration_id, replicate=0,
+            architecture="minor_burden_aligned", interaction_pve=0.05,
+            causal_groups=1, calibration_count=3, response_count=2,
+            design_hash=design_hash, qa_only=True, n_jobs=1,
+        )
+
+
+def test_track_a_null_scan_gate_uses_any_rejection_and_fixed_denominator():
+    scenario = Scenario(
+        "A.loco.cotton.pve_0", "fit", "formal", 1_000, 0,
+        {"panel": "cotton", "experiment": "loco", "scan_pve": 0.0},
+    )
+    rows = {name: [] for name in TABLE_SCHEMAS}
+    rows["fit_scan_metrics.tsv"] = [
+        {"scenario_id": scenario.scenario_id, "method": "canonical_multi_kernel",
+         "scan_arm": "loco_sensitivity", "failed": False,
+         "rejected": index < 50,
+         "causal_detected": False}
+        for index in range(1_000)
+    ]
+    evidence = SimpleNamespace(stage="formal", registry=(scenario,))
+    gate = next(iter(_fit_scan_gates(evidence, rows).values()))
+    assert gate.successes == 50
+    assert gate.total == 1_000
+    assert gate.upper_ci < 0.075
+    assert gate.passed is True
+    for index in range(11):
+        rows["fit_scan_metrics.tsv"][-index - 1]["failed"] = True
+    gate = next(iter(_fit_scan_gates(evidence, rows).values()))
+    assert gate.failures == 11
+    assert gate.passed is False

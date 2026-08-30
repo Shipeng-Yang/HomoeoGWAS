@@ -1598,6 +1598,7 @@ def run_fit_replicate(
     comparator_preflight_path: str | Path | None = None,
     comparator_preflight_hash: str | None = None,
     scan_comparators: Mapping[str, Any] | None = None,
+    released_scan_truth: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run or parse one Track A replicate and write one immutable shard."""
 
@@ -1689,6 +1690,54 @@ def run_fit_replicate(
             )
         except Exception as error:
             released_binding_error = f"{type(error).__name__}: {error}"
+    released_scan_truth_binding: dict[str, Any] | None = None
+    released_scan_truth_error: str | None = None
+    released_loco_evidence: dict[str, Any] | None = None
+    if experiment == "loco" and released_scan_truth is not None:
+        try:
+            if fit_output_dir is None or released_source is None or released_request_binding is None:
+                raise ValueError("released LOCO truth requires bound production output")
+            released_truth_manifest = _truth_manifest(released_scan_truth)
+            if released_truth_manifest.get("distance_unit") != "bp":
+                raise ValueError("released LOCO truth distance unit must be bp")
+            if released_truth_manifest.get("scan_pve") != scenario.parameters.get("scan_pve"):
+                raise ValueError("released LOCO truth PVE differs from scenario")
+            causal = released_truth_manifest.get("causal_variants")
+            if not isinstance(causal, list) or any(
+                not isinstance(item, Mapping)
+                or set(item) != {"variant_id", "subgenome", "position_bp"}
+                or not isinstance(item["variant_id"], str)
+                or not isinstance(item["subgenome"], str)
+                or isinstance(item["position_bp"], bool)
+                or not isinstance(item["position_bp"], int)
+                or item["position_bp"] < 0
+                for item in causal
+            ):
+                raise ValueError("released LOCO causal variant truth is invalid")
+            if (scenario.parameters.get("scan_pve") == 0.0) is not (len(causal) == 0):
+                raise ValueError("released LOCO null/causal truth differs from scan PVE")
+            released_loco_evidence = _parse_released_scan_evidence(
+                fit_output_dir, trait, list(checked)
+            )
+            ordered = released_loco_evidence["fwer"]["ordered_family"]
+            by_id = {item["variant_id"]: item for item in ordered}
+            if any(by_id.get(item["variant_id"]) != dict(item) for item in causal):
+                raise ValueError("released LOCO causal truth differs from output family")
+            released_scan_truth_binding = {
+                "truth_hash": released_scan_truth["truth_hash"],
+                "released_source_manifest_sha256": released_source["sha256"],
+                "released_request_binding_sha256": released_request_binding["sha256"],
+                "ordered_family": ordered,
+                "ordered_family_hash": released_loco_evidence["fwer"][
+                    "ordered_family_hash"
+                ],
+                "distance_unit": "bp",
+            }
+            released_scan_truth_binding["sha256"] = sha256_payload(
+                released_scan_truth_binding
+            )
+        except Exception as error:
+            released_scan_truth_error = f"{type(error).__name__}: {error}"
     scan_context_hash = None
     scan_request_manifest = None
     if scan_comparators is not None:
@@ -1705,6 +1754,21 @@ def run_fit_replicate(
                     ),
                 }
             )
+    elif released_scan_truth_binding is not None:
+        scan_request_manifest = {
+            "source": "released_loco_truth",
+            "bp_positions_explicit": True,
+            "distance_unit": "bp",
+            "ordered_family": released_scan_truth_binding["ordered_family"],
+            "ordered_family_hash": released_scan_truth_binding[
+                "ordered_family_hash"
+            ],
+            "released_scan_truth_binding_sha256": (
+                released_scan_truth_binding["sha256"]
+            ),
+        }
+        scan_request_manifest["sha256"] = sha256_payload(scan_request_manifest)
+        scan_context_hash = scan_request_manifest["sha256"]
     source = (
         "homoeogwas_outputs"
         if fit_output_dir is not None
@@ -1720,6 +1784,8 @@ def run_fit_replicate(
         else scan_comparators.get("truth")
         if scan_comparators is not None
         and isinstance(scan_comparators.get("truth"), Mapping)
+        else released_scan_truth
+        if experiment == "loco" and released_scan_truth is not None
         else None
     )
     truth_manifest: dict[str, Any] | None = None
@@ -1747,6 +1813,8 @@ def run_fit_replicate(
         "truth_hash": truth_hash,
         "truth_manifest": truth_manifest,
         "truth_manifest_error": truth_manifest_error,
+        "released_scan_truth_binding": released_scan_truth_binding,
+        "released_scan_truth_error": released_scan_truth_error,
         "scan_context_fingerprint": scan_context_hash,
         "scan_request_manifest": scan_request_manifest,
         "trait": trait,
@@ -1786,12 +1854,15 @@ def run_fit_replicate(
         "result_source": source,
         "released_source_manifest": released_source,
         "released_request_binding": released_request_binding,
+        "released_scan_truth_binding": released_scan_truth_binding,
         "coverage_request_binding": coverage_request_binding,
         "scan_context_fingerprint": scan_context_hash,
         "scan_request_manifest": scan_request_manifest,
         "scan_truth": (
             _json_safe(scan_comparators.get("truth"))
             if scan_comparators is not None
+            else _json_safe(released_scan_truth)
+            if released_scan_truth is not None
             else None
         ),
         "comparator_preflight_hash": comparator_preflight_hash,
@@ -1806,6 +1877,8 @@ def run_fit_replicate(
             raise ValueError(released_binding_error)
         if truth_manifest_error is not None:
             raise ValueError(truth_manifest_error)
+        if released_scan_truth_error is not None:
+            raise ValueError(released_scan_truth_error)
         if comparator_preflight_path is not None:
             if comparator_preflight_hash is None:
                 raise ValueError("comparator preflight requires its frozen hash")
@@ -1852,7 +1925,7 @@ def run_fit_replicate(
         if experiment not in {"recovery", "coverage", "scan", "loco"}:
             raise ValueError(f"unknown Track A experiment: {experiment!r}")
         if (
-            experiment == "scan"
+            experiment in {"scan", "loco"}
             and scenario.stage == "formal"
             and (
                 scan_request_manifest is None
@@ -1916,6 +1989,8 @@ def run_fit_replicate(
             metrics["target_pve"] = dict(truth["target_pve"])
             payload = {**base, "truth": truth, **metrics}
         else:
+            if experiment == "loco" and scan_comparators is not None:
+                raise ValueError("LOCO forbids comparator injection")
             metrics = run_scan_replicate(
                 scan_comparators,
                 released_output_dir=fit_output_dir,
@@ -1927,6 +2002,11 @@ def run_fit_replicate(
                 loco=experiment == "loco",
                 seed=seed,
             )
+            if experiment == "loco" and released_loco_evidence is not None:
+                if metrics.get("comparators", {}).get(
+                    "canonical_multi_kernel"
+                ) != released_loco_evidence:
+                    raise RuntimeError("released LOCO evidence changed within request")
             payload = {**base, **metrics}
     except Exception as error:
         payload = {

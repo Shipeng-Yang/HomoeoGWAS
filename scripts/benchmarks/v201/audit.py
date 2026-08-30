@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.stats import spearmanr
 
 from .aggregate import (
     TABLE_SCHEMAS,
@@ -24,6 +25,7 @@ from .aggregate import (
     load_evidence,
     write_tables,
 )
+from .comparators import METHOD_NAMES
 from .contracts import ScalingAnchor, canonical_json, derive_seed, sha256_payload
 from .track_scaling import ScalingAnchorRun, summarize_anchor
 
@@ -51,6 +53,25 @@ _APPLICATION_SPECIES = {
     "cotton": {"cotton", "gossypium hirsutum"},
     "rapeseed": {"rapeseed", "brassica napus"},
     "peanut": {"peanut", "arachis hypogaea"},
+}
+
+_ENCODING_EXACT_CHECKS = {
+    "allele_flip_25pct", "allele_flip_50pct", "allele_flip_100pct",
+    "within_gene_snp_column_permutation", "group_row_permutation_restored_ids",
+    "serial_vs_admitted_parallel",
+}
+_ENCODING_ROBUSTNESS_CHECKS = {
+    "missingness_2pct", "missingness_5pct", "miscoding_1pct",
+    "markers_per_gene_3", "markers_per_gene_10", "markers_per_gene_30",
+    "maf_0p01_0p05", "maf_0p05_0p20", "maf_above_0p20",
+    "unbalanced_marker_counts",
+}
+_CANONICAL_NULL_KIND = {
+    "gaussian": "gaussian", "student_t5": "t5", "t5": "t5",
+    "heteroscedastic_pc1": "heteroscedastic_pc1",
+    "contamination_1pct_6sd": "contamination_1pct_6sd",
+    "additive_only": "additive_only", "structure_aligned": "additive_only",
+    "omitted_kernel": "omitted_kernel",
 }
 
 
@@ -167,12 +188,25 @@ def _strict_old_audit(path: Path) -> dict[str, Any] | None:
     def reject(value: str) -> None:
         raise ValueError(value)
 
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject)
+        encoded = path.read_text(encoding="utf-8")
+        value = json.loads(
+            encoded, parse_constant=reject, object_pairs_hook=unique_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise BenchmarkAuditError("existing benchmark audit is unreadable") from error
     if not isinstance(value, dict):
         raise BenchmarkAuditError("existing benchmark audit is invalid")
+    if encoded != canonical_json(value) + "\n":
+        raise BenchmarkAuditError("existing benchmark audit is not canonical")
     return value
 
 
@@ -186,12 +220,33 @@ def _shard_manifest(evidence: LoadedEvidence) -> tuple[dict[str, str], ...]:
 def _verify_old_seal(
     old: Mapping[str, Any] | None,
     manifest: Sequence[Mapping[str, str]],
+    evidence: LoadedEvidence,
 ) -> None:
     if old is None:
         return
     old_manifest = old.get("shard_manifest")
     if old_manifest != list(manifest):
         raise BenchmarkAuditError("shard hash mismatch against first successful audit seal")
+    if (
+        old.get("schema") != "homoeogwas-v201-benchmark-audit-v1"
+        or old.get("design_hash") != evidence.design_hash
+        or old.get("scenario_registry_sha256") != evidence.registry_sha256
+    ):
+        raise BenchmarkAuditError("existing audit design/registry seal mismatch")
+    table_hashes = old.get("table_sha256")
+    if not isinstance(table_hashes, Mapping) or set(table_hashes) != set(TABLE_SCHEMAS):
+        raise BenchmarkAuditError("existing audit table seal is incomplete")
+    for name, digest in table_hashes.items():
+        path = evidence.root / "tables" / name
+        if path.is_symlink() or _file_digest(path) != digest:
+            raise BenchmarkAuditError("aggregate table hash mismatch against sealed audit")
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    except OSError:
+        return None
 
 
 def _failed(payload: Mapping[str, Any]) -> bool:
@@ -341,6 +396,7 @@ def _audit_fit_scenario(
     for request_key, payload_key in (
         ("released_source_manifest", "released_source_manifest"),
         ("released_request_binding", "released_request_binding"),
+        ("released_scan_truth_binding", "released_scan_truth_binding"),
         ("coverage_request_binding", "coverage_request_binding"),
         ("truth_hash", "truth_hash"), ("truth_manifest", "truth_manifest"),
         ("scan_context_fingerprint", "scan_context_fingerprint"),
@@ -349,7 +405,10 @@ def _audit_fit_scenario(
     ):
         if request.get(request_key) != payload.get(payload_key):
             raise BenchmarkAuditError(f"fit request {request_key} binding mismatch")
-    for label in ("released_source_manifest", "released_request_binding", "coverage_request_binding"):
+    for label in (
+        "released_source_manifest", "released_request_binding",
+        "released_scan_truth_binding", "coverage_request_binding",
+    ):
         _self_hash(payload.get(label), label)
     truth_manifest, truth_hash = payload.get("truth_manifest"), payload.get("truth_hash")
     if truth_manifest is not None:
@@ -383,6 +442,22 @@ def _audit_fit_scenario(
         true, estimated, bias = payload.get("true_pve"), payload.get("estimated_pve"), payload.get("pve_bias")
         if not all(isinstance(value, Mapping) for value in (true, estimated, bias)) or set(true) != set(estimated) or set(true) != set(bias):
             raise BenchmarkAuditError("fit recovery components are incomplete")
+        frozen_target = truth_manifest.get("target_pve") if truth_manifest else None
+        if (
+            not isinstance(frozen_target, Mapping)
+            or dict(true) != dict(frozen_target)
+            or payload.get("target_pve") != frozen_target
+            or truth_manifest.get("allocation") != scenario.parameters.get("allocation")
+        ):
+            raise BenchmarkAuditError("fit recovery PVE differs from frozen truth")
+        genetic_total = sum(
+            float(value) for name, value in frozen_target.items() if name != "e"
+        )
+        if not math.isclose(
+            genetic_total, float(scenario.parameters.get("total_pve", genetic_total)),
+            rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise BenchmarkAuditError("fit recovery target differs from scenario")
         for name in true:
             expected = float(estimated[name]) - float(true[name])
             if not math.isfinite(expected) or bias[name] != expected:
@@ -397,16 +472,45 @@ def _audit_fit_scenario(
             if scenario.parameters.get("allocation") in {"single_dominant", "two_dominant"}
             else None
         )
+        true_vector = [float(true[name]) for name in genetic]
+        estimate_vector = [float(estimated[name]) for name in genetic]
+        spearman_value = (
+            float(spearmanr(
+                true_vector, estimate_vector,
+            ).statistic)
+            if len(genetic) > 1 and np.ptp(true_vector) > 0
+            and np.ptp(estimate_vector) > 0 else math.nan
+        )
         derived = {
             "dominant_correct": dominant_correct,
             "boundary_fit": bool(payload.get("boundary_components")) or any(
                 float(estimated[name]) <= 1e-8 for name in genetic
             ),
+            "rmse": float(math.sqrt(np.mean([
+                (float(estimated[name]) - float(true[name])) ** 2
+                for name in genetic
+            ]))),
+            "spearman": spearman_value if math.isfinite(spearman_value) else None,
         }
     elif experiment == "coverage":
         uncertainty, target = payload.get("pve_bootstrap"), payload.get("target_pve")
         if not isinstance(uncertainty, Mapping) or not isinstance(target, Mapping):
             raise BenchmarkAuditError("fit coverage evidence is missing")
+        frozen_target = truth_manifest.get("target_pve") if truth_manifest else None
+        if (
+            not isinstance(frozen_target, Mapping)
+            or dict(target) != dict(frozen_target)
+            or truth_manifest.get("allocation") != scenario.parameters.get("allocation")
+        ):
+            raise BenchmarkAuditError("fit coverage target differs from frozen truth")
+        genetic_total = sum(
+            float(value) for name, value in frozen_target.items() if name != "e"
+        )
+        if not math.isclose(
+            genetic_total, float(scenario.parameters.get("total_pve", genetic_total)),
+            rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise BenchmarkAuditError("fit coverage target differs from scenario")
         if (
             uncertainty.get("B_requested") != scenario.bootstrap_B
             or not isinstance(uncertainty.get("B_success"), int)
@@ -436,10 +540,50 @@ def _audit_fit_scenario(
             or scan_manifest.get("bp_positions_explicit") is not True
         ):
             raise BenchmarkAuditError("formal scan lacks explicit bp positions")
+        if experiment == "loco":
+            binding = payload.get("released_scan_truth_binding")
+            source = payload.get("released_source_manifest")
+            released_request = payload.get("released_request_binding")
+            if scenario.stage == "formal" and (
+                payload.get("result_source") != "homoeogwas_outputs"
+                or not isinstance(binding, Mapping)
+                or not isinstance(source, Mapping)
+                or not isinstance(released_request, Mapping)
+                or binding.get("truth_hash") != truth_hash
+                or binding.get("released_source_manifest_sha256")
+                != source.get("sha256")
+                or binding.get("released_request_binding_sha256")
+                != released_request.get("sha256")
+                or binding.get("distance_unit") != "bp"
+                or binding.get("ordered_family")
+                != scan_manifest.get("ordered_family")
+                or binding.get("ordered_family_hash")
+                != scan_manifest.get("ordered_family_hash")
+            ):
+                raise BenchmarkAuditError("formal LOCO released truth binding is invalid")
+            if truth_manifest is not None:
+                causal = truth_manifest.get("causal_variants")
+                if (
+                    truth_manifest.get("scan_pve")
+                    != scenario.parameters.get("scan_pve")
+                    or truth_manifest.get("distance_unit") != "bp"
+                    or not isinstance(causal, list)
+                    or (scenario.parameters.get("scan_pve") == 0.0)
+                    is not (len(causal) == 0)
+                ):
+                    raise BenchmarkAuditError("LOCO truth differs from scenario")
         comparators = payload.get("comparators")
         if not isinstance(comparators, Mapping) or not comparators:
             raise BenchmarkAuditError("fit scan comparator evidence is missing")
         truth = payload.get("scan_truth") or {"causal_variant_ids": []}
+        if experiment == "loco" and truth_manifest is not None:
+            truth = {
+                **dict(truth),
+                "causal_variant_ids": [
+                    item["variant_id"]
+                    for item in truth_manifest.get("causal_variants", [])
+                ],
+            }
         derived = {
             method: _audit_scan_fwer(record.get("fwer") if isinstance(record, Mapping) else None, truth, formal=scenario.stage == "formal")
             for method, record in comparators.items()
@@ -598,8 +742,19 @@ def _conditional_score_matrices(
     score_hashes = bank.get("score_matrix_hashes")
     if not all(isinstance(value, Mapping) for value in (scores, members, sizes, hashes, score_hashes)):
         raise BenchmarkAuditError("conditional tested-family evidence is incomplete")
-    if not set(scores) == set(members) == set(sizes) == set(hashes) == set(score_hashes):
+    locked_methods = set(METHOD_NAMES)
+    if not (
+        set(scores) == set(members) == set(sizes) == set(hashes)
+        == set(score_hashes) == locked_methods
+    ):
         raise BenchmarkAuditError("conditional tested-family methods differ")
+    family_ids = bank.get("family_ids")
+    if (
+        not isinstance(family_ids, list) or not family_ids
+        or any(not isinstance(item, str) or not item for item in family_ids)
+        or len(family_ids) != len(set(family_ids))
+    ):
+        raise BenchmarkAuditError("conditional group family IDs are invalid")
     failed_set = set(failed)
     output: dict[str, list[list[float | None]]] = {}
     for method in sorted(scores):
@@ -608,7 +763,7 @@ def _conditional_score_matrices(
         if (
             not isinstance(matrix, list) or not matrix
             or not isinstance(ordered, list) or not ordered
-            or len(matrix) != len(ordered) or sizes[method] != len(ordered)
+            or len(matrix) != len(family_ids) or sizes[method] != len(ordered)
             or any(not isinstance(item, str) or not item for item in ordered)
             or len(ordered) != len(set(ordered))
             or hashes[method] != sha256_payload({
@@ -731,6 +886,16 @@ def _conditional_gates(
         )
         cal_scores = _conditional_score_matrices(cal_bank, expected, cal_failed)
         held_scores = _conditional_score_matrices(held_bank, expected, held_failed)
+        declared_null = held_registry.parameters.get("null_model")
+        expected_null = _CANONICAL_NULL_KIND.get(str(declared_null))
+        if expected_null is None or any(
+            not isinstance(metadata, Mapping)
+            or metadata.get("kind") != declared_null
+            or metadata.get("canonical_kind") != expected_null
+            for bank in (cal_bank, held_bank)
+            for metadata in bank.get("response_metadata", [])
+        ):
+            raise BenchmarkAuditError("conditional null metadata differs from registry")
         cal_seeds, held_seeds = set(cal_seed_order), set(held_seed_order)
         reference = held_bank.get("calibration_reference")
         if not isinstance(reference, Mapping):
@@ -755,11 +920,12 @@ def _conditional_gates(
             held_matrix = held_scores[method]
             if len(cal_matrix) != len(held_matrix):
                 raise BenchmarkAuditError("conditional tested family size changed")
+            calibration_valid = not cal_failed
             cal_minima = [
                 min(value for row in cal_matrix if (value := row[index]) is not None)
-                for index in range(expected) if index not in set(cal_failed)
-            ]
-            if not cal_minima:
+                for index in range(expected)
+            ] if calibration_valid else []
+            if not calibration_valid or not cal_minima:
                 threshold = None
             else:
                 k = int(math.floor(0.05 * (len(cal_minima) + 1)))
@@ -773,13 +939,27 @@ def _conditional_gates(
                 )
                 for index in range(expected)
             ]
-            failures = len(set(held_failed) | set(cal_failed))
+            # Held-out failure rate uses its own fixed denominator. Calibration
+            # failures invalidate the frozen threshold rather than being merged
+            # by coincident numeric response indices.
+            failures = len(held_failed)
             scenario_key = f"{held_payload['scenario_id']}.{method}"
             gate = core_fwer_gate(
                 scenario_key, sum(decisions), len(decisions), failures,
                 stage=evidence.stage,
                 evidence_path="tables/omnib_null_replicates.tsv",
             )
+            if not calibration_valid:
+                gate = AuditGate(
+                    gate.gate_id, gate.track, gate.scenario_id, gate.gate_kind,
+                    gate.successes, gate.total, gate.estimate, gate.lower_ci,
+                    gate.upper_ci, gate.failures, gate.failure_rate,
+                    False if evidence.stage == "formal" else None,
+                    False if evidence.stage == "pilot" else None,
+                    "FAIL" if evidence.stage == "formal" else "QA_FAIL",
+                    gate.evidence_path,
+                    "calibration response failure invalidates the frozen threshold",
+                )
             if held_registry.parameters.get("stress") is True:
                 gate = AuditGate(
                     gate.gate_id.replace("core_fwer", "stress_fwer"), gate.track,
@@ -791,7 +971,11 @@ def _conditional_gates(
                 )
             gates[gate.gate_id] = gate
             for row in rows["omnib_null_replicates.tsv"]:
-                if row["scenario_id"] == held_payload["scenario_id"] and row["method"] == method:
+                if (
+                    evidence.stage == "formal"
+                    and row["scenario_id"] == held_payload["scenario_id"]
+                    and row["method"] == method
+                ):
                     index = int(row["response_index"])
                     row["threshold"] = threshold
                     row["rejected"] = decisions[index]
@@ -873,6 +1057,10 @@ def _audit_derived_seeds_and_requests(evidence: LoadedEvidence) -> None:
             "canonical_bank": canonical_bank,
             "n_jobs": payload.get("requested_jobs"),
         }
+        if experiment == "power":
+            request["calibration_bank_manifest_hash"] = payload.get(
+                "calibration_bank_manifest_hash"
+            )
         expected_request = sha256_payload({
             "design_hash": evidence.design_hash,
             "context_fingerprint": payload["context_fingerprint"],
@@ -960,11 +1148,20 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     calibration_count = scenario.parameters.get("calibration_count")
     if isinstance(calibration_count, bool) or not isinstance(calibration_count, int):
         raise BenchmarkAuditError("power calibration count is invalid")
+    if (
+        scenario.parameters.get("response_count") != 1
+        or payload.get("architecture") != scenario.parameters.get("architecture")
+        or payload.get("interaction_pve") != scenario.parameters.get("interaction_pve")
+        or payload.get("calibration_scenario_id")
+        != scenario.parameters.get("calibration_scenario_id")
+        or scenario.parameters.get("null_model") != "gaussian"
+    ):
+        raise BenchmarkAuditError("power request metadata differs from registry")
     cal_ids, target_ids = payload.get("calibration_response_ids"), payload.get("target_response_ids")
     if (
         not isinstance(cal_ids, list) or len(cal_ids) != calibration_count
         or cal_ids != payload.get("calibration_seed_ids")
-        or not isinstance(target_ids, list) or not target_ids
+        or not isinstance(target_ids, list) or len(target_ids) != 1
         or target_ids != payload.get("target_seed_ids")
         or len(set(cal_ids)) != len(cal_ids) or len(set(target_ids)) != len(target_ids)
         or set(cal_ids) & set(target_ids)
@@ -990,11 +1187,46 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     if not all(isinstance(value, Mapping) for value in maps.values()):
         raise BenchmarkAuditError("power compact score evidence is incomplete")
     methods = set(maps["thresholds"])
-    if not methods or any(set(value) != methods for value in maps.values()):
+    if methods != set(METHOD_NAMES) or any(
+        set(value) != methods for value in maps.values()
+    ):
         raise BenchmarkAuditError("power compact score methods differ")
     causal_ids = payload.get("causal_group_ids")
-    if not isinstance(causal_ids, list) or not causal_ids or len(causal_ids) != len(set(causal_ids)):
+    if (
+        not isinstance(causal_ids, list) or not causal_ids
+        or len(causal_ids) != len(set(causal_ids))
+        or len(causal_ids) != scenario.parameters.get("causal_groups")
+    ):
         raise BenchmarkAuditError("power causal group IDs are invalid")
+    calibration_bank = payload.get("calibration_bank")
+    target_bank = payload.get("target_bank")
+    if (
+        not isinstance(calibration_bank, Mapping)
+        or payload.get("calibration_bank_manifest_hash")
+        != sha256_payload(calibration_bank)
+        or calibration_bank.get("canonical_role") != "calibration"
+        or len(calibration_bank.get("seed_ids", [])) != calibration_count
+        or calibration_bank.get("failure", {}).get("failed") is not False
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("canonical_kind") != "gaussian"
+            for item in calibration_bank.get("response_metadata", [])
+        )
+        or not isinstance(target_bank, Mapping)
+        or target_bank.get("canonical_role") != "power"
+        or target_bank.get("response_shape", [None, None])[1] != 1
+    ):
+        raise BenchmarkAuditError("power frozen calibration binding is invalid")
+    target_metadata = target_bank.get("response_metadata")
+    if (
+        not isinstance(target_metadata, list) or len(target_metadata) != 1
+        or target_metadata[0].get("architecture")
+        != scenario.parameters.get("architecture")
+        or target_metadata[0].get("causal_group_ids") != causal_ids
+        or target_metadata[0].get("pve", {}).get("target_pve")
+        != scenario.parameters.get("interaction_pve")
+    ):
+        raise BenchmarkAuditError("power target truth differs from registry")
     for method in sorted(methods):
         calibration = _compact_vector(
             maps["calibration_minima_by_method"][method], calibration_count,
@@ -1053,6 +1285,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
 
 def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
     tested_hashes: dict[tuple[str, str], tuple[int, str]] = {}
+    power_calibration_by_backbone: dict[str, str] = {}
     for _path, payload in evidence.shards:
         if payload["track"] == "omnib":
             canonical = {
@@ -1131,7 +1364,10 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 score_hashes = bank.get("score_matrix_hashes")
                 if not all(isinstance(value, Mapping) for value in (sizes, hashes, members, score_hashes)):
                     raise BenchmarkAuditError("tested family provenance is incomplete")
-                if not set(sizes) == set(hashes) == set(members) == set(score_hashes):
+                if not (
+                    set(sizes) == set(hashes) == set(members)
+                    == set(score_hashes) == set(METHOD_NAMES)
+                ):
                     raise BenchmarkAuditError("tested family size/hash methods differ")
                 for method in sizes:
                     size, digest = sizes[method], hashes[method]
@@ -1174,16 +1410,43 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     if row.scenario_id == payload["scenario_id"]
                 )
                 _audit_power_evidence(payload, registry_row)
+                backbone = registry_row.parameters.get("backbone")
+                digest = payload.get("calibration_bank_manifest_hash")
+                if not isinstance(backbone, str) or not isinstance(digest, str):
+                    raise BenchmarkAuditError("power backbone calibration binding is missing")
+                previous = power_calibration_by_backbone.setdefault(backbone, digest)
+                if previous != digest:
+                    raise BenchmarkAuditError(
+                        "power cells do not share the frozen backbone calibration bank"
+                    )
         if payload.get("experiment") == "encoding":
             checks = payload.get("exact_checks")
-            if not isinstance(checks, Mapping):
+            robustness = payload.get("robustness_checks")
+            if (
+                not isinstance(checks, Mapping)
+                or set(checks) != _ENCODING_EXACT_CHECKS
+                or not isinstance(robustness, Mapping)
+                or set(robustness) != _ENCODING_ROBUSTNESS_CHECKS
+            ):
                 raise BenchmarkAuditError("encoding checks are missing")
+            recomputed_all_required = True
             for check in checks.values():
+                if not isinstance(check, Mapping):
+                    raise BenchmarkAuditError("encoding check is invalid")
                 if check.get("required") and not all(check.get(field) is True for field in (
                     "observed_arrays_identical", "adjusted_decisions_identical",
                     "ranking_hash_identical", "rejection_sets_identical",
                 )):
                     raise BenchmarkAuditError("required encoding identity check failed")
+                if check.get("required"):
+                    recomputed_all_required = recomputed_all_required and all(
+                        check.get(field) is True for field in (
+                            "observed_arrays_identical", "adjusted_decisions_identical",
+                            "ranking_hash_identical", "rejection_sets_identical",
+                        )
+                    )
+            if payload.get("all_required_exact") is not recomputed_all_required:
+                raise BenchmarkAuditError("encoding aggregate decision differs from checks")
 
 
 def _audit_scaling_scenario(
@@ -1344,7 +1607,6 @@ def _audit_application_scenario(
 def _annotate_binomial_rows(rows: dict[str, list[dict[str, Any]]]) -> None:
     field_by_table = {
         "fit_pve_coverage.tsv": "covered",
-        "fit_scan_metrics.tsv": "causal_detected",
         "omnib_null_replicates.tsv": "rejected",
         "omnib_power_replicates.tsv": "detected",
     }
@@ -1361,6 +1623,19 @@ def _annotate_binomial_rows(rows: dict[str, list[dict[str, Any]]]) -> None:
             row["ci_low"] = summary["ci_low"]
             row["ci_high"] = summary["ci_high"]
             row["failures"] = int(failed)
+    for row in rows["fit_scan_metrics.tsv"]:
+        outcome = row.get(
+            "rejected" if row.get("scan_pve") == 0.0 else "causal_detected"
+        )
+        failed = row.get("failed") is True
+        if not isinstance(outcome, bool) and not failed:
+            continue
+        summary = summarize_binomial(int(outcome) if isinstance(outcome, bool) else 0, 1)
+        row.update(
+            successes=summary["successes"], total=1,
+            estimate=summary["estimate"], ci_low=summary["ci_low"],
+            ci_high=summary["ci_high"], failures=int(failed),
+        )
 
 
 def _annotate_power_eligibility(
@@ -1379,6 +1654,64 @@ def _annotate_power_eligibility(
         row["eligible_for_power_summary"] = (
             gate.passed if stage == "formal" and gate is not None else None
         )
+
+
+def _omnib_power_gates(
+    evidence: LoadedEvidence,
+    rows: dict[str, list[dict[str, Any]]],
+    existing_gates: Mapping[str, AuditGate],
+) -> dict[str, AuditGate]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows["omnib_power_replicates.tsv"]:
+        grouped[(str(row["scenario_id"]), str(row["method"]))].append(row)
+    gates: dict[str, AuditGate] = {}
+    for scenario in evidence.registry:
+        if scenario.track != "omnib" or scenario.parameters.get("experiment") != "power":
+            continue
+        observed = {
+            method for scenario_id, method in grouped
+            if scenario_id == scenario.scenario_id
+        }
+        if observed != set(METHOD_NAMES):
+            raise BenchmarkAuditError("power canonical method rows are incomplete")
+        backbone = str(scenario.parameters["backbone"])
+        for method in METHOD_NAMES:
+            method_rows = grouped[(scenario.scenario_id, method)]
+            if len(method_rows) != scenario.replicates:
+                raise BenchmarkAuditError("power method denominator differs from registry")
+            failures = sum(row.get("failed") is True for row in method_rows)
+            if any(
+                not isinstance(row.get("detected"), bool)
+                for row in method_rows if row.get("failed") is not True
+            ):
+                raise BenchmarkAuditError("power detection evidence is missing")
+            successes = sum(row.get("detected") is True for row in method_rows)
+            summary = summarize_binomial(successes, scenario.replicates)
+            failure_rate = failures / scenario.replicates
+            null_id = (
+                f"B.core_fwer.B.conditional.{backbone}.gaussian.heldout.{method}"
+            )
+            null_gate = existing_gates.get(null_id)
+            null_ok = (
+                null_gate is not None
+                and (null_gate.passed is True if evidence.stage == "formal"
+                     else null_gate.qa_passed is True)
+            )
+            ok = failure_rate <= 0.01 and null_ok
+            gate_id = f"B.power.{scenario.scenario_id}.{method}"
+            gates[gate_id] = AuditGate(
+                gate_id, "omnib", scenario.scenario_id,
+                "power_descriptive", successes, scenario.replicates,
+                float(summary["estimate"]), float(summary["ci_low"]),
+                float(summary["ci_high"]), failures, failure_rate,
+                ok if evidence.stage == "formal" else None,
+                ok if evidence.stage == "pilot" else None,
+                ("PASS" if ok else "FAIL") if evidence.stage == "formal"
+                else ("QA_PASS" if ok else "QA_FAIL"),
+                "tables/omnib_power_replicates.tsv",
+                "power is descriptive; frozen Gaussian null gate passes and failures <= 1%",
+            )
+    return gates
 
 
 def _provenance_gate(evidence: LoadedEvidence) -> AuditGate:
@@ -1419,16 +1752,9 @@ def _pilot_and_engineering_gates(
     for _path, payload in evidence.shards:
         scenario = registry[str(payload["scenario_id"])]
         if payload["track"] == "fit":
-            valid = _audit_fit_scenario(
+            _audit_fit_scenario(
                 payload, scenario,
                 preflight_sha256=str(evidence.design_lock["comparator_preflight_sha256"]),
-            )
-            gate_id = f"A.valid.{scenario.scenario_id}.{payload['replicate']}"
-            gates[gate_id] = _boolean_gate(
-                gate_id=gate_id, track="fit", scenario_id=scenario.scenario_id,
-                kind="fit_evidence_valid", ok=valid, stage=evidence.stage,
-                evidence_path=f"{evidence.stage}/fit/{scenario.scenario_id}",
-                reason="fit request, truth, source and derived evidence independently agree",
             )
             truth = payload.get("truth") or payload.get("scan_truth")
             if isinstance(truth, Mapping):
@@ -1493,8 +1819,8 @@ def _pilot_and_engineering_gates(
         gates[contract_id] = _boolean_gate(
             gate_id=contract_id, track="scaling",
             scenario_id=str(payload["scenario_id"]), kind="scaling_execution_contract",
-            ok=(summary.get("native_thread_contract") is True
-                and summary.get("parallel_execution_contract") is True),
+            ok=(summary.get("native_thread_contract_valid") is True
+                and summary.get("parallel_execution_contract_valid") is True),
             stage=evidence.stage, evidence_path="tables/scaling_runs.tsv",
             reason="native one-thread limits, backend, effective jobs and worker PIDs agree",
         )
@@ -1514,6 +1840,133 @@ def _pilot_and_engineering_gates(
             kind="read_only_application_audit", ok=ok, stage=evidence.stage,
             evidence_path="tables/cross_species_application.tsv",
             reason="all frozen application rows retain an authoritative successful audit",
+        )
+    return gates
+
+
+def _fit_scan_gates(
+    evidence: LoadedEvidence,
+    rows: dict[str, list[dict[str, Any]]],
+) -> dict[str, AuditGate]:
+    """Aggregate Track A scan calibration/power over frozen scenario denominators."""
+
+    registry = {row.scenario_id: row for row in evidence.registry}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows["fit_scan_metrics.tsv"]:
+        grouped[(str(row["scenario_id"]), str(row["method"]))].append(row)
+    for scenario in evidence.registry:
+        if scenario.track != "fit" or scenario.parameters.get("experiment") not in {
+            "scan", "loco",
+        }:
+            continue
+        expected_methods = (
+            {"canonical_multi_kernel"}
+            if scenario.parameters.get("experiment") == "loco"
+            else {
+                "canonical_multi_kernel", "pooled_trace_sum",
+                "independent_subgenome",
+            }
+        )
+        observed_methods = {
+            method for scenario_id, method in grouped
+            if scenario_id == scenario.scenario_id
+        }
+        if observed_methods != expected_methods:
+            raise BenchmarkAuditError("Track A scan canonical method set is incomplete")
+    gates: dict[str, AuditGate] = {}
+    null_gate_by_key: dict[tuple[str, str | None, str, str], AuditGate] = {}
+    for (scenario_id, method), method_rows in sorted(grouped.items()):
+        scenario = registry[scenario_id]
+        expected = scenario.replicates
+        if len(method_rows) != expected:
+            raise BenchmarkAuditError("Track A scan method denominator differs from registry")
+        panel = str(scenario.parameters.get("panel"))
+        placement = scenario.parameters.get("placement")
+        arm = "loco_sensitivity" if scenario.parameters.get("experiment") == "loco" else "primary"
+        if any(row.get("scan_arm") != arm for row in method_rows):
+            raise BenchmarkAuditError("Track A scan arm differs from registry")
+        failures = sum(row.get("failed") is True for row in method_rows)
+        pve = float(scenario.parameters.get("scan_pve", -1.0))
+        outcome_field = "rejected" if pve == 0.0 else "causal_detected"
+        if any(
+            not isinstance(row.get(outcome_field), bool)
+            for row in method_rows if row.get("failed") is not True
+        ):
+            raise BenchmarkAuditError("Track A scan outcome is missing")
+        successes = sum(row.get(outcome_field) is True for row in method_rows)
+        summary = summarize_binomial(successes, expected)
+        failure_rate = failures / expected
+        key = (panel, placement, arm, method)
+        if pve == 0.0:
+            scientific = summary["ci_high"] <= 0.075 and failure_rate <= 0.01
+            gate_id = f"A.scan_fwer.{scenario_id}.{method}"
+            gate = AuditGate(
+                gate_id, "fit", scenario_id, "scan_fwer", successes, expected,
+                float(summary["estimate"]), float(summary["ci_low"]),
+                float(summary["ci_high"]), failures, failure_rate,
+                scientific if evidence.stage == "formal" else None,
+                (failure_rate <= 0.01) if evidence.stage == "pilot" else None,
+                ("PASS" if scientific else "FAIL") if evidence.stage == "formal"
+                else ("QA_PASS" if failure_rate <= 0.01 else "QA_FAIL"),
+                "tables/fit_scan_metrics.tsv",
+                "null any-rejection FWER upper Wilson <= 0.075; failures <= 1%",
+            )
+            null_gate_by_key[key] = gate
+            gates[gate_id] = gate
+        else:
+            null_gate = null_gate_by_key.get(key)
+            null_ok = (
+                null_gate is not None
+                and (
+                    null_gate.passed is True if evidence.stage == "formal"
+                    else null_gate.qa_passed is True
+                )
+            )
+            scientific = failure_rate <= 0.01 and null_ok
+            gate_id = f"A.scan_power.{scenario_id}.{method}"
+            gates[gate_id] = AuditGate(
+                gate_id, "fit", scenario_id, "scan_power_descriptive",
+                successes, expected, float(summary["estimate"]),
+                float(summary["ci_low"]), float(summary["ci_high"]),
+                failures, failure_rate,
+                scientific if evidence.stage == "formal" else None,
+                scientific if evidence.stage == "pilot" else None,
+                ("PASS" if scientific else "FAIL") if evidence.stage == "formal"
+                else ("QA_PASS" if scientific else "QA_FAIL"),
+                "tables/fit_scan_metrics.tsv",
+                "power is descriptive and eligible only when its matching null method passes",
+            )
+    return gates
+
+
+def _fit_non_scan_failure_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
+    registry = {row.scenario_id: row for row in evidence.registry}
+    payloads: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for _path, payload in evidence.shards:
+        if payload["track"] == "fit":
+            payloads[str(payload["scenario_id"])].append(payload)
+    gates: dict[str, AuditGate] = {}
+    for scenario_id, scenario_payloads in sorted(payloads.items()):
+        scenario = registry[scenario_id]
+        if scenario.parameters.get("experiment") in {"scan", "loco"}:
+            continue
+        if len(scenario_payloads) != scenario.replicates:
+            raise BenchmarkAuditError("Track A fixed denominator differs from registry")
+        failures = sum(_failed(payload) for payload in scenario_payloads)
+        rate = failures / scenario.replicates
+        ok = rate <= 0.01
+        gate_id = f"A.failure_rate.{scenario_id}"
+        gates[gate_id] = AuditGate(
+            gate_id, "fit", scenario_id, "fit_failure_rate",
+            scenario.replicates - failures, scenario.replicates,
+            (scenario.replicates - failures) / scenario.replicates,
+            *wilson_interval(scenario.replicates - failures, scenario.replicates),
+            failures, rate, ok if evidence.stage == "formal" else None,
+            ok if evidence.stage == "pilot" else None,
+            ("PASS" if ok else "FAIL") if evidence.stage == "formal"
+            else ("QA_PASS" if ok else "QA_FAIL"),
+            f"{evidence.stage}/fit/{scenario_id}",
+            "successful fixed-denominator Track A shards; failures <= 1%",
         )
     return gates
 
@@ -1579,28 +2032,34 @@ def audit_benchmark(root: str | Path) -> AuditReport:
     any aggregate artifact.
     """
 
-    audit_path = Path(root).resolve() / "audit" / "benchmark_audit.json"
+    benchmark_root = Path(root).resolve()
+    for output_name in ("audit", "tables"):
+        if (benchmark_root / output_name).is_symlink():
+            raise BenchmarkAuditError("benchmark output directories must not be symlinks")
+    audit_path = benchmark_root / "audit" / "benchmark_audit.json"
     old = _strict_old_audit(audit_path)
     try:
         evidence = load_evidence(root)
     except BenchmarkAggregateError as error:
         raise BenchmarkAuditError(str(error)) from error
     manifest = _shard_manifest(evidence)
-    _verify_old_seal(old, manifest)
+    _verify_old_seal(old, manifest, evidence)
     _audit_seed_roles(evidence)
     _audit_derived_seeds_and_requests(evidence)
     _audit_families_and_parallel(evidence)
     gates: dict[str, AuditGate] = {"all.provenance": _provenance_gate(evidence)}
     gates.update(_pilot_and_engineering_gates(evidence))
     rows = build_table_rows(evidence)
+    gates.update(_fit_non_scan_failure_gates(evidence))
+    gates.update(_fit_scan_gates(evidence, rows))
     payloads_by_scenario: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for _path, payload in evidence.shards:
         payloads_by_scenario[str(payload["scenario_id"])].append(payload)
     for scenario in evidence.registry:
         gate_id = f"all.evidence.{scenario.scenario_id}"
-        ok = not any(
-            _failed(payload) for payload in payloads_by_scenario[scenario.scenario_id]
-        )
+        # Loading has already established exact shard completeness and schema.
+        # Explicit failures remain evidence and are assessed by statistical gates.
+        ok = bool(payloads_by_scenario[scenario.scenario_id])
         gate = _boolean_gate(
             gate_id=gate_id, track=scenario.track,
             scenario_id=scenario.scenario_id, kind="scenario_evidence",
@@ -1629,6 +2088,15 @@ def audit_benchmark(root: str | Path) -> AuditReport:
         if row.track != "omnib" or row.parameters.get("experiment") != "end2end":
             continue
         null_model = row.parameters.get("null_model")
+        if any(
+            payload.get("null_model") != null_model
+            or not isinstance(payload.get("null_generation"), Mapping)
+            or payload["null_generation"].get("kind") != null_model
+            or payload["null_generation"].get("canonical_kind")
+            != _CANONICAL_NULL_KIND.get(str(null_model))
+            for payload in payloads if not _failed(payload)
+        ):
+            raise BenchmarkAuditError("end-to-end null metadata differs from registry")
         stress = bool(row.parameters.get("stress", False)) or null_model in {
             "student_t5", "heteroskedastic_pc1", "contamination_1pct",
             "omitted_background_kernel",
@@ -1654,6 +2122,7 @@ def audit_benchmark(root: str | Path) -> AuditReport:
             )
         gates[gate.gate_id] = gate
     gates.update(_conditional_gates(evidence, rows))
+    gates.update(_omnib_power_gates(evidence, rows, gates))
     expected_minimum = {
         "fit_pve_recovery.tsv": sum(
             row.replicates for row in evidence.registry
@@ -1676,7 +2145,8 @@ def audit_benchmark(root: str | Path) -> AuditReport:
             if row.track == "omnib" and row.parameters.get("experiment") == "power"
         ),
         "omnib_encoding_robustness.tsv": sum(
-            1 for row in evidence.registry
+            len(_ENCODING_EXACT_CHECKS) + len(_ENCODING_ROBUSTNESS_CHECKS)
+            for row in evidence.registry
             if row.track == "omnib" and row.parameters.get("experiment") == "encoding"
         ),
         "omnib_family_manifest.tsv": sum(

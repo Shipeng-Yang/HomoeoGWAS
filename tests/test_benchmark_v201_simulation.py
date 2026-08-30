@@ -81,7 +81,6 @@ def _null_inputs(n=200):
         "heteroscedastic_pc1",
         "contamination_1pct_6sd",
         "additive_only",
-        "omitted_kernel",
     ],
 )
 def test_draw_null_is_deterministic_standardized_and_auditable(kind):
@@ -125,9 +124,8 @@ def test_draw_null_uses_root_factor_and_locks_stress_distributions():
     assert additive_meta["interaction_present"] is False
     assert additive_meta["main_effect"] == "pc1"
 
-    _, omitted_meta = draw_null("omitted_kernel", root_v, np.random.default_rng(5), pc1)
-    assert omitted_meta["misspecified"] is True
-    assert omitted_meta["omitted_component"] == "pc1_rank_one_kernel"
+    with pytest.raises(NotImplementedError, match="explicit held-out subgenome kernel"):
+        draw_null("omitted_kernel", root_v, np.random.default_rng(5), pc1)
 
 
 def test_draw_null_rejects_unknown_malformed_and_degenerate_inputs():

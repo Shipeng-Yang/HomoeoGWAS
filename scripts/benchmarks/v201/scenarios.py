@@ -150,6 +150,11 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                         architecture=architecture, causal_groups=causal_groups,
                         interaction_pve=pve,
                         calibration_count=20 if stage == "pilot" else 2_000,
+                        response_count=1,
+                        null_model="gaussian",
+                        calibration_scenario_id=(
+                            f"B.conditional.{backbone}.gaussian.calibration"
+                        ),
                     ))
     return rows
 
