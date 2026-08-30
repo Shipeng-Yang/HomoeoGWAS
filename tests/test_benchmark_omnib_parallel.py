@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "benchmark_omnib_parallel.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_omnib_parallel", SCRIPT)
@@ -88,3 +93,49 @@ def test_native_thread_oversubscription_rejects_candidate():
 
     assert report["runs"]["4"]["oversubscription_gate"] is False
     assert report["accepted"] is False
+
+
+@pytest.mark.parametrize(("copies", "edges"), [(2, 2), (3, 6), (4, 12)])
+def test_child_fixture_expands_all_pair_edges(copies, edges):
+    record = BENCHMARK._child_run(
+        1, n=48, groups=2, responses=2, copies=copies,
+    )
+
+    assert record["fixture"]["copies"] == copies
+    assert record["fixture"]["unique_edges"] == edges
+
+
+def test_child_fixture_rejects_unsupported_copy_counts():
+    with pytest.raises(ValueError, match="copies must be 2, 3, or 4"):
+        BENCHMARK._child_run(1, n=48, groups=2, responses=2, copies=5)
+
+
+def test_release_fixture_keeps_three_copy_default():
+    args = BENCHMARK.build_parser().parse_args([])
+
+    assert args.copies == 3
+
+
+def test_child_process_observes_launcher_thread_limits_and_copy_count():
+    environment = os.environ.copy()
+    for name in BENCHMARK.NUMERIC_THREAD_ENV:
+        environment[name] = "1"
+    completed = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "--child", "--child-jobs", "1",
+            "--n", "48", "--groups", "2", "--responses", "2",
+            "--copies", "4",
+        ],
+        cwd=SCRIPT.parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    record = json.loads(completed.stdout.splitlines()[-1])
+    assert record["numeric_thread_env"] == {
+        name: "1" for name in BENCHMARK.NUMERIC_THREAD_ENV
+    }
+    assert record["fixture"]["copies"] == 4
+    assert record["fixture"]["unique_edges"] == 12

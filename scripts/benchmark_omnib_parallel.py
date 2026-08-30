@@ -106,8 +106,8 @@ def _cpu_seconds() -> float:
 
 def _child_run(
         jobs: int, *, n: int, groups: int, responses: int,
-        marker: Path | None = None) -> dict:
-    from homoeogwas.group_family import MasterGroupFamily
+        copies: int = 3, marker: Path | None = None) -> dict:
+    from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
     from homoeogwas.interact import SubgenomeData
     from homoeogwas.omnib_family import (
         _prepare_checkpoint_omnib,
@@ -116,7 +116,9 @@ def _child_run(
 
     rng = np.random.default_rng(20260828)
     snps_per_gene = 8
-    subgenomes = ("A", "B", "D")
+    if copies not in {2, 3, 4}:
+        raise ValueError("copies must be 2, 3, or 4")
+    subgenomes = ("A", "B", "C", "D")[:copies]
     subdata = {}
     for subgenome in subgenomes:
         dosage = rng.integers(
@@ -136,7 +138,11 @@ def _child_run(
     family = MasterGroupFamily(
         subgenomes=subgenomes,
         group_ids=tuple(f"group_{index}" for index in range(groups)),
-        genes=tuple((f"g{index}",) * 3 for index in range(groups)),
+        genes=tuple((f"g{index}",) * copies for index in range(groups)),
+    )
+    expanded_fixture = expand_pair_edges(family)
+    assert len(expanded_fixture.edges) == (
+        groups * copies * (copies - 1) // 2
     )
     phenotype = rng.normal(size=n)
     scores, expanded = _prepare_checkpoint_omnib(
@@ -184,10 +190,14 @@ def _child_run(
         "cpu_seconds": cpu,
         "cpu_percent": 100.0 * cpu / wall,
         "result_sha256": _array_hash(edge_p, group_p, components),
+        "numeric_thread_env": {
+            name: os.environ.get(name) for name in NUMERIC_THREAD_ENV
+        },
         "fixture": {
             "seed": 20260828,
             "n": n,
             "groups": groups,
+            "copies": copies,
             "unique_edges": len(expanded.edges),
             "responses": responses,
         },
@@ -253,6 +263,7 @@ def _run_subprocess(jobs: int, args) -> dict:
         "--n", str(args.n),
         "--groups", str(args.groups),
         "--responses", str(args.responses),
+        "--copies", str(args.copies),
         "--marker", str(marker),
     ]
     environment = os.environ.copy()
@@ -346,6 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n", type=int, default=192)
     parser.add_argument("--groups", type=int, default=192)
     parser.add_argument("--responses", type=int, default=199)
+    parser.add_argument("--copies", type=int, default=3)
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--child-jobs", type=int, default=1, help=argparse.SUPPRESS)
     parser.add_argument("--marker", type=Path, help=argparse.SUPPRESS)
@@ -357,7 +369,8 @@ def main(argv=None) -> int:
     if args.child:
         print(json.dumps(_child_run(
             args.child_jobs, n=args.n, groups=args.groups,
-            responses=args.responses, marker=args.marker), sort_keys=True))
+            responses=args.responses, copies=args.copies,
+            marker=args.marker), sort_keys=True))
         return 0
     if args.out is None:
         raise SystemExit("--out is required")
