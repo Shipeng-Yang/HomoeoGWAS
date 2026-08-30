@@ -79,3 +79,31 @@ def test_write_scenario_registry_is_deterministic(tmp_path: Path):
 def test_build_scenarios_rejects_unknown_stage(stage):
     with pytest.raises(ValueError, match="stage"):
         build_scenarios(stage)
+
+
+@pytest.mark.parametrize("copies, edges", [(2, 3), (3, 1), (4, 3)])
+def test_scaling_anchor_rejects_inconsistent_pair_edge_count(copies, edges):
+    with pytest.raises(ValueError, match="edges"):
+        ScalingAnchor("invalid", 100, 10, copies, edges, 199, (1,))
+
+
+def test_omnib_scenarios_carry_canonical_group_edge_contract():
+    expected = {"cotton": (2, 1), "wheat": (3, 3), "quartet": (4, 6)}
+    for row in build_scenarios("formal"):
+        if row.track != "omnib":
+            continue
+        parameters = row.parameters
+        assert parameters["mode"] == "group"
+        assert parameters["statistic"] == "omniB"
+        assert parameters["hypothesis_unit"] == "group"
+        assert parameters["subset_order"] == 2
+        assert parameters["pair_edges"] == "common_primitive"
+        assert (parameters["copies"], parameters["edges_per_group"]) == expected[parameters["backbone"]]
+        assert parameters["direct_four_way"] is False
+
+
+def test_application_scenarios_are_read_only_and_never_rescan():
+    rows = [row for row in build_scenarios("formal") if row.track == "application"]
+    assert len(rows) == 4
+    assert all(row.parameters["read_only"] is True for row in rows)
+    assert all(row.parameters["rescan"] is False for row in rows)

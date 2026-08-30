@@ -62,8 +62,9 @@ class ScalingAnchor:
     def __post_init__(self) -> None:
         if not self.anchor_id or self.n < 1 or self.groups < 1:
             raise ValueError("scaling anchor dimensions must be positive")
-        if self.copies < 2 or self.edges < 1 or self.bootstrap_B < 0:
-            raise ValueError("invalid scaling anchor settings")
+        expected_edges = self.copies * (self.copies - 1) // 2
+        if self.copies < 2 or self.edges != expected_edges or self.bootstrap_B < 0:
+            raise ValueError("invalid scaling anchor edges or settings")
         if not self.jobs or any(job < 1 for job in self.jobs):
             raise ValueError("scaling anchor jobs must be positive")
         if self.repeats < 1:

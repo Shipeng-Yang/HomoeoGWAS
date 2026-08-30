@@ -86,10 +86,20 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
     rows: list[Scenario] = []
     core_backbones = ("cotton", "wheat")
     null_models = ("gaussian", "additive_only", "structure_aligned")
+
+    def omnib_row(scenario_id: str, replicates: int, bootstrap_B: int, **parameters: object) -> Scenario:
+        copies, edges = {"cotton": (2, 1), "wheat": (3, 3), "quartet": (4, 6)}[parameters["backbone"]]
+        return _scenario(
+            scenario_id, "omnib", stage, replicates, bootstrap_B,
+            mode="group", statistic="omniB", hypothesis_unit="group",
+            subset_order=2, pair_edges="common_primitive", copies=copies,
+            edges_per_group=edges, direct_four_way=False, **parameters,
+        )
+
     for backbone in core_backbones:
         for null_model in null_models:
-            rows.append(_scenario(
-                f"B.end2end.{backbone}.{null_model}", "omnib", stage,
+            rows.append(omnib_row(
+                f"B.end2end.{backbone}.{null_model}",
                 20 if stage == "pilot" else 500, 199 if stage == "pilot" else 2_000,
                 backbone=backbone, experiment="end2end", null_model=null_model,
             ))
@@ -97,8 +107,8 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
     # The calibration and held-out banks are disjoint, score-level banks.
     for backbone in ("cotton", "wheat", "quartet"):
         for bank in ("calibration", "heldout"):
-            rows.append(_scenario(
-                f"B.conditional.{backbone}.{bank}", "omnib", stage,
+            rows.append(omnib_row(
+                f"B.conditional.{backbone}.{bank}",
                 20 if stage == "pilot" else 2_000, 199 if stage == "pilot" else 0,
                 backbone=backbone, experiment="conditional", bank=bank,
             ))
@@ -112,10 +122,9 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
         for architecture in architectures:
             for causal_groups in (1, 4):
                 for pve in (0.02, 0.05, 0.10):
-                    rows.append(_scenario(
+                    rows.append(omnib_row(
                         f"B.power.{backbone}.{architecture}.g{causal_groups}.pve_{_pve_label(pve)}",
-                        "omnib", stage, 20 if stage == "pilot" else 500,
-                        199 if stage == "pilot" else 0,
+                        20 if stage == "pilot" else 500, 199 if stage == "pilot" else 0,
                         backbone=backbone, experiment="power",
                         architecture=architecture, causal_groups=causal_groups,
                         interaction_pve=pve,
@@ -142,7 +151,10 @@ def _scaling_scenarios(stage: str) -> list[Scenario]:
 
 def _application_scenarios(stage: str) -> list[Scenario]:
     return [
-        _scenario(f"D.{species}", "application", stage, 1, 0, species=species)
+        _scenario(
+            f"D.{species}", "application", stage, 1, 0,
+            species=species, read_only=True, rescan=False,
+        )
         for species in ("wheat", "cotton", "rapeseed", "peanut")
     ]
 
