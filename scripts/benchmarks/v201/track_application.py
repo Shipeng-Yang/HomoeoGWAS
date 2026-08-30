@@ -14,10 +14,16 @@ from typing import Any
 from homoeogwas.run_registry import RegistryRun, load_registry
 
 _VALID_AUDIT_STATUSES = {
-    "PASS",
     "AUDIT_COMPLETE",
     "INTERNAL_DISCOVERY_REPLICATION_REQUIRED",
     "REVIEW_REQUIRED",
+}
+_VALID_RECORD_STATUSES = {
+    "ANALYSIS_INVALID",
+    "INTERNAL_DISCOVERY_REPLICATION_REQUIRED",
+    "INTERNAL_DISCOVERY_REPLICATION_RECORDED",
+    "NO_FAMILYWISE_DISCOVERY_REVIEW_REQUIRED",
+    "NO_FAMILYWISE_DISCOVERY",
 }
 
 
@@ -35,14 +41,6 @@ class _ExportFailure(Exception):
         self.reason = reason
         self.audit_status = audit_status
         self.partial = dict(partial or {})
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _empty_row(run: RegistryRun) -> dict[str, Any]:
@@ -90,10 +88,14 @@ def _failure_row(run: RegistryRun, failure: _ExportFailure) -> dict[str, Any]:
     return row
 
 
-def _read_json_object(path: Path, run_id: str) -> dict[str, Any]:
+def _read_json_object(body: bytes, path: Path, run_id: str) -> dict[str, Any]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
     try:
-        value = json.loads(path.read_text())
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            body.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise _ExportFailure(
             "UNREADABLE_AUTHORITATIVE_OUTPUT",
             f"run {run_id!r}: unreadable authoritative JSON {path}: {exc}",
@@ -115,6 +117,13 @@ def _read_declared_artifacts(
             "MISSING_AUTHORITATIVE_OUTPUT",
             f"run {run.id!r}: authoritative result root is missing: {root}",
         )
+    try:
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _ExportFailure(
+            "UNREADABLE_AUTHORITATIVE_OUTPUT",
+            f"run {run.id!r}: cannot resolve authoritative result root {root}: {exc}",
+        ) from exc
     if not run.artifact_inventory:
         raise _ExportFailure(
             "UNDECLARED_AUTHORITATIVE_INVENTORY",
@@ -135,20 +144,48 @@ def _read_declared_artifacts(
     for role in ("result", "audit"):
         record = by_role[role][0]
         path = root / str(record["path"])
-        if not path.exists() or not path.is_file():
+        try:
+            resolved_path = path.resolve(strict=True)
+        except FileNotFoundError as exc:
             raise _ExportFailure(
                 "MISSING_AUTHORITATIVE_OUTPUT",
                 f"run {run.id!r}: declared {role} artifact is missing: {path}",
-            )
-        observed_size = int(path.stat().st_size)
-        observed_hash = _sha256_file(path)
+            ) from exc
+        except (OSError, RuntimeError) as exc:
+            raise _ExportFailure(
+                "UNREADABLE_AUTHORITATIVE_OUTPUT",
+                f"run {run.id!r}: cannot resolve declared {role} artifact "
+                f"{path}: {exc}",
+            ) from exc
+        try:
+            resolved_path.relative_to(resolved_root)
+        except ValueError as exc:
+            raise _ExportFailure(
+                "AUTHORITATIVE_PATH_ESCAPE",
+                f"run {run.id!r}: declared {role} artifact resolves outside "
+                f"result_root: {path} -> {resolved_path}",
+            ) from exc
+        try:
+            body = resolved_path.read_bytes()
+        except OSError as exc:
+            raise _ExportFailure(
+                "UNREADABLE_AUTHORITATIVE_OUTPUT",
+                f"run {run.id!r}: cannot read declared {role} artifact "
+                f"{resolved_path}: {exc}",
+            ) from exc
+        observed_size = len(body)
+        observed_hash = hashlib.sha256(body).hexdigest()
         if observed_size != record["size"] or observed_hash != record["sha256"]:
             raise _ExportFailure(
                 "AUTHORITATIVE_ARTIFACT_MISMATCH",
                 f"run {run.id!r}: declared {role} artifact identity mismatch at "
                 f"{path} (size={observed_size}, sha256={observed_hash})",
             )
-        resolved[role] = (path, _read_json_object(path, run.id), observed_hash)
+        resolved[role] = (
+            resolved_path,
+            _read_json_object(body, resolved_path, run.id),
+            observed_hash,
+        )
     result_path, result, result_hash = resolved["result"]
     audit_path, audit, audit_hash = resolved["audit"]
     return result_path, result, audit_path, audit, {
@@ -163,6 +200,14 @@ def _integer(value: Any, label: str, run_id: str, *, minimum: int = 0) -> int:
             f"run {run_id!r}: {label} must be an integer >= {minimum}",
         )
     return value
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.lower())
+    )
 
 
 def _primary_result(result: Mapping[str, Any], run_id: str) -> Mapping[str, Any]:
@@ -206,7 +251,8 @@ def _primary_unit(
 
 
 def _marker_count(
-    provenance: Mapping[str, Any], primary: Mapping[str, Any],
+    run: RegistryRun, provenance: Mapping[str, Any], primary: Mapping[str, Any],
+    audit_status: str | None = None,
 ) -> int | None:
     diagnostics = provenance.get("grm_filter_diagnostics")
     if not isinstance(diagnostics, Mapping):
@@ -218,6 +264,12 @@ def _marker_count(
     subgenomes = diagnostics.get("subgenomes")
     if not isinstance(subgenomes, Mapping) or not subgenomes:
         return None
+    if set(subgenomes) != set(run.subgenomes):
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: marker diagnostic subgenomes do not match registry",
+            audit_status=audit_status,
+        )
     counts = []
     for value in subgenomes.values():
         if not isinstance(value, Mapping):
@@ -230,7 +282,7 @@ def _marker_count(
 
 
 def _adjusted_discoveries(
-    primary: Mapping[str, Any], run_id: str,
+    primary: Mapping[str, Any], run_id: str, audit_status: str | None = None,
 ) -> tuple[int, list[dict[str, Any]], dict[str, int]]:
     count = _integer(primary.get("n_sig"), "n_sig", run_id)
     significant = primary.get("sig")
@@ -238,6 +290,7 @@ def _adjusted_discoveries(
         raise _ExportFailure(
             "SEMANTIC_MISMATCH",
             f"run {run_id!r}: discovery count does not match significant-unit list",
+            audit_status=audit_status,
         )
     exported = []
     drivers: Counter[str] = Counter()
@@ -246,17 +299,27 @@ def _adjusted_discoveries(
             raise _ExportFailure(
                 "SCHEMA_INCOMPLETE",
                 f"run {run_id!r}: significant unit {index} is malformed",
+                audit_status=audit_status,
             )
         identifier = unit.get("hypothesis_id") or unit.get("edge_id") or unit.get("pair")
         adjusted = unit.get("p_adjusted_bootstrap_minp")
-        if identifier is None or not isinstance(adjusted, (int, float)) \
-                or isinstance(adjusted, bool) or not math.isfinite(adjusted):
+        if (
+            not isinstance(identifier, str)
+            or not identifier.strip()
+            or not isinstance(adjusted, (int, float))
+            or isinstance(adjusted, bool)
+            or not math.isfinite(adjusted)
+            or not 0.0 <= float(adjusted) <= 1.0
+        ):
             raise _ExportFailure(
                 "SCHEMA_INCOMPLETE",
                 f"run {run_id!r}: significant unit {index} lacks finite adjusted p-value "
                 "or identifier",
+                audit_status=audit_status,
             )
-        exported.append({"hypothesis_id": identifier, "adjusted_p": float(adjusted)})
+        exported.append({
+            "hypothesis_id": identifier.strip(), "adjusted_p": float(adjusted),
+        })
         driver = unit.get("smallest_component")
         if isinstance(driver, str) and driver:
             drivers[driver] += 1
@@ -271,6 +334,12 @@ def _audit_status_and_record(
 ) -> tuple[str, Mapping[str, Any] | None]:
     if "overall_status" in audit:
         status = str(audit.get("overall_status", "")).strip().upper()
+        if status == "ANALYSIS_INVALID":
+            raise _ExportFailure(
+                "AUDIT_FAILED",
+                f"run {run.id!r}: frozen audit failed with status ANALYSIS_INVALID",
+                audit_status=status,
+            )
         if status not in _VALID_AUDIT_STATUSES:
             raise _ExportFailure(
                 "AUDIT_FAILED",
@@ -278,29 +347,143 @@ def _audit_status_and_record(
                 audit_status=status or None,
             )
         records = audit.get("records")
-        if not isinstance(records, list) or audit.get("n_results") != len(records):
+        if (
+            not isinstance(records, list)
+            or len(records) != 1
+            or audit.get("n_results") != 1
+        ):
             raise _ExportFailure(
                 "SEMANTIC_MISMATCH",
-                f"run {run.id!r}: audit records/count are malformed",
+                f"run {run.id!r}: audit must contain exactly one record and n_results=1",
                 audit_status=status,
             )
-        matches = []
-        for record in records:
-            if not isinstance(record, Mapping):
-                continue
-            try:
-                source = Path(str(record.get("source"))).resolve()
-            except (TypeError, ValueError):
-                continue
-            if source == result_path.resolve():
-                matches.append(record)
-        if len(matches) != 1:
+        record = records[0]
+        if not isinstance(record, Mapping):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit record must be an object",
+                audit_status=status,
+            )
+        required = {
+            "source", "command", "trait", "mode", "statistic", "status",
+            "discovery_count", "n", "n_planned", "n_valid", "calibration",
+            "replication_status", "flags", "evidence_boundary",
+        }
+        missing = sorted(required - set(record))
+        if missing:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit record lacks required fields: "
+                + ", ".join(missing),
+                audit_status=status,
+            )
+        text_fields = (
+            "source", "trait", "mode", "statistic", "status", "calibration",
+            "replication_status",
+        )
+        invalid_text = [
+            field for field in text_fields
+            if not isinstance(record[field], str) or not record[field].strip()
+        ]
+        if invalid_text:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit record text fields are invalid: "
+                + ", ".join(invalid_text),
+                audit_status=status,
+            )
+        if record["command"] != "interact":
             raise _ExportFailure(
                 "SEMANTIC_MISMATCH",
-                f"run {run.id!r}: audit does not bind exactly one declared result",
+                f"run {run.id!r}: audit command must be interact",
                 audit_status=status,
             )
-        return status, matches[0]
+        try:
+            source = Path(record["source"]).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: audit source is invalid: {exc}",
+                audit_status=status,
+            ) from exc
+        if source != result_path.resolve():
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: audit source does not bind declared result",
+                audit_status=status,
+            )
+        integer_fields = {
+            "discovery_count": 0, "n": 1, "n_planned": 1, "n_valid": 0,
+        }
+        invalid_integers = [
+            field for field, minimum in integer_fields.items()
+            if isinstance(record[field], bool)
+            or not isinstance(record[field], int)
+            or record[field] < minimum
+        ]
+        if invalid_integers:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit integer fields are invalid: "
+                + ", ".join(invalid_integers),
+                audit_status=status,
+            )
+        record_status = record["status"]
+        if record_status not in _VALID_RECORD_STATUSES:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit record status is unknown: {record_status}",
+                audit_status=status,
+            )
+        if record_status == "ANALYSIS_INVALID":
+            computed = "ANALYSIS_INVALID"
+        elif record_status == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED":
+            computed = record_status
+        elif "REVIEW_REQUIRED" in record_status:
+            computed = "REVIEW_REQUIRED"
+        else:
+            computed = "AUDIT_COMPLETE"
+        if computed != status:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: audit overall_status {status} is inconsistent "
+                f"with record status {record_status}",
+                audit_status=status,
+            )
+        if record["replication_status"] not in {"NOT_ASSESSED", "RECORDED"}:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit replication_status is invalid",
+                audit_status=status,
+            )
+        flags = record["flags"]
+        if not isinstance(flags, list) or any(
+            not isinstance(flag, Mapping)
+            or set(flag) != {"code", "severity", "message"}
+            or any(
+                not isinstance(flag.get(field), str) or not flag[field].strip()
+                for field in ("code", "severity", "message")
+            )
+            or flag.get("severity") not in {"info", "review", "error"}
+            for flag in flags
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit flags are malformed",
+                audit_status=status,
+            )
+        boundary = record["evidence_boundary"]
+        if (
+            not isinstance(boundary, list)
+            or not boundary
+            or any(not isinstance(value, str) or not value.strip() for value in boundary)
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: audit evidence_boundary is malformed",
+                audit_status=status,
+            )
+        return status, record
 
     status = str(audit.get("status", "")).strip().upper()
     if status != "PASS":
@@ -364,14 +547,10 @@ def _validate_family_and_calibration(
                 f"run {run.id!r}: {label} must be a non-negative integer",
                 audit_status=audit_status,
             )
-    if family_hash is not None and (
-        not isinstance(family_hash, str)
-        or len(family_hash) != 64
-        or any(character not in "0123456789abcdef" for character in family_hash)
-    ):
+    if family_hash is not None and not _is_sha256_hex(family_hash):
         raise _ExportFailure(
             "SCHEMA_INCOMPLETE",
-            f"run {run.id!r}: family_hash is not 64 lowercase hexadecimal digits",
+            f"run {run.id!r}: family_hash is not 64 hexadecimal digits",
             audit_status=audit_status,
         )
     if calibration_b is not None and (
@@ -386,7 +565,9 @@ def _validate_family_and_calibration(
         )
 
     diagnostics = primary.get("model_diagnostics")
-    fwer = diagnostics.get("bootstrap_fwer") if isinstance(diagnostics, Mapping) else None
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
+    fwer = diagnostics.get("bootstrap_fwer")
     if isinstance(fwer, Mapping):
         declared = fwer.get("declared_hypothesis_unit") or fwer.get("family_id")
         _same_metric(run.id, "bootstrap family unit", unit, declared, audit_status)
@@ -397,6 +578,151 @@ def _validate_family_and_calibration(
             run.id, "bootstrap calibration B", calibration_b,
             fwer.get("B"), audit_status)
 
+    provenance = result["provenance"]
+    primary_statistic = primary.get("statistic")
+    provenance_statistic = provenance.get("statistic")
+    if (
+        not isinstance(primary_statistic, str)
+        or not primary_statistic.strip()
+        or not isinstance(provenance_statistic, str)
+        or primary_statistic.lower() != provenance_statistic.lower()
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: statistic is missing or inconsistent across layers",
+            audit_status=audit_status,
+        )
+    primary_method = primary.get("calibration_method")
+    provenance_method = provenance.get("calibration_method")
+    if (
+        not isinstance(primary_method, str)
+        or not primary_method.strip()
+        or not isinstance(provenance_method, str)
+        or primary_method.lower() != provenance_method.lower()
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: calibration_method is missing or inconsistent",
+            audit_status=audit_status,
+        )
+    statistic = primary_statistic.lower()
+    method = primary_method.lower()
+    if (statistic, method) not in {
+        ("omnib", "bootstrap"),
+        ("triad3", "bootstrap"),
+        ("burden", "permutation"),
+    }:
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: unsupported statistic/calibration combination "
+            f"{primary_statistic}+{primary_method}",
+            audit_status=audit_status,
+        )
+
+    canonical = result.get("mode") == "group" and statistic == "omnib"
+    if canonical:
+        if provenance.get("mode") != "group":
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: canonical result/provenance modes disagree",
+                audit_status=audit_status,
+            )
+        family = diagnostics.get("family_provenance")
+        if not isinstance(family, Mapping):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: canonical family_provenance is missing",
+                audit_status=audit_status,
+            )
+        family_fields = (
+            "group_family_sha256", "edge_family_sha256",
+            "n_groups_raw", "n_unique_edges",
+        )
+        if any(field not in family or field not in provenance for field in family_fields):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: canonical family layers lack required fields",
+                audit_status=audit_status,
+            )
+        if any(family[field] != provenance[field] for field in family_fields):
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: canonical family provenance layers disagree",
+                audit_status=audit_status,
+            )
+        if any(
+            isinstance(provenance[field], bool)
+            or not isinstance(provenance[field], int)
+            or provenance[field] < 1
+            for field in ("n_groups_raw", "n_unique_edges")
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: canonical family counts must be positive integers",
+                audit_status=audit_status,
+            )
+        for field in ("group_family_sha256", "edge_family_sha256"):
+            value = provenance[field]
+            if not _is_sha256_hex(value):
+                raise _ExportFailure(
+                    "SCHEMA_INCOMPLETE",
+                    f"run {run.id!r}: canonical {field} is invalid",
+                    audit_status=audit_status,
+                )
+        if not isinstance(fwer, Mapping):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: canonical bootstrap FWER object is missing",
+                audit_status=audit_status,
+            )
+        scope = provenance.get("family_scope")
+        if unit not in {"edge", "group"} or scope not in {"primary_only", "joint"}:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: canonical unit/family_scope is invalid",
+                audit_status=audit_status,
+            )
+        expected_family_id = "joint" if scope == "joint" else unit
+        if (
+            fwer.get("declared_hypothesis_unit") != unit
+            or fwer.get("family_id") != expected_family_id
+            or fwer.get("family_scope") != scope
+        ):
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: canonical FWER unit/family_scope mismatch",
+                audit_status=audit_status,
+            )
+        expected = (
+            group_count + edge_count
+            if scope == "joint"
+            else edge_count if unit == "edge" else group_count
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in (expected, primary.get("G"), primary.get("n_planned"),
+                          fwer.get("n_hypotheses"))
+        ) or not (
+            primary.get("G") == primary.get("n_planned")
+            == fwer.get("n_hypotheses") == expected
+        ):
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: canonical family/FWER hypothesis counts disagree",
+                audit_status=audit_status,
+            )
+        if (
+            method != "bootstrap"
+            or fwer.get("method") != "parametric_bootstrap_minp_plus_one"
+            or provenance.get("primary_multiplicity") != "bootstrap_minp"
+            or provenance.get("primary_transform") != "INT"
+        ):
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: canonical omniB bootstrap contract is invalid",
+                audit_status=audit_status,
+            )
+
     if audit_record is not None:
         _same_metric(
             run.id, "audit trait", result.get("trait"),
@@ -404,13 +730,123 @@ def _validate_family_and_calibration(
         _same_metric(
             run.id, "audit mode", result.get("mode"),
             audit_record.get("mode"), audit_status)
+        _same_metric(
+            run.id, "audit statistic", primary_statistic,
+            audit_record.get("statistic"), audit_status)
         calibration = audit_record.get("calibration")
-        if isinstance(calibration, str):
-            match = re.search(r"\bB=(\d+)\b", calibration)
-            if match is not None:
-                _same_metric(
-                    run.id, "audit calibration B", calibration_b,
-                    int(match.group(1)), audit_status)
+        match = re.fullmatch(
+            rf"{re.escape(primary_statistic)}\+{re.escape(primary_method)}"
+            r"\(B=(\d+)\)",
+            calibration,
+        )
+        if match is None:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: audit calibration string is inconsistent",
+                audit_status=audit_status,
+            )
+        _same_metric(
+            run.id, "audit calibration B", calibration_b,
+            int(match.group(1)), audit_status)
+
+
+def _validate_parallel_execution(
+    run: RegistryRun,
+    provenance: Mapping[str, Any],
+    primary: Mapping[str, Any],
+    result: Mapping[str, Any],
+    audit_status: str,
+) -> Mapping[str, Any]:
+    parallel = provenance.get("parallel_execution")
+    if not isinstance(parallel, Mapping):
+        parallel = result.get("parallel_execution")
+    if not isinstance(parallel, Mapping):
+        return {}
+    diagnostics = primary.get("model_diagnostics")
+    nested = diagnostics.get("parallel_execution") if isinstance(
+        diagnostics, Mapping) else None
+    if nested is not None and (not isinstance(nested, Mapping) or dict(nested) != dict(parallel)):
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: parallel execution layers disagree",
+            audit_status=audit_status,
+        )
+    requested = parallel.get("requested_jobs")
+    effective = parallel.get("effective_jobs")
+    backend = parallel.get("backend")
+    pids = parallel.get("worker_pids")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 1
+        for value in (requested, effective)
+    ) or effective > requested:
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: requested/effective jobs are invalid",
+            audit_status=audit_status,
+        )
+    if backend not in {"serial", "fork_shared_memory"}:
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: parallel backend is invalid",
+            audit_status=audit_status,
+        )
+    if (
+        not isinstance(pids, list)
+        or len(pids) != effective
+        or len(set(pids)) != len(pids)
+        or any(isinstance(pid, bool) or not isinstance(pid, int) or pid < 1 for pid in pids)
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: worker_pids do not match effective jobs",
+            audit_status=audit_status,
+        )
+    process_model = parallel.get("process_model")
+    inner_threads = parallel.get("inner_threads")
+    fallback = parallel.get("fallback_reason")
+    parent_pid = parallel.get("parent_pid")
+    if inner_threads is not None and (
+        isinstance(inner_threads, bool)
+        or not isinstance(inner_threads, int)
+        or inner_threads != 1
+    ):
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: inner_threads must equal one",
+            audit_status=audit_status,
+        )
+    if parent_pid is not None and (
+        isinstance(parent_pid, bool) or not isinstance(parent_pid, int) or parent_pid < 1
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: parent_pid is invalid",
+            audit_status=audit_status,
+        )
+    if backend == "fork_shared_memory":
+        valid = (
+            effective > 1
+            and (process_model is None or process_model == "processes")
+            and fallback is None
+            and (parent_pid is None or parent_pid not in pids)
+        )
+    else:
+        valid = (
+            effective == 1
+            and (process_model is None or process_model == "serial")
+            and (parent_pid is None or pids == [parent_pid])
+            and (
+                (requested == 1 and fallback is None)
+                or (requested > 1 and isinstance(fallback, str) and fallback.strip())
+            )
+        )
+    if not valid:
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: backend/process/PID/fallback semantics disagree",
+            audit_status=audit_status,
+        )
+    return parallel
 
 
 def _limitations(
@@ -464,7 +900,8 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         provenance.get("n_samples", primary.get("n")), "sample_count", run.id,
         minimum=1)
     _same_metric(run.id, "result sample count", sample_count, primary.get("n"), audit_status)
-    discoveries, adjusted, drivers = _adjusted_discoveries(primary, run.id)
+    discoveries, adjusted, drivers = _adjusted_discoveries(
+        primary, run.id, audit_status)
     if not drivers:
         custom_drivers = audit.get("component_driver_counts_among_formal_hits")
         if isinstance(custom_drivers, Mapping) and all(
@@ -482,33 +919,41 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
 
     n_planned = _integer(primary.get("n_planned"), "n_planned", run.id)
     n_valid = _integer(primary.get("n_valid"), "n_valid", run.id)
+    diagnostics = primary.get("model_diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
+    family_layer = diagnostics.get("family_provenance")
+    if not isinstance(family_layer, Mapping):
+        family_layer = {}
     group_count = provenance.get("n_groups_raw")
     edge_count = provenance.get("n_unique_edges")
-    if unit == "edge" and edge_count is None:
-        edge_count = provenance.get("n_units_raw", primary.get("G"))
-    if group_count is None and unit == "edge" and len(run.subgenomes) == 2:
-        group_count = primary.get("G")
-    if group_count is None and unit == "group":
-        group_count = primary.get("G")
-    if edge_count is None and isinstance(group_count, int):
-        edge_count = group_count * math.comb(len(run.subgenomes), 2)
+    if group_count is None:
+        group_count = family_layer.get("n_groups_raw")
+    if edge_count is None:
+        edge_count = family_layer.get("n_unique_edges")
 
-    parallel = provenance.get("parallel_execution")
-    if not isinstance(parallel, Mapping):
-        parallel = result.get("parallel_execution")
-    if not isinstance(parallel, Mapping):
-        parallel = {}
-    method = primary.get("calibration_method") or provenance.get("calibration_method")
-    calibration_b = primary.get("bootstrap_B")
-    if calibration_b is None:
-        fwer = (primary.get("model_diagnostics") or {}).get("bootstrap_fwer")
-        if isinstance(fwer, Mapping):
-            calibration_b = fwer.get("B")
+    method = primary.get("calibration_method")
+    if method == "bootstrap":
+        calibration_b = primary.get("bootstrap_B")
+        if calibration_b is None:
+            fwer = diagnostics.get("bootstrap_fwer")
+            if isinstance(fwer, Mapping):
+                calibration_b = fwer.get("B")
+    elif method == "permutation":
+        calibration_b = primary.get("perm_B", provenance.get("perm_B"))
+    else:
+        calibration_b = None
     family_hash = None
     if unit == "edge":
-        family_hash = provenance.get("edge_family_sha256")
+        family_hash = (
+            provenance.get("edge_family_sha256")
+            or family_layer.get("edge_family_sha256")
+        )
     elif unit == "group":
-        family_hash = provenance.get("group_family_sha256")
+        family_hash = (
+            provenance.get("group_family_sha256")
+            or family_layer.get("group_family_sha256")
+        )
     family_hash = (
         family_hash or provenance.get("family_sha256") or result.get("family_hash")
     )
@@ -524,6 +969,8 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         calibration_b=calibration_b,
         family_hash=family_hash,
     )
+    parallel = _validate_parallel_execution(
+        run, provenance, primary, result, audit_status)
 
     if audit_record is not None:
         _same_metric(
@@ -538,6 +985,30 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         _same_metric(
             run.id, "audit valid count", n_valid,
             audit_record.get("n_valid"), audit_status)
+        record_status = audit_record["status"]
+        replication_status = audit_record["replication_status"]
+        status_consistent = (
+            discoveries > 0
+            and record_status == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+            and replication_status == "NOT_ASSESSED"
+        ) or (
+            discoveries > 0
+            and record_status == "INTERNAL_DISCOVERY_REPLICATION_RECORDED"
+            and replication_status == "RECORDED"
+        ) or (
+            discoveries == 0
+            and record_status in {
+                "NO_FAMILYWISE_DISCOVERY",
+                "NO_FAMILYWISE_DISCOVERY_REVIEW_REQUIRED",
+            }
+        )
+        if not status_consistent:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: audit record status/replication/discovery values "
+                "are inconsistent",
+                audit_status=audit_status,
+            )
     _same_metric(
         run.id, "registry discovery count", run.expected.get("n_significant"),
         discoveries, audit_status)
@@ -554,7 +1025,7 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
     row = _empty_row(run)
     row.update({
         "sample_count": sample_count,
-        "marker_count": _marker_count(provenance, primary),
+        "marker_count": _marker_count(run, provenance, primary, audit_status),
         "group_family_count": group_count,
         "edge_family_count": edge_count,
         "requested_jobs": parallel.get("requested_jobs"),
