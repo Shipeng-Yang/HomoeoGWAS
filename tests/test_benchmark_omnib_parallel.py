@@ -7,7 +7,10 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
+import numpy as np
 import pytest
+
+from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "benchmark_omnib_parallel.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_omnib_parallel", SCRIPT)
@@ -132,3 +135,130 @@ def test_run_subprocess_observes_real_numeric_threadpools_and_process_tree():
     assert record["peak_aggregate_rss_bytes"] > 0
     assert record["fixture"]["copies"] == 4
     assert record["fixture"]["unique_edges"] == 12
+
+
+def _ranking_family(group_ids=("group_z", "group_a", "group_m", "group_b")):
+    family = MasterGroupFamily(
+        subgenomes=("A", "B"),
+        group_ids=group_ids,
+        genes=tuple((f"a{index}", f"b{index}") for index in range(4)),
+    )
+    return family, expand_pair_edges(family)
+
+
+def _ranking_identity(family, expanded, edge_p, group_p, components):
+    return BENCHMARK._ordered_ranking_identity(
+        family, expanded, edge_p, group_p, components, edge_p.shape[1],
+    )
+
+
+def _ranking_hash(family, expanded, edge_p, group_p, components):
+    return BENCHMARK._ordered_ranking_hash(
+        family, expanded, edge_p, group_p, components, edge_p.shape[1],
+    )
+
+
+def test_ranking_hash_changes_when_edge_and_group_orders_reverse():
+    family, expanded = _ranking_family()
+    ascending = np.array([[0.1], [0.2], [0.3], [0.4]])
+    descending = ascending[::-1].copy()
+    components = np.repeat(ascending[:, None, :], 3, axis=1)
+
+    first = _ranking_hash(
+        family, expanded, ascending, ascending, components,
+    )
+    reversed_order = _ranking_hash(
+        family, expanded, descending, descending, components[::-1],
+    )
+
+    assert first != reversed_order
+
+
+def test_ranking_ties_are_broken_by_stable_identifier():
+    family, expanded = _ranking_family()
+    tied = np.full((4, 1), 0.5)
+    components = np.repeat(tied[:, None, :], 3, axis=1)
+
+    identity = _ranking_identity(family, expanded, tied, tied, components)
+
+    assert identity["edge"]["responses"][0]["finite_ordered_ids"] == sorted(
+        edge.edge_id for edge in expanded.edges
+    )
+    assert identity["group"]["responses"][0]["finite_ordered_ids"] == sorted(
+        family.group_ids
+    )
+
+
+def test_ranking_nonfinite_values_have_explicit_deterministic_partitions():
+    family, expanded = _ranking_family()
+    values = np.array([[np.nan], [np.inf], [-np.inf], [0.2]])
+    components = np.repeat(values[:, None, :], 3, axis=1)
+
+    identity = _ranking_identity(family, expanded, values, values, components)
+    edge = identity["edge"]["responses"][0]
+    again = _ranking_identity(
+        family,
+        expanded,
+        np.array(values, order="F"),
+        np.array(values, order="F"),
+        np.array(components, order="F"),
+    )
+    two_response_values = np.column_stack((values[:, 0], values[::-1, 0]))
+    two_response_components = np.repeat(
+        two_response_values[:, None, :], 3, axis=1,
+    )
+    fortran_values = np.asfortranarray(two_response_values)
+    fortran_components = np.asfortranarray(two_response_components)
+    assert fortran_values.flags.f_contiguous and not fortran_values.flags.c_contiguous
+    assert (
+        fortran_components.flags.f_contiguous
+        and not fortran_components.flags.c_contiguous
+    )
+    original_hash = _ranking_hash(
+        family,
+        expanded,
+        two_response_values,
+        two_response_values,
+        two_response_components,
+    )
+    layout_changed_hash = _ranking_hash(
+        family,
+        expanded,
+        fortran_values,
+        fortran_values,
+        fortran_components,
+    )
+
+    assert edge["nonfinite_ids"] == {
+        "negative_infinity": [expanded.edges[2].edge_id],
+        "positive_infinity": [expanded.edges[1].edge_id],
+        "nan": [expanded.edges[0].edge_id],
+    }
+    assert edge["ordered_ids"] == [
+        expanded.edges[2].edge_id,
+        expanded.edges[3].edge_id,
+        expanded.edges[1].edge_id,
+        expanded.edges[0].edge_id,
+    ]
+    assert identity == again
+    assert original_hash == layout_changed_hash
+
+
+def test_ranking_hash_ignores_values_when_order_is_same_but_array_hash_does_not():
+    family, expanded = _ranking_family()
+    first = np.array([[0.1], [0.2], [0.3], [0.4]])
+    changed = np.array([[0.01], [0.25], [0.7], [0.9]])
+    first_components = np.repeat(first[:, None, :], 3, axis=1)
+    changed_components = np.repeat(changed[:, None, :], 3, axis=1)
+
+    first_ranking = _ranking_hash(
+        family, expanded, first, first, first_components,
+    )
+    changed_ranking = _ranking_hash(
+        family, expanded, changed, changed, changed_components,
+    )
+
+    assert first_ranking == changed_ranking
+    assert BENCHMARK._array_hash(first, first, first_components) != (
+        BENCHMARK._array_hash(changed, changed, changed_components)
+    )

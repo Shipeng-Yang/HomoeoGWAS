@@ -132,31 +132,197 @@ def _ordered_family_identity(family, expanded) -> dict:
     }
 
 
+def _rank_partition(ordered_ids, values) -> dict:
+    identifiers = tuple(str(identifier) for identifier in ordered_ids)
+    statistics = np.asarray(values, dtype=float)
+    if statistics.shape != (len(identifiers),):
+        raise ValueError("ranking values must align with ordered IDs")
+
+    finite = sorted(
+        (
+            (float(value), identifier)
+            for identifier, value in zip(identifiers, statistics, strict=True)
+            if np.isfinite(value)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    negative_infinity = sorted(
+        identifier
+        for identifier, value in zip(identifiers, statistics, strict=True)
+        if np.isneginf(value)
+    )
+    positive_infinity = sorted(
+        identifier
+        for identifier, value in zip(identifiers, statistics, strict=True)
+        if np.isposinf(value)
+    )
+    nan = sorted(
+        identifier
+        for identifier, value in zip(identifiers, statistics, strict=True)
+        if np.isnan(value)
+    )
+    finite_ids = [identifier for _value, identifier in finite]
+    return {
+        "finite_ordered_ids": finite_ids,
+        "nonfinite_ids": {
+            "negative_infinity": negative_infinity,
+            "positive_infinity": positive_infinity,
+            "nan": nan,
+        },
+        "ordered_ids": (
+            negative_infinity + finite_ids + positive_infinity + nan
+        ),
+    }
+
+
+def _ranking_inputs(
+    family, expanded, edge_p, group_p, components, responses: int,
+) -> tuple:
+    from homoeogwas.omnib_family import OMNIB_COMPONENT_NAMES
+
+    if isinstance(responses, bool) or int(responses) < 0:
+        raise ValueError("responses must be a non-negative integer")
+    responses = int(responses)
+    edge_ids = tuple(edge.edge_id for edge in expanded.edges)
+    group_ids = tuple(family.group_ids)
+    edge_values = np.asarray(edge_p, dtype=float)
+    group_values = np.asarray(group_p, dtype=float)
+    component_values = np.asarray(components, dtype=float)
+    expected_edge_shape = (len(edge_ids), responses)
+    expected_group_shape = (len(group_ids), responses)
+    expected_component_shape = (
+        len(edge_ids), len(OMNIB_COMPONENT_NAMES), responses,
+    )
+    if edge_values.shape != expected_edge_shape:
+        raise ValueError("edge rankings do not match the output family")
+    if group_values.shape != expected_group_shape:
+        raise ValueError("group rankings do not match the output family")
+    if component_values.shape != expected_component_shape:
+        raise ValueError("component rankings do not match their labelled axes")
+    return (
+        edge_ids,
+        group_ids,
+        tuple(OMNIB_COMPONENT_NAMES),
+        edge_values,
+        group_values,
+        component_values,
+        responses,
+    )
+
+
 def _ordered_ranking_identity(
     family, expanded, edge_p, group_p, components, responses: int,
 ) -> dict:
+    (
+        edge_ids,
+        group_ids,
+        component_names,
+        edge_values,
+        group_values,
+        component_values,
+        responses,
+    ) = _ranking_inputs(
+        family, expanded, edge_p, group_p, components, responses
+    )
+
     return {
-        "edge_output_rows": [
-            {
-                "row": index,
-                "edge_id": edge.edge_id,
-                "source_group_ids": list(edge.source_group_ids),
-            }
-            for index, edge in enumerate(expanded.edges)
-        ],
-        "group_output_rows": [
-            {
-                "row": index,
-                "group_id": group_id,
-                "edge_indices": list(expanded.group_edge_indices[index]),
-            }
-            for index, group_id in enumerate(family.group_ids)
-        ],
-        "response_output_columns": list(range(responses)),
-        "edge_p_shape": list(edge_p.shape),
-        "group_p_shape": list(group_p.shape),
-        "components_shape": list(components.shape),
+        "response_count": responses,
+        "edge": {
+            "output_row_ids": list(edge_ids),
+            "responses": [
+                _rank_partition(edge_ids, edge_values[:, response])
+                for response in range(responses)
+            ],
+        },
+        "group": {
+            "output_row_ids": list(group_ids),
+            "responses": [
+                _rank_partition(group_ids, group_values[:, response])
+                for response in range(responses)
+            ],
+        },
+        "components": {
+            "axis_labels": list(component_names),
+            "families": [
+                {
+                    "component": component,
+                    "output_row_ids": list(edge_ids),
+                    "responses": [
+                        _rank_partition(
+                            edge_ids,
+                            component_values[:, component_index, response],
+                        )
+                        for response in range(responses)
+                    ],
+                }
+                for component_index, component in enumerate(
+                    component_names
+                )
+            ],
+        },
     }
+
+
+def _ordered_ranking_hash(
+    family, expanded, edge_p, group_p, components, responses: int,
+) -> str:
+    """Hash the conceptual canonical JSON ranking without retaining all lists."""
+
+    (
+        edge_ids,
+        group_ids,
+        component_names,
+        edge_values,
+        group_values,
+        component_values,
+        responses,
+    ) = _ranking_inputs(
+        family, expanded, edge_p, group_p, components, responses
+    )
+    digest = hashlib.sha256()
+
+    def emit(value) -> None:
+        digest.update(json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8"))
+
+    def emit_rank_family(label: str, identifiers, matrix) -> None:
+        digest.update(b"[")
+        emit(label)
+        digest.update(b",")
+        emit(list(identifiers))
+        digest.update(b",")
+        digest.update(b"[")
+        for response in range(responses):
+            if response:
+                digest.update(b",")
+            emit(_rank_partition(identifiers, matrix[:, response]))
+        digest.update(b"]]")
+
+    digest.update(b"[")
+    emit("homoeogwas-omnib-response-ranking-v2")
+    digest.update(b",")
+    emit_rank_family("edge", edge_ids, edge_values)
+    digest.update(b",")
+    emit_rank_family("group", group_ids, group_values)
+    digest.update(b",")
+    digest.update(b"[")
+    emit("components")
+    digest.update(b",")
+    digest.update(b"[")
+    for component_index, component in enumerate(component_names):
+        if component_index:
+            digest.update(b",")
+        emit_rank_family(
+            component,
+            edge_ids,
+            component_values[:, component_index, :],
+        )
+    digest.update(b"]]]")
+    return digest.hexdigest()
 
 
 def _cpu_seconds() -> float:
@@ -270,9 +436,9 @@ def _child_run(
     wall = time.perf_counter() - wall_start
     cpu = _cpu_seconds() - cpu_start
     execution = dict(scores.parallel_execution)
-    ranking_sha256 = _json_hash(_ordered_ranking_identity(
+    ranking_sha256 = _ordered_ranking_hash(
         family, expanded, edge_p, group_p, components, responses
-    ))
+    )
     return {
         "jobs": jobs,
         "effective_jobs": int(execution["effective_jobs"]),
