@@ -126,19 +126,25 @@ def build_fit_config(
     out_dir: str | Path,
     *,
     coverage: bool = False,
+    bootstrap_B: int = 200,
     bootstrap_jobs: int = 1,
     loco: bool = False,
 ) -> dict[str, Any]:
     """Build the locked, portable Track A HomoeoGWAS fit configuration."""
 
-    output = Path(out_dir)
+    root = Path(out_dir)
+    output = root / "results"
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"results directory is not empty: {output}")
     subgenomes = [str(value) for value in fixture["subgenomes"]]
-    template = _bed_template(fixture, output)
+    template = _bed_template(fixture, root)
     reml: dict[str, Any] = {"n_starts": 10, "seed": 2026}
     if coverage:
+        if type(bootstrap_B) is not int or bootstrap_B < 1:
+            raise ValueError("bootstrap_B must be a positive integer")
         reml["pve_bootstrap"] = {
             "enabled": True,
-            "B": 200,
+            "B": bootstrap_B,
             "level": 0.95,
             "n_jobs": int(bootstrap_jobs),
             "n_starts": 10,
@@ -178,7 +184,7 @@ def build_fit_config(
     from homoeogwas.cli import validate_config
     from homoeogwas.workflow import write_config
 
-    config_path = output / "configs" / "fit.generated.yaml"
+    config_path = root / "configs" / "fit.generated.yaml"
     if Path(write_config(cfg, config_path)) != config_path:
         raise RuntimeError("fit config was not written as YAML")
     validate_config(cfg)
@@ -484,6 +490,70 @@ def _finite_pve(
     return parsed, nonfinite
 
 
+def _fit_layout(root: str | Path) -> tuple[Path, Path]:
+    replicate_root = Path(root).resolve()
+    return replicate_root, replicate_root / "results"
+
+
+def _read_yaml_mapping(path: Path) -> Mapping[str, Any]:
+    import yaml
+
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"cannot read fit config: {path}") from error
+    if not isinstance(value, Mapping):
+        raise ValueError(f"fit config is not a mapping: {path}")
+    return value
+
+
+def _configured_bed_sources(
+    config: Mapping[str, Any],
+) -> dict[str, Path]:
+    panel = config.get("panel")
+    genotype = config.get("genotype")
+    if not isinstance(panel, Mapping) or not isinstance(genotype, Mapping):
+        raise ValueError("fit config panel/genotype provenance is invalid")
+    subgenomes = panel.get("subgenomes")
+    if not isinstance(subgenomes, list) or not subgenomes:
+        raise ValueError("fit config subgenomes are invalid")
+    scan_template = genotype.get("scan_bed_prefix_template")
+    grm = genotype.get("grm")
+    if not isinstance(scan_template, str) or "{subgenome}" not in scan_template:
+        raise ValueError("fit scan BED template provenance is invalid")
+    if not isinstance(grm, Mapping) or grm.get("source", "bed") != "bed":
+        raise ValueError("Track A released provenance requires BED-sourced GRMs")
+    grm_template = grm.get("bed_prefix_template", scan_template)
+    if not isinstance(grm_template, str) or "{subgenome}" not in grm_template:
+        raise ValueError("fit GRM BED template provenance is invalid")
+    sources: dict[str, Path] = {}
+    for source_name, template in (("scan", scan_template), ("grm", grm_template)):
+        for subgenome in subgenomes:
+            prefix = Path(template.format(subgenome=subgenome)).resolve()
+            for extension in ("bed", "bim", "fam"):
+                sources[f"{source_name}_{subgenome}_{extension}"] = Path(
+                    f"{prefix}.{extension}"
+                )
+    return sources
+
+
+def _released_config_context(root: str | Path) -> dict[str, Any]:
+    replicate_root, output = _fit_layout(root)
+    generated_path = replicate_root / "configs" / "fit.generated.yaml"
+    resolved_path = output / "resolved_config.yaml"
+    generated = _read_yaml_mapping(generated_path)
+    resolved = _read_yaml_mapping(resolved_path)
+    return {
+        "root": replicate_root,
+        "output": output,
+        "generated_path": generated_path,
+        "resolved_path": resolved_path,
+        "generated": generated,
+        "resolved": resolved,
+        "bed_sources": _configured_bed_sources(resolved),
+    }
+
+
 def parse_fit_metrics(
     out_dir: str | Path,
     trait: str,
@@ -496,9 +566,8 @@ def parse_fit_metrics(
 ) -> dict[str, Any]:
     """Parse only released fit JSON/TSV outputs into replicate metrics."""
 
-    import yaml
-
-    output = Path(out_dir).resolve()
+    context = _released_config_context(out_dir)
+    output = context["output"]
     summary_path = output / f"summary_{trait}.json"
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -523,7 +592,7 @@ def parse_fit_metrics(
     if summary.get("kernel_names") != subgenomes:
         raise ValueError("fit summary kernel order differs from subgenomes")
 
-    generated_config_path = output / "configs" / "fit.generated.yaml"
+    generated_config_path = context["generated_path"]
     resolved_config_path = output / "resolved_config.yaml"
     analysis_samples_path = output / "analysis_samples.tsv"
     reported_config = Path(str(summary.get("config", ""))).resolve()
@@ -540,12 +609,8 @@ def parse_fit_metrics(
         raise ValueError("fit summary analysis sample path is invalid")
     if not resolved_config_path.is_file() or not analysis_samples_path.is_file():
         raise ValueError("fit summary required provenance files are missing")
-    try:
-        resolved_config = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as error:
-        raise ValueError("fit resolved config is unreadable") from error
-    if not isinstance(resolved_config, Mapping):
-        raise ValueError("fit resolved config is not a mapping")
+    resolved_config = context["resolved"]
+    generated_config = context["generated"]
     if (
         resolved_config.get("panel", {}).get("subgenomes") != subgenomes
         or resolved_config.get("phenotype", {}).get("trait") != trait
@@ -553,6 +618,48 @@ def parse_fit_metrics(
         != output
     ):
         raise ValueError("fit resolved config does not match summary provenance")
+    if generated_config != resolved_config:
+        raise ValueError("generated and resolved fit configs differ")
+    grm_info = summary.get("grm_info")
+    kernels_config = resolved_config.get("kernels", {})
+    grm_config = resolved_config.get("genotype", {}).get("grm", {})
+    expected_kernel_names = list(subgenomes)
+    if kernels_config.get("include_hadamard", False):
+        expected_kernel_names.append(str(kernels_config.get("hadamard_name", "hom")))
+    if (
+        not isinstance(grm_info, Mapping)
+        or grm_info.get("source") != grm_config.get("source", "bed")
+        or grm_info.get("normalize") != kernels_config.get("normalize", "trace")
+        or grm_info.get("kernel_names") != expected_kernel_names
+        or summary.get("kernel_names") != expected_kernel_names
+    ):
+        raise ValueError("fit summary GRM provenance differs from resolved config")
+    marker_input = grm_info.get("marker_input")
+    if not isinstance(marker_input, Mapping):
+        raise ValueError("fit summary GRM marker-source provenance is missing")
+    for source_name in ("scan", "grm"):
+        source_record = marker_input.get(source_name)
+        if not isinstance(source_record, Mapping) or not isinstance(
+            source_record.get("subgenomes"), Mapping
+        ):
+            raise ValueError("fit summary GRM marker-source provenance is invalid")
+        for subgenome in subgenomes:
+            item = source_record["subgenomes"].get(subgenome)
+            expected_bed = context["bed_sources"][
+                f"{source_name}_{subgenome}_bed"
+            ]
+            expected_prefix = str(expected_bed)[: -len(".bed")]
+            if (
+                not isinstance(item, Mapping)
+                or Path(str(item.get("bed_prefix", ""))).resolve()
+                != Path(expected_prefix)
+            ):
+                raise ValueError(
+                    "fit summary GRM marker source differs from resolved config"
+                )
+    for source_path in context["bed_sources"].values():
+        if not source_path.is_file():
+            raise ValueError(f"fit BED provenance file is missing: {source_path}")
 
     with analysis_samples_path.open(encoding="utf-8", newline="") as handle:
         sample_reader = csv.DictReader(handle, delimiter="\t")
@@ -571,6 +678,24 @@ def parse_fit_metrics(
             raise ValueError("expected sample IDs must be strings")
         if analysis_samples != expected_ids:
             raise ValueError("fit analysis sample order differs from the request")
+    phenotype_config = resolved_config.get("phenotype", {})
+    phenotype_path = Path(str(phenotype_config.get("path", ""))).resolve()
+    if not phenotype_path.is_file():
+        raise ValueError("fit phenotype provenance file is missing")
+    delimiter = "," if phenotype_path.suffix.lower() == ".csv" else "\t"
+    with phenotype_path.open(encoding="utf-8", newline="") as handle:
+        phenotype_reader = csv.DictReader(handle, delimiter=delimiter)
+        sample_col = phenotype_config.get("sample_col")
+        if (
+            not isinstance(sample_col, str)
+            or sample_col not in (phenotype_reader.fieldnames or [])
+            or trait not in (phenotype_reader.fieldnames or [])
+        ):
+            raise ValueError("fit phenotype sample/trait columns are invalid")
+        phenotype_rows = list(phenotype_reader)
+    phenotype_samples = [row[sample_col] for row in phenotype_rows]
+    if phenotype_samples != analysis_samples:
+        raise ValueError("fit phenotype sample order differs from analysis samples")
 
     declared_experiment = experiment or (
         str(expected_scenario.parameters.get("experiment"))
@@ -670,6 +795,9 @@ def parse_fit_metrics(
         "analysis_samples": analysis_samples,
         "summary_path": str(summary_path),
         "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+        "released_source_manifest": _released_source_manifest(
+            out_dir, trait, declared_experiment or "fit"
+        ),
         "failure": {
             "failed": failure_type is not None,
             "error_type": failure_type,
@@ -765,9 +893,9 @@ def parse_fit_metrics(
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("bootstrap component interval is invalid") from error
             if not all(math.isfinite(value) for value in (estimate, low, high)) or not (
-                0.0 <= low <= estimate <= high <= 1.0
+                0.0 <= estimate <= 1.0 and 0.0 <= low <= high <= 1.0
             ):
-                raise ValueError("bootstrap interval must bracket its finite estimate")
+                raise ValueError("bootstrap interval bounds are invalid")
             if estimated[name] is None or not np.isclose(estimate, estimated[name]):
                 raise ValueError("bootstrap interval estimate differs from REML PVE")
             intervals[name] = {
@@ -786,7 +914,10 @@ def parse_fit_metrics(
         )
         total_low = float(np.quantile(total_samples, alpha / 2.0))
         total_high = float(np.quantile(total_samples, 1.0 - alpha / 2.0))
-        if not 0.0 <= total_low <= total_estimate <= total_high <= 1.0:
+        if not (
+            0.0 <= total_estimate <= 1.0
+            and 0.0 <= total_low <= total_high <= 1.0
+        ):
             raise ValueError("bootstrap total-genetic interval is invalid")
         intervals["total_genetic"] = {
             "estimate": total_estimate,
@@ -876,10 +1007,10 @@ def _released_source_manifest(
 ) -> dict[str, Any]:
     """Fingerprint every released artifact that may affect a resumed result."""
 
-    output = Path(out_dir).resolve()
+    root, output = _fit_layout(out_dir)
     paths = {
         "summary": output / f"summary_{trait}.json",
-        "generated_config": output / "configs" / "fit.generated.yaml",
+        "generated_config": root / "configs" / "fit.generated.yaml",
         "resolved_config": output / "resolved_config.yaml",
         "analysis_samples": output / "analysis_samples.tsv",
     }
@@ -888,6 +1019,16 @@ def _released_source_manifest(
     if experiment in {"scan", "loco"}:
         paths["sumstats"] = output / f"sumstats_{trait}.tsv"
         paths["lambda_gc"] = output / f"lambda_gc_{trait}.tsv"
+    discovery_error = None
+    try:
+        context = _released_config_context(root)
+        phenotype_path = Path(
+            str(context["resolved"].get("phenotype", {}).get("path", ""))
+        ).resolve()
+        paths["phenotype"] = phenotype_path
+        paths.update(context["bed_sources"])
+    except Exception as error:  # missing evidence remains bound into the request
+        discovery_error = f"{type(error).__name__}: {error}"
     files: dict[str, dict[str, Any]] = {}
     for name, path in paths.items():
         exists = path.is_file()
@@ -897,9 +1038,18 @@ def _released_source_manifest(
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if exists else None,
         }
     manifest = {
+        "replicate_root": str(root),
         "output_dir": str(output),
         "experiment": experiment,
         "files": files,
+        "config_discovery_error": discovery_error,
+        "kernel_provenance": {
+            "matrix_hash_available": False,
+            "evidence_boundary": (
+                "ordered samples plus resolved QC/config and all scan/GRM "
+                "BED/BIM/FAM source bytes"
+            ),
+        },
     }
     manifest["sha256"] = sha256_payload(manifest)
     return manifest
@@ -910,7 +1060,7 @@ def _parse_released_scan_evidence(
     trait: str,
     subgenomes: Sequence[str],
 ) -> dict[str, Any]:
-    output = Path(out_dir).resolve()
+    _, output = _fit_layout(out_dir)
     summary_path = output / f"summary_{trait}.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     outputs = summary.get("outputs")
@@ -1068,9 +1218,36 @@ def run_scan_replicate(
         phenotype=y,
         covariates=X,
         qc_declaration=context_record.get("qc_declaration"),
+        truth_metadata=context_record.get("truth"),
     )
     if rebuilt["context_fingerprint"] != comparators["context_fingerprint"]:
         raise ValueError("primary scan comparator context fingerprint differs")
+    if comparators.get("truth") != rebuilt["truth"]:
+        raise ValueError("primary scan truth metadata/hash differs from context")
+    if _array_mapping_fingerprint(
+        comparators["pooled_trace_sum"]
+    ) != _array_mapping_fingerprint(rebuilt["pooled_trace_sum"]):
+        raise ValueError("primary pooled kernel differs from canonical derivation")
+    if _nested_array_mapping_fingerprint(
+        comparators["independent_subgenome"]
+    ) != _nested_array_mapping_fingerprint(rebuilt["independent_subgenome"]):
+        raise ValueError("primary independent kernels differ from canonical derivation")
+    if expected_scenario is not None:
+        truth = rebuilt["truth"]
+        if truth["placement"] != expected_scenario.parameters.get("placement"):
+            raise ValueError("primary scan truth placement differs from scenario")
+        if not np.isclose(
+            truth["scan_pve"],
+            float(expected_scenario.parameters.get("scan_pve", float("nan"))),
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError("primary scan truth scan_pve differs from scenario")
+        if (
+            expected_scenario.stage == "pilot"
+            and abs(truth["realized_signal_pve"] - truth["scan_pve"]) > 0.01
+        ):
+            raise ValueError("pilot realized signal PVE differs by more than 0.01")
 
     from homoeogwas.io import GenoChunk
     from homoeogwas.lmm import fit_multi_reml
@@ -1187,6 +1364,48 @@ def run_scan_replicate(
     }
 
 
+def _preflight_request_evidence(
+    path: str | Path | None,
+    expected_hash: str | None,
+) -> dict[str, Any] | None:
+    if path is None and expected_hash is None:
+        return None
+    source = Path(path).resolve() if path is not None else None
+    evidence: dict[str, Any] = {
+        "path": str(source) if source is not None else None,
+        "expected_hash": expected_hash,
+        "exists": bool(source is not None and source.is_file()),
+        "sha256": None,
+        "binaries": [],
+        "read_error": None,
+    }
+    if source is None or not source.is_file():
+        return evidence
+    try:
+        evidence["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        with source.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        for row in rows:
+            raw_binary = row.get("executable_path", "")
+            binary = Path(raw_binary) if raw_binary else None
+            exists = bool(binary is not None and binary.is_file())
+            evidence["binaries"].append(
+                {
+                    "comparator": row.get("comparator"),
+                    "path": str(binary) if binary is not None else None,
+                    "exists": exists,
+                    "sha256": (
+                        hashlib.sha256(binary.read_bytes()).hexdigest()
+                        if exists and binary is not None
+                        else None
+                    ),
+                }
+            )
+    except Exception as error:
+        evidence["read_error"] = f"{type(error).__name__}: {error}"
+    return evidence
+
+
 def run_fit_replicate(
     scenario: Scenario,
     kernels: Mapping[str, np.ndarray],
@@ -1219,24 +1438,10 @@ def run_fit_replicate(
             "sample_manifest": samples,
         }
     )
-    if comparator_preflight_path is None:
-        if comparator_preflight_hash is not None:
-            raise ValueError("comparator_preflight_hash requires its frozen TSV")
-        preflight = None
-    else:
-        if comparator_preflight_hash is None:
-            raise ValueError("comparator preflight requires its frozen hash")
-        preflight = read_comparator_preflight(
-            comparator_preflight_path,
-            expected_hash=comparator_preflight_hash,
-        )
-    preflight_mismatches: list[str] = []
-    if preflight is not None:
-        for row in preflight["rows"]:
-            if row["sample_order_hash"] != samples["ordered_sample_ids_sha256"]:
-                preflight_mismatches.append(
-                    f"{row['comparator']} sample-order hash differs"
-                )
+    preflight = None
+    preflight_evidence = _preflight_request_evidence(
+        comparator_preflight_path, comparator_preflight_hash
+    )
     experiment = scenario.parameters.get("experiment")
     if not isinstance(experiment, str):
         experiment = "invalid"
@@ -1246,19 +1451,11 @@ def run_fit_replicate(
         else None
     )
     scan_context_hash = None
+    scan_request_manifest = None
     if scan_comparators is not None:
         try:
-            scan_record = scan_comparators["context"]
-            rebuilt_scan = build_scan_comparators(
-                scan_comparators["canonical_multi_kernel"],
-                sample_ids=scan_comparators["sample_ids"],
-                variant_ids=scan_record["variant_ids"],
-                standardized_variants=scan_comparators["standardized_variants"],
-                phenotype=scan_comparators["phenotype"],
-                covariates=scan_comparators["covariates"],
-                qc_declaration=scan_record.get("qc_declaration"),
-            )
-            scan_context_hash = rebuilt_scan["context_fingerprint"]
+            scan_request_manifest = _scan_request_manifest(scan_comparators)
+            scan_context_hash = scan_request_manifest["sha256"]
         except Exception as error:  # retained as an immutable failure request
             scan_context_hash = sha256_payload(
                 {
@@ -1269,28 +1466,6 @@ def run_fit_replicate(
                     ),
                 }
             )
-    if preflight is not None and scan_comparators is not None:
-        scan_record = scan_comparators.get("context")
-        if not isinstance(scan_record, Mapping):
-            preflight_mismatches.append("scan context evidence is missing")
-        else:
-            current_hashes = {
-                "sample_order_hash": samples["ordered_sample_ids_sha256"],
-                "qc_hash": sha256_payload(scan_record.get("qc_declaration")),
-                "covariates_hash": str(
-                    scan_record.get("covariates", {}).get("sha256", "")
-                ),
-                "variant_manifest_hash": sha256_payload(
-                    scan_record.get("variant_ids")
-                ),
-            }
-            current_hashes["scan_context_hash"] = sha256_payload(current_hashes)
-            for row in preflight["rows"]:
-                for field, value in current_hashes.items():
-                    if row[field] != value:
-                        preflight_mismatches.append(
-                            f"{row['comparator']} {field} differs"
-                        )
     source = (
         "homoeogwas_outputs"
         if fit_output_dir is not None
@@ -1307,10 +1482,9 @@ def run_fit_replicate(
             "source": source,
             "released_source_manifest": released_source,
             "scan_context_fingerprint": scan_context_hash,
+            "scan_request_manifest": scan_request_manifest,
             "trait": trait,
-            "comparator_preflight_hash": (
-                preflight["sha256"] if preflight is not None else None
-            ),
+            "comparator_preflight": preflight_evidence,
         }
     )
     if shard_path is not None and Path(shard_path).exists():
@@ -1343,20 +1517,63 @@ def run_fit_replicate(
         "result_source": source,
         "released_source_manifest": released_source,
         "scan_context_fingerprint": scan_context_hash,
-        "comparator_preflight_hash": (
-            preflight["sha256"] if preflight is not None else None
+        "scan_request_manifest": scan_request_manifest,
+        "scan_truth": (
+            _json_safe(scan_comparators.get("truth"))
+            if scan_comparators is not None
+            else None
         ),
-        "external_comparators": (
-            preflight["rows"] if preflight is not None else []
-        ),
+        "comparator_preflight_hash": comparator_preflight_hash,
+        "comparator_preflight_evidence": preflight_evidence,
+        "external_comparators": [],
     }
     started = time.perf_counter()
     try:
-        if preflight_mismatches:
-            raise ValueError(
-                "comparator preflight differs from this run: "
-                + "; ".join(preflight_mismatches)
+        if comparator_preflight_path is None and comparator_preflight_hash is not None:
+            raise ValueError("comparator_preflight_hash requires its frozen TSV")
+        if comparator_preflight_path is not None:
+            if comparator_preflight_hash is None:
+                raise ValueError("comparator preflight requires its frozen hash")
+            preflight = read_comparator_preflight(
+                comparator_preflight_path,
+                expected_hash=comparator_preflight_hash,
             )
+            base["external_comparators"] = preflight["rows"]
+            if scan_comparators is None:
+                raise ValueError("comparator preflight requires actual scan inputs")
+            scan_record = scan_comparators.get("context")
+            if not isinstance(scan_record, Mapping):
+                raise ValueError("comparator preflight scan context is missing")
+            current_hashes = _preflight_hashes(
+                samples["ordered_sample_ids"],
+                scan_record.get("qc_declaration"),
+                scan_comparators["covariates"],
+                scan_record.get("variant_ids"),
+                scan_comparators["standardized_variants"],
+            )
+            preflight_mismatches: list[str] = []
+            for row in preflight["rows"]:
+                binary_path = row["executable_path"]
+                if binary_path:
+                    current_binary_hash = (
+                        hashlib.sha256(Path(binary_path).read_bytes()).hexdigest()
+                        if Path(binary_path).is_file()
+                        else None
+                    )
+                    if current_binary_hash != row["binary_sha256"]:
+                        preflight_mismatches.append(
+                            f"{row['comparator']} binary_hash differs"
+                        )
+                for field, value in current_hashes.items():
+                    if row[field] != value:
+                        preflight_mismatches.append(
+                            f"{row['comparator']} {field} differs"
+                        )
+            if preflight_mismatches:
+                raise ValueError(
+                    "comparator preflight differs from this run: "
+                    + "; ".join(preflight_mismatches)
+                )
         if experiment not in {"recovery", "coverage", "scan", "loco"}:
             raise ValueError(f"unknown Track A experiment: {experiment!r}")
         if experiment == "recovery":
@@ -1463,6 +1680,136 @@ def _numeric_fingerprint(value: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _exact_array_fingerprint(value: np.ndarray) -> dict[str, Any]:
+    array = np.ascontiguousarray(np.asarray(value))
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return {
+        "shape": [int(axis) for axis in array.shape],
+        "dtype": array.dtype.str,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _array_mapping_fingerprint(
+    values: Mapping[str, np.ndarray],
+) -> list[dict[str, Any]]:
+    if not isinstance(values, Mapping) or not values:
+        raise ValueError("scan array mapping is missing")
+    if any(not isinstance(name, str) or not name for name in values):
+        raise ValueError("scan array mapping names are invalid")
+    return [
+        {"name": name, **_exact_array_fingerprint(np.asarray(value))}
+        for name, value in values.items()
+    ]
+
+
+def _nested_array_mapping_fingerprint(
+    values: Mapping[str, Mapping[str, np.ndarray]],
+) -> list[dict[str, Any]]:
+    if not isinstance(values, Mapping) or not values:
+        raise ValueError("nested scan array mapping is missing")
+    if any(not isinstance(name, str) or not name for name in values):
+        raise ValueError("nested scan array mapping names are invalid")
+    return [
+        {"name": name, "values": _array_mapping_fingerprint(inner)}
+        for name, inner in values.items()
+    ]
+
+
+def _scan_request_manifest(comparators: Mapping[str, Any]) -> dict[str, Any]:
+    context = comparators.get("context")
+    if not isinstance(context, Mapping):
+        raise ValueError("scan request context is missing")
+    sample_ids = np.asarray(comparators["sample_ids"])
+    if sample_ids.ndim != 1 or any(
+        not isinstance(value, (str, np.str_)) for value in sample_ids.tolist()
+    ):
+        raise ValueError("scan request sample IDs are invalid")
+    manifest = {
+        "sample_ids": sample_ids.astype(str).tolist(),
+        "variant_ids": _json_safe(context.get("variant_ids")),
+        "qc_declaration": _json_safe(context.get("qc_declaration")),
+        "truth": _json_safe(context.get("truth")),
+        "top_level_truth": _json_safe(comparators.get("truth")),
+        "declared_context_fingerprint": comparators.get("context_fingerprint"),
+        "phenotype": _exact_array_fingerprint(comparators["phenotype"]),
+        "covariates": _exact_array_fingerprint(comparators["covariates"]),
+        "standardized_variants": _array_mapping_fingerprint(
+            comparators["standardized_variants"]
+        ),
+        "canonical_multi_kernel": _array_mapping_fingerprint(
+            comparators["canonical_multi_kernel"]
+        ),
+        "pooled_trace_sum": _array_mapping_fingerprint(
+            comparators["pooled_trace_sum"]
+        ),
+        "independent_subgenome": _nested_array_mapping_fingerprint(
+            comparators["independent_subgenome"]
+        ),
+    }
+    manifest["sha256"] = sha256_payload(manifest)
+    return manifest
+
+
+def _scan_truth_record(
+    truth_metadata: Mapping[str, Any],
+    variant_ids: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    if not isinstance(truth_metadata, Mapping):
+        raise ValueError("scan truth_metadata must be a mapping")
+    placement = truth_metadata.get("placement")
+    if placement not in {"one_subgenome", "two_subgenomes"}:
+        raise ValueError("scan truth placement is invalid")
+    try:
+        scan_pve = float(truth_metadata["scan_pve"])
+        realized = float(truth_metadata["realized_signal_pve"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("scan truth PVE metadata is invalid") from error
+    if not all(math.isfinite(value) and 0.0 <= value < 1.0 for value in (scan_pve, realized)):
+        raise ValueError("scan truth PVE metadata must be finite in [0,1)")
+    causal = truth_metadata.get("causal_variants")
+    if not isinstance(causal, list):
+        raise ValueError("scan truth causal_variants must be a list")
+    normalized_causal: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in causal:
+        if not isinstance(item, Mapping):
+            raise ValueError("scan truth causal variant metadata is invalid")
+        marker = item.get("variant_id")
+        subgenome = item.get("subgenome")
+        if (
+            not isinstance(marker, str)
+            or not marker
+            or marker in seen
+            or subgenome not in variant_ids
+            or marker not in variant_ids[subgenome]
+        ):
+            raise ValueError("scan truth causal variant is absent or duplicated")
+        seen.add(marker)
+        normalized_causal.append(
+            {"variant_id": marker, "subgenome": str(subgenome)}
+        )
+    causal_subgenomes = {item["subgenome"] for item in normalized_causal}
+    expected_count = 1 if placement == "one_subgenome" else 2
+    if scan_pve > 0.0 and len(causal_subgenomes) != expected_count:
+        raise ValueError("scan truth causal subgenomes differ from placement")
+    if scan_pve == 0.0 and normalized_causal:
+        raise ValueError("null scan truth must not declare causal variants")
+    record = {
+        "placement": placement,
+        "scan_pve": scan_pve,
+        "causal_variants": normalized_causal,
+        "causal_variant_ids": [item["variant_id"] for item in normalized_causal],
+        "causal_subgenomes": sorted(causal_subgenomes),
+        "realized_signal_pve": realized,
+    }
+    record["truth_hash"] = sha256_payload(record)
+    return record
+
+
 def build_scan_comparators(
     kernels: Mapping[str, np.ndarray],
     *,
@@ -1472,6 +1819,7 @@ def build_scan_comparators(
     phenotype: Sequence[float] | np.ndarray,
     covariates: np.ndarray,
     qc_declaration: Mapping[str, Any] | None = None,
+    truth_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze matched canonical, pooled, and independent scan kernel sets."""
 
@@ -1519,6 +1867,7 @@ def build_scan_comparators(
         all_variants.extend(raw)
     if len(set(all_variants)) != len(all_variants):
         raise ValueError("variant IDs must be unique across the experiment")
+    truth = _scan_truth_record(truth_metadata, ordered_variants)
 
     frozen = {name: np.array(value, copy=True) for name, value in checked.items()}
     for value in frozen.values():
@@ -1543,6 +1892,7 @@ def build_scan_comparators(
             qc_declaration
             or {"maf_min": 0.05, "call_rate_min": 0.9}
         ),
+        "truth": truth,
         "kernel_fingerprints": {
             name: _kernel_fingerprint(value) for name, value in frozen.items()
         },
@@ -1559,6 +1909,7 @@ def build_scan_comparators(
         "sample_ids": frozen_samples,
         "phenotype": frozen_response,
         "covariates": frozen_fixed,
+        "truth": truth,
         "standardized_variants": frozen_variants,
         "canonical_multi_kernel": frozen,
         "pooled_trace_sum": {"pooled": pooled},
@@ -1671,15 +2022,19 @@ def experiment_wide_scan_fwer(
 _PREFLIGHT_COLUMNS = (
     "comparator",
     "executable_path",
-    "version",
-    "matched_sample_order",
-    "matched_qc",
-    "matched_covariates",
+    "executable_basename",
+    "binary_sha256",
+    "version_output",
+    "parsed_identity",
+    "parsed_version",
+    "version_returncode",
+    "smoke_status",
     "sample_order_hash",
+    "genotype_hash",
     "qc_hash",
     "covariates_hash",
     "variant_manifest_hash",
-    "scan_context_hash",
+    "input_context_hash",
     "status",
     "reason",
 )
@@ -1704,13 +2059,13 @@ def _resolve_executable(candidate: str | Path) -> str | None:
     return str(Path(found).resolve()) if found else None
 
 
-def _executable_version(path: str, comparator: str) -> tuple[str, str | None]:
+def _probe_executable_version(path: str, comparator: str) -> dict[str, Any]:
     basename = Path(path).name.lower()
     if basename.endswith(".exe"):
         basename = basename[:-4]
     allowed = {"gcta", "gcta64"} if comparator == "GCTA" else {"gemma"}
-    if basename not in allowed:
-        return "", "executable identity does not match comparator"
+    last_returncode: int | None = None
+    version_output = ""
     for flag in ("--version", "-v"):
         try:
             completed = subprocess.run(
@@ -1722,16 +2077,21 @@ def _executable_version(path: str, comparator: str) -> tuple[str, str | None]:
             )
         except (OSError, subprocess.SubprocessError):
             continue
-        if completed.returncode != 0:
-            continue
-        text = " ".join((completed.stdout or completed.stderr).split())[:500]
-        if (
-            text
-            and comparator.lower() in text.lower()
-            and re.search(r"\b\d+(?:\.\d+)+\b", text)
-        ):
-            return text, None
-    return "", "version command failed or returned invalid tool/version identity"
+        last_returncode = int(completed.returncode)
+        version_output = " ".join(
+            (completed.stdout or completed.stderr).split()
+        )[:500]
+        if completed.returncode == 0:
+            break
+    match = re.search(r"\b\d+(?:\.\d+)+\b", version_output)
+    identity_ok = basename in allowed and comparator.lower() in version_output.lower()
+    return {
+        "executable_basename": basename,
+        "version_output": version_output,
+        "parsed_identity": comparator if identity_ok else "",
+        "parsed_version": match.group(0) if identity_ok and match else "",
+        "version_returncode": last_returncode,
+    }
 
 
 def _preflight_hashes(
@@ -1739,6 +2099,7 @@ def _preflight_hashes(
     qc_declaration: Mapping[str, Any],
     covariates: np.ndarray,
     variant_ids: Mapping[str, Sequence[str]],
+    genotypes: Mapping[str, np.ndarray],
 ) -> dict[str, str]:
     samples = list(sample_ids)
     if not samples or any(not isinstance(value, str) or not value for value in samples):
@@ -1747,16 +2108,19 @@ def _preflight_hashes(
         raise ValueError("preflight sample IDs must be unique")
     if not isinstance(qc_declaration, Mapping) or not qc_declaration:
         raise ValueError("preflight QC declaration must be a non-empty mapping")
-    fixed = np.asarray(covariates, dtype=float)
+    fixed = np.asarray(covariates)
     if (
         fixed.ndim != 2
         or fixed.shape[0] != len(samples)
         or fixed.shape[1] < 1
+        or not np.issubdtype(fixed.dtype, np.number)
         or not np.all(np.isfinite(fixed))
     ):
         raise ValueError("preflight covariates must be finite and sample-aligned")
     if not isinstance(variant_ids, Mapping) or not variant_ids:
         raise ValueError("preflight variant manifest must be a non-empty mapping")
+    if not isinstance(genotypes, Mapping) or list(genotypes) != list(variant_ids):
+        raise ValueError("preflight genotypes must match ordered variant subgenomes")
     ordered_variants: dict[str, list[str]] = {}
     flat: list[str] = []
     for name, raw_ids in variant_ids.items():
@@ -1767,15 +2131,29 @@ def _preflight_hashes(
             raise ValueError("preflight variant IDs must be non-empty strings")
         ordered_variants[name] = ids
         flat.extend(ids)
+        block = np.asarray(genotypes[name])
+        if (
+            block.ndim != 2
+            or block.shape != (len(samples), len(ids))
+            or not np.issubdtype(block.dtype, np.number)
+            or not np.all(np.isfinite(block))
+        ):
+            raise ValueError("preflight genotypes must be finite and variant-aligned")
     if len(set(flat)) != len(flat):
         raise ValueError("preflight variant IDs must be experiment-wide unique")
     hashes = {
         "sample_order_hash": sha256_payload(samples),
         "qc_hash": sha256_payload(_json_safe(qc_declaration)),
-        "covariates_hash": _numeric_fingerprint(fixed)["sha256"],
+        "covariates_hash": _exact_array_fingerprint(fixed)["sha256"],
         "variant_manifest_hash": sha256_payload(ordered_variants),
+        "genotype_hash": sha256_payload(
+            {
+                name: _exact_array_fingerprint(np.asarray(genotypes[name]))
+                for name in ordered_variants
+            }
+        ),
     }
-    hashes["scan_context_hash"] = sha256_payload(hashes)
+    hashes["input_context_hash"] = sha256_payload(hashes)
     return hashes
 
 
@@ -1786,8 +2164,8 @@ def write_comparator_preflight(
     qc_declaration: Mapping[str, Any],
     covariates: np.ndarray,
     variant_ids: Mapping[str, Sequence[str]],
+    genotypes: Mapping[str, np.ndarray],
     executables: Mapping[str, str | Path] | None = None,
-    matched: Mapping[str, Mapping[str, bool]] | None = None,
     outcomes_exist: bool = False,
 ) -> dict[str, Any]:
     """Probe and freeze the two external comparator rows before outcomes."""
@@ -1798,54 +2176,47 @@ def write_comparator_preflight(
     if output.exists():
         raise FileExistsError(f"comparator preflight is already frozen: {output}")
     hashes = _preflight_hashes(
-        sample_ids, qc_declaration, covariates, variant_ids
+        sample_ids, qc_declaration, covariates, variant_ids, genotypes
     )
     configured = dict(executables or {"GCTA": "gcta64", "GEMMA": "gemma"})
     if set(configured) != {"GCTA", "GEMMA"}:
         raise ValueError("executables must contain exactly GCTA and GEMMA")
-    matches = dict(matched or {})
     rows: list[dict[str, Any]] = []
     for comparator in ("GCTA", "GEMMA"):
         executable = _resolve_executable(configured[comparator])
-        version, executable_problem = (
-            _executable_version(executable, comparator)
-            if executable
-            else ("", "executable unavailable")
-        )
-        flags = matches.get(comparator, {})
-        if not isinstance(flags, Mapping):
-            raise ValueError("preflight match flags must be mappings of native bools")
-        raw_flags = {
-            "sample_order": flags.get("sample_order", False),
-            "qc": flags.get("qc", False),
-            "covariates": flags.get("covariates", False),
-        }
-        if any(type(value) is not bool for value in raw_flags.values()):
-            raise ValueError("preflight match flags must be native bool values")
-        sample_match = raw_flags["sample_order"]
-        qc_match = raw_flags["qc"]
-        covariate_match = raw_flags["covariates"]
-        comparable = bool(
-            executable and version and sample_match and qc_match and covariate_match
-        )
-        if executable_problem is not None:
-            reason = executable_problem
-        elif not (sample_match and qc_match and covariate_match):
-            reason = "sample order, QC, or covariates are not exactly matched"
+        if executable:
+            probe = _probe_executable_version(executable, comparator)
+            binary_sha256 = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
         else:
-            reason = "matched external comparator"
+            probe = {
+                "executable_basename": "",
+                "version_output": "",
+                "parsed_identity": "",
+                "parsed_version": "",
+                "version_returncode": None,
+            }
+            binary_sha256 = ""
+        version_ok = bool(
+            probe["version_returncode"] == 0
+            and probe["parsed_identity"] == comparator
+            and probe["parsed_version"]
+        )
+        smoke_status = "NO_ADAPTER" if version_ok else "UNAVAILABLE"
+        if not executable:
+            reason = "executable unavailable"
+        elif not version_ok:
+            reason = "executable identity/version probe failed"
+        else:
+            reason = "no outcome-independent smoke adapter is implemented"
         rows.append(
             {
                 "comparator": comparator,
                 "executable_path": executable or "",
-                "version": version,
-                "matched_sample_order": sample_match,
-                "matched_qc": qc_match,
-                "matched_covariates": covariate_match,
+                **probe,
+                "binary_sha256": binary_sha256,
+                "smoke_status": smoke_status,
                 **hashes,
-                "status": (
-                    "COMPARABLE" if comparable else "UNAVAILABLE_OR_NONCOMPARABLE"
-                ),
+                "status": "UNAVAILABLE_OR_NONCOMPARABLE",
                 "reason": reason,
             }
         )
@@ -1883,41 +2254,31 @@ def read_comparator_preflight(
     for raw in raw_rows:
         row: dict[str, Any] = dict(raw)
         for field in (
-            "matched_sample_order",
-            "matched_qc",
-            "matched_covariates",
-        ):
-            if raw[field] not in {"True", "False"}:
-                raise ValueError(f"comparator preflight {field} must be boolean")
-            row[field] = raw[field] == "True"
-        for field in (
             "sample_order_hash",
+            "genotype_hash",
             "qc_hash",
             "covariates_hash",
             "variant_manifest_hash",
-            "scan_context_hash",
+            "input_context_hash",
         ):
             _validated_sha256(raw[field], field)
+        if raw["binary_sha256"]:
+            _validated_sha256(raw["binary_sha256"], "binary_sha256")
+        if raw["version_returncode"] == "":
+            row["version_returncode"] = None
+        else:
+            try:
+                row["version_returncode"] = int(raw["version_returncode"])
+            except ValueError as error:
+                raise ValueError("preflight version returncode is invalid") from error
+        if raw["smoke_status"] not in {"UNAVAILABLE", "NO_ADAPTER", "PASS"}:
+            raise ValueError("comparator preflight smoke status is invalid")
         if raw["status"] not in {
             "COMPARABLE",
             "UNAVAILABLE_OR_NONCOMPARABLE",
         }:
             raise ValueError("comparator preflight has an invalid status")
-        can_compare = bool(
-            raw["executable_path"]
-            and raw["version"]
-            and row["matched_sample_order"]
-            and row["matched_qc"]
-            and row["matched_covariates"]
-        )
-        if raw["executable_path"]:
-            version, problem = _executable_version(
-                raw["executable_path"], raw["comparator"]
-            )
-            if raw["status"] == "COMPARABLE" and (
-                problem is not None or version != raw["version"]
-            ):
-                raise ValueError("comparator executable/version evidence changed")
+        can_compare = raw["smoke_status"] == "PASS"
         if (raw["status"] == "COMPARABLE") != can_compare:
             raise ValueError("comparator preflight status contradicts its evidence")
         rows.append(row)

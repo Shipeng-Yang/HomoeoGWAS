@@ -44,31 +44,50 @@ def _write_dummy_plink_prefix(prefix):
 
 
 def _write_released_fit_output(
-    output,
+    root,
     *,
     sample_ids,
     trait="simulated_trait",
     subgenomes=("A", "D"),
     bootstrap=True,
+    bootstrap_B=2,
     loco=False,
     acceptance=True,
 ):
+    output = root / "results"
     output.mkdir(parents=True, exist_ok=True)
-    config_path = output / "configs" / "fit.generated.yaml"
+    config_path = root / "configs" / "fit.generated.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_path = output / "resolved_config.yaml"
     samples_path = output / "analysis_samples.tsv"
     sumstats_path = output / f"sumstats_{trait}.tsv"
     lambda_path = output / f"lambda_gc_{trait}.tsv"
+    phenotype_path = root / "phenotype.tsv"
+    phenotype_path.write_text(
+        "sample\t" + trait + "\n"
+        + "".join(f"{sample_id}\t{index / 10:.1f}\n" for index, sample_id in enumerate(sample_ids))
+    )
+    bed_template = root / "input-geno" / "{subgenome}" / "all"
+    for subgenome in subgenomes:
+        _write_dummy_plink_prefix(
+            root / "input-geno" / subgenome / "all"
+        )
     config = {
         "fit_version": 1,
         "panel": {"name": "fixture", "subgenomes": list(subgenomes)},
         "phenotype": {
-            "path": str(output / "phenotype.tsv"),
+            "path": str(phenotype_path.resolve()),
             "sample_col": "sample",
             "trait": trait,
         },
-        "genotype": {"scan_bed_prefix_template": "geno/{subgenome}/all"},
+        "genotype": {
+            "scan_bed_prefix_template": str(bed_template),
+            "grm": {
+                "source": "bed",
+                "bed_prefix_template": str(bed_template),
+                "maf_min": 0.05,
+            },
+        },
         "kernels": {"normalize": "trace", "include_hadamard": False},
         "reml": {"n_starts": 10, "seed": 2026},
         "scan": {
@@ -83,7 +102,7 @@ def _write_released_fit_output(
     if bootstrap:
         config["reml"]["pve_bootstrap"] = {
             "enabled": True,
-            "B": 2,
+            "B": bootstrap_B,
             "level": 0.95,
             "n_starts": 10,
         }
@@ -106,14 +125,20 @@ def _write_released_fit_output(
     if bootstrap:
         bootstrap_path.write_text(
             "replicate\tA\tD\te\tboundary_A\tboundary_D\tboundary_e\n"
-            "0\t0.24\t0.16\t0.60\tFalse\tFalse\tFalse\n"
-            "1\t0.26\t0.14\t0.60\tFalse\tTrue\tFalse\n"
+            + "".join(
+                (
+                    f"{index}\t0.24\t0.16\t0.60\tFalse\tFalse\tFalse\n"
+                    if index % 2 == 0
+                    else f"{index}\t0.26\t0.14\t0.60\tFalse\tTrue\tFalse\n"
+                )
+                for index in range(bootstrap_B)
+            )
         )
         uncertainty = {
             "method": "parametric_bootstrap_fitted_multi_kernel_reml",
             "level": 0.95,
-            "B_requested": 2,
-            "B_success": 2,
+            "B_requested": bootstrap_B,
+            "B_success": bootstrap_B,
             "B_failed": 0,
             "components": {
                 "A": {"estimate": 0.25, "ci_low": 0.10, "ci_high": 0.31},
@@ -128,6 +153,24 @@ def _write_released_fit_output(
         "subgenomes": list(subgenomes),
         "n_analysis": len(sample_ids),
         "kernel_names": list(subgenomes),
+        "grm_info": {
+            "source": "bed",
+            "normalize": "trace",
+            "kernel_names": list(subgenomes),
+            "marker_input": {
+                source_name: {
+                    "subgenomes": {
+                        subgenome: {
+                            "bed_prefix": str(
+                                root / "input-geno" / subgenome / "all"
+                            )
+                        }
+                        for subgenome in subgenomes
+                    }
+                }
+                for source_name in ("scan", "grm")
+            },
+        },
         "runtime_sec": 12.5,
         "config": str(config_path.resolve()),
         "acceptance_all_passed": acceptance,
@@ -166,14 +209,27 @@ def _write_released_fit_output(
 
 
 def _preflight_inputs(n=4):
+    genotypes = {
+        "A": np.arange(n * 2, dtype=np.float64).reshape(n, 2),
+        "D": np.arange(n, dtype=np.float64).reshape(n, 1) + 0.5,
+    }
     return {
         "sample_ids": [f"00{i}" for i in range(n)],
         "qc_declaration": {"maf_min": 0.05, "call_rate_min": 0.9},
         "covariates": np.column_stack((np.ones(n), np.arange(n, dtype=float))),
         "variant_ids": {"A": ["a1", "a2"], "D": ["d1"]},
+        "genotypes": genotypes,
     }
 
 
+def _scan_truth_metadata(*, scan_pve=0.05, placement="one_subgenome"):
+    causal = [] if scan_pve == 0.0 else [{"variant_id": "a1", "subgenome": "A"}]
+    return {
+        "placement": placement,
+        "scan_pve": scan_pve,
+        "causal_variants": causal,
+        "realized_signal_pve": scan_pve,
+    }
 def test_pilot_sample_selection_is_pc1_spanning_and_deterministic():
     ids = np.array([f"s{i:03d}" for i in range(250)])
     pc1 = np.linspace(-3, 3, 250)[::-1]
@@ -217,17 +273,19 @@ def test_generated_fit_config_has_locked_reml_and_output(tmp_path):
         "bed_prefixes": prefixes,
     }
 
-    cfg = build_fit_config(fixture, tmp_path / "rep-000001")
+    root = tmp_path / "rep-000001"
+    cfg = build_fit_config(fixture, root)
 
     assert cfg["reml"]["n_starts"] == 10
     assert cfg["reml"]["seed"] == 2026
-    assert cfg["outputs"]["out_dir"].endswith("rep-000001")
+    assert cfg["outputs"]["out_dir"].endswith("rep-000001/results")
     assert cfg["scan"]["loco"]["enabled"] is False
     assert isinstance(cfg["phenotype"]["path"], str)
     assert isinstance(cfg["genotype"]["scan_bed_prefix_template"], str)
-    config_path = tmp_path / "rep-000001" / "configs" / "fit.generated.yaml"
+    config_path = root / "configs" / "fit.generated.yaml"
     assert config_path.is_file()
     assert config_path.read_text().startswith("fit_version: 1\n")
+    assert not (root / "results").exists()
 
 
 def test_coverage_config_locks_released_bootstrap_and_validates(tmp_path):
@@ -245,17 +303,65 @@ def test_coverage_config_locks_released_bootstrap_and_validates(tmp_path):
     }
 
     cfg = build_fit_config(
-        fixture, tmp_path / "rep-000004", coverage=True, bootstrap_jobs=3
+        fixture,
+        tmp_path / "rep-000004",
+        coverage=True,
+        bootstrap_B=199,
+        bootstrap_jobs=3,
     )
 
     assert cfg["reml"]["pve_bootstrap"] == {
         "enabled": True,
-        "B": 200,
+        "B": 199,
         "level": 0.95,
         "n_jobs": 3,
         "n_starts": 10,
     }
     validate_config(cfg)
+
+
+def test_formal_coverage_config_uses_explicit_200_bootstraps(tmp_path):
+    for subgenome in ("A", "D"):
+        _write_dummy_plink_prefix(tmp_path / "geno" / subgenome / "all")
+    fixture = {
+        "panel": "cotton_aadd",
+        "subgenomes": ["A", "D"],
+        "phenotype": tmp_path / "phenotype.tsv",
+        "sample_col": "sample",
+        "trait": "simulated_trait",
+        "bed_template": tmp_path / "geno" / "{subgenome}" / "all",
+    }
+
+    cfg = build_fit_config(
+        fixture,
+        tmp_path / "formal-replicate",
+        coverage=True,
+        bootstrap_B=200,
+    )
+
+    assert cfg["reml"]["pve_bootstrap"]["B"] == 200
+    assert cfg["outputs"]["out_dir"] == str(
+        tmp_path / "formal-replicate" / "results"
+    )
+
+
+def test_fit_config_refuses_nonempty_sibling_results_without_force(tmp_path):
+    for subgenome in ("A", "D"):
+        _write_dummy_plink_prefix(tmp_path / "geno" / subgenome / "all")
+    fixture = {
+        "panel": "cotton_aadd",
+        "subgenomes": ["A", "D"],
+        "phenotype": tmp_path / "phenotype.tsv",
+        "sample_col": "sample",
+        "trait": "simulated_trait",
+        "bed_template": tmp_path / "geno" / "{subgenome}" / "all",
+    }
+    root = tmp_path / "occupied"
+    (root / "results").mkdir(parents=True)
+    (root / "results" / "partial.txt").write_text("partial")
+
+    with pytest.raises(FileExistsError, match="results directory is not empty"):
+        build_fit_config(fixture, root)
 
 
 def test_each_built_fit_template_is_production_validated(tmp_path):
@@ -371,7 +477,9 @@ def test_parse_fit_metrics_reads_real_summary_and_bootstrap_table(tmp_path):
         bootstrap=True,
         acceptance=False,
     )
-    (tmp_path / "variance_components_simulated_trait.png").write_bytes(b"ignored")
+    (tmp_path / "results" / "variance_components_simulated_trait.png").write_bytes(
+        b"ignored"
+    )
 
     metrics = parse_fit_metrics(
         tmp_path,
@@ -400,10 +508,40 @@ def test_parse_fit_metrics_reads_real_summary_and_bootstrap_table(tmp_path):
     assert metrics["failure"]["error_type"] == "AcceptanceFailure"
 
 
+@pytest.mark.parametrize(("stage", "bootstrap_B"), [("pilot", 199), ("formal", 200)])
+def test_coverage_parser_binds_stage_specific_bootstrap_budget(
+    tmp_path, stage, bootstrap_B
+):
+    sample_ids = ["0001", "0002"]
+    _write_released_fit_output(
+        tmp_path, sample_ids=sample_ids, bootstrap_B=bootstrap_B
+    )
+    scenario = Scenario(
+        f"A.coverage.cotton.balanced.{stage}",
+        "fit",
+        stage,
+        1,
+        bootstrap_B,
+        {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
+    )
+
+    metrics = parse_fit_metrics(
+        tmp_path,
+        "simulated_trait",
+        truth={"target_pve": {"A": 0.2, "D": 0.2, "e": 0.6}},
+        expected_subgenomes=("A", "D"),
+        expected_sample_ids=sample_ids,
+        expected_scenario=scenario,
+        experiment="coverage",
+    )
+
+    assert metrics["pve_bootstrap"]["B_requested"] == bootstrap_B
+
+
 def test_parse_fit_metrics_rejects_stale_tool_or_sample_provenance(tmp_path):
     sample_ids = ["0001", "0002"]
     _write_released_fit_output(tmp_path, sample_ids=sample_ids)
-    summary_path = tmp_path / "summary_simulated_trait.json"
+    summary_path = tmp_path / "results" / "summary_simulated_trait.json"
     summary = json.loads(summary_path.read_text())
     summary["tool"] = "not-homoeogwas"
     summary_path.write_text(json.dumps(summary))
@@ -433,7 +571,9 @@ def test_parse_fit_metrics_rejects_nonboolean_acceptance_evidence(tmp_path):
     sample_ids = ["0001", "0002"]
     summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary["acceptance_all_passed"] = "False"
-    (tmp_path / "summary_simulated_trait.json").write_text(json.dumps(summary))
+    (tmp_path / "results" / "summary_simulated_trait.json").write_text(
+        json.dumps(summary)
+    )
 
     with pytest.raises(ValueError, match="acceptance evidence"):
         parse_fit_metrics(
@@ -444,12 +584,12 @@ def test_parse_fit_metrics_rejects_nonboolean_acceptance_evidence(tmp_path):
             experiment="coverage",
         )
 
-@pytest.mark.parametrize("corruption", ["schema", "count", "ci"])
+@pytest.mark.parametrize("corruption", ["schema", "count"])
 def test_parse_fit_metrics_rejects_invalid_bootstrap_evidence(tmp_path, corruption):
     sample_ids = ["0001", "0002"]
     _write_released_fit_output(tmp_path, sample_ids=sample_ids)
-    summary_path = tmp_path / "summary_simulated_trait.json"
-    bootstrap_path = tmp_path / "pve_bootstrap_simulated_trait.tsv"
+    summary_path = tmp_path / "results" / "summary_simulated_trait.json"
+    bootstrap_path = tmp_path / "results" / "pve_bootstrap_simulated_trait.tsv"
     summary = json.loads(summary_path.read_text())
     if corruption == "schema":
         bootstrap_path.write_text(
@@ -459,10 +599,6 @@ def test_parse_fit_metrics_rejects_invalid_bootstrap_evidence(tmp_path, corrupti
         summary["reml"]["pve_uncertainty"]["B_success"] = 1
         summary["reml"]["pve_uncertainty"]["B_failed"] = 1
         summary_path.write_text(json.dumps(summary))
-    else:
-        summary["reml"]["pve_uncertainty"]["components"]["A"]["ci_low"] = 0.26
-        summary_path.write_text(json.dumps(summary))
-
     with pytest.raises(ValueError, match="bootstrap"):
         parse_fit_metrics(
             tmp_path,
@@ -472,6 +608,81 @@ def test_parse_fit_metrics_rejects_invalid_bootstrap_evidence(tmp_path, corrupti
             experiment="coverage",
         )
 
+
+def test_bootstrap_percentile_interval_may_exclude_point_estimate(tmp_path):
+    sample_ids = ["0001", "0002"]
+    summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    summary["reml"]["pve_uncertainty"]["components"]["A"].update(
+        {"ci_low": 0.26, "ci_high": 0.31}
+    )
+    summary_path = tmp_path / "results" / "summary_simulated_trait.json"
+    summary_path.write_text(json.dumps(summary))
+
+    metrics = parse_fit_metrics(
+        tmp_path,
+        "simulated_trait",
+        truth={"target_pve": {"A": 0.2, "D": 0.2, "e": 0.6}},
+        expected_subgenomes=("A", "D"),
+        expected_sample_ids=sample_ids,
+        experiment="coverage",
+    )
+
+    assert metrics["pve_bootstrap"]["intervals"]["A"] == {
+        "estimate": 0.25,
+        "ci_low": 0.26,
+        "ci_high": 0.31,
+    }
+    assert metrics["pve_bootstrap"]["coverage"]["A"] is False
+
+
+def test_released_fit_rejects_wrong_phenotype_and_grm_provenance(tmp_path):
+    sample_ids = ["0001", "0002"]
+    summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    phenotype_path = tmp_path / "phenotype.tsv"
+    phenotype_path.write_text("sample\tsimulated_trait\n0002\t0.0\n0001\t1.0\n")
+
+    with pytest.raises(ValueError, match="phenotype sample order"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            experiment="coverage",
+        )
+
+    phenotype_path.write_text("sample\tsimulated_trait\n0001\t0.0\n0002\t1.0\n")
+    summary["grm_info"]["source"] = "npz"
+    (tmp_path / "results" / "summary_simulated_trait.json").write_text(
+        json.dumps(summary)
+    )
+    with pytest.raises(ValueError, match="GRM provenance"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            experiment="coverage",
+        )
+
+
+def test_released_fit_rejects_summary_bed_source_different_from_config(tmp_path):
+    sample_ids = ["0001", "0002"]
+    summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    summary["grm_info"]["marker_input"]["grm"]["subgenomes"]["A"][
+        "bed_prefix"
+    ] = str(tmp_path / "wrong" / "A")
+    (tmp_path / "results" / "summary_simulated_trait.json").write_text(
+        json.dumps(summary)
+    )
+
+    with pytest.raises(ValueError, match="marker source differs"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            experiment="coverage",
+        )
 
 def test_run_fit_replicate_resumes_only_same_sample_and_request(tmp_path):
     kernels = _toy_kernels(n=24)
@@ -603,8 +814,20 @@ def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_pat
         "bootstrap",
         "resolved_config",
         "analysis_samples",
+        "phenotype",
+        "scan_A_bed",
+        "scan_A_bim",
+        "scan_A_fam",
+        "grm_D_bed",
     }
-    summary_path = output / "summary_simulated_trait.json"
+    assert result["released_source_manifest"]["kernel_provenance"] == {
+        "matrix_hash_available": False,
+        "evidence_boundary": (
+            "ordered samples plus resolved QC/config and all scan/GRM "
+            "BED/BIM/FAM source bytes"
+        ),
+    }
+    summary_path = output / "results" / "summary_simulated_trait.json"
     summary = json.loads(summary_path.read_text())
     summary["runtime_sec"] = 13.0
     summary_path.write_text(json.dumps(summary))
@@ -617,6 +840,50 @@ def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_pat
             sample_ids=np.asarray(sample_ids),
             shard_path=shard,
             fit_output_dir=output,
+        )
+
+
+@pytest.mark.parametrize("source_kind", ["phenotype", "bed"])
+def test_coverage_resume_conflicts_when_input_source_mutates(tmp_path, source_kind):
+    root = tmp_path / "fit-root"
+    sample_ids = [f"00{i:02d}" for i in range(18)]
+    _write_released_fit_output(root, sample_ids=sample_ids)
+    scenario = Scenario(
+        "A.coverage.cotton.balanced",
+        "fit",
+        "pilot",
+        1,
+        2,
+        {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
+    )
+    shard = tmp_path / f"{source_kind}.json"
+    run_fit_replicate(
+        scenario,
+        _toy_kernels(n=18),
+        replicate=0,
+        design_hash="3" * 64,
+        sample_ids=np.asarray(sample_ids),
+        shard_path=shard,
+        fit_output_dir=root,
+    )
+    if source_kind == "phenotype":
+        (root / "phenotype.tsv").write_text(
+            "sample\tsimulated_trait\n"
+            + "".join(f"{sample_id}\t9.0\n" for sample_id in sample_ids)
+        )
+    else:
+        bed_path = root / "input-geno" / "A" / "all.bed"
+        bed_path.write_bytes(bed_path.read_bytes() + b"mutation")
+
+    with pytest.raises(ShardConflict, match="existing shard differs"):
+        run_fit_replicate(
+            scenario,
+            _toy_kernels(n=18),
+            replicate=0,
+            design_hash="3" * 64,
+            sample_ids=np.asarray(sample_ids),
+            shard_path=shard,
+            fit_output_dir=root,
         )
 
 
@@ -669,6 +936,7 @@ def test_scan_comparators_share_context_and_pooled_kernel_is_trace_normalized():
         standardized_variants=standardized,
         phenotype=phenotype,
         covariates=covariates,
+        truth_metadata=_scan_truth_metadata(),
     )
 
     assert set(comparators["canonical_multi_kernel"]) == {"A", "D"}
@@ -682,6 +950,9 @@ def test_scan_comparators_share_context_and_pooled_kernel_is_trace_normalized():
     assert comparators["sample_ids"].tolist() == sample_ids.tolist()
     assert len(comparators["context_fingerprint"]) == 64
     assert comparators["loco"]["separate_sensitivity_arm"] is True
+    assert comparators["truth"]["placement"] == "one_subgenome"
+    assert comparators["truth"]["scan_pve"] == 0.05
+    assert len(comparators["truth"]["truth_hash"]) == 64
 
 
 def test_independent_scans_use_one_experiment_wide_fwer_family():
@@ -736,6 +1007,7 @@ def test_run_scan_replicate_executes_three_matched_production_comparators():
         standardized_variants=standardized,
         phenotype=phenotype,
         covariates=covariates,
+        truth_metadata=_scan_truth_metadata(),
     )
 
     result = run_scan_replicate(comparators, seed=812)
@@ -794,7 +1066,9 @@ def test_released_loco_rejects_stale_sumstats_provenance(tmp_path):
         output, sample_ids=sample_ids, bootstrap=False, loco=True
     )
     summary["outputs"]["sumstats"] = str((tmp_path / "stale.tsv").resolve())
-    (output / "summary_simulated_trait.json").write_text(json.dumps(summary))
+    (output / "results" / "summary_simulated_trait.json").write_text(
+        json.dumps(summary)
+    )
 
     with pytest.raises(ValueError, match="scan output paths"):
         run_scan_replicate(
@@ -805,20 +1079,22 @@ def test_released_loco_rejects_stale_sumstats_provenance(tmp_path):
         )
 
 
-def test_fit_runner_dispatches_scan_to_scan_helper(monkeypatch):
-    called = {}
-
-    def fake_scan(comparators, **kwargs):
-        called["comparators"] = comparators
-        called.update(kwargs)
-        return {
-            "scan_arm": "primary",
-            "comparators": {"canonical": {}, "pooled": {}, "independent": {}},
-            "failure": {"failed": False, "error_type": None, "message": None},
-        }
-
-    monkeypatch.setattr(
-        "scripts.benchmarks.v201.track_fit.run_scan_replicate", fake_scan
+def test_fit_runner_dispatches_scan_to_scan_helper():
+    n = 12
+    kernels = _toy_kernels(n=n)
+    rng = np.random.default_rng(810)
+    sample_ids = np.asarray([f"s{i:02d}" for i in range(n)])
+    scan_inputs = build_scan_comparators(
+        kernels,
+        sample_ids=sample_ids,
+        variant_ids={"A": ["a1"], "D": ["d1"]},
+        standardized_variants={
+            "A": rng.normal(size=(n, 1)),
+            "D": rng.normal(size=(n, 1)),
+        },
+        phenotype=rng.normal(size=n),
+        covariates=np.ones((n, 1)),
+        truth_metadata=_scan_truth_metadata(),
     )
     scenario = Scenario(
         "A.scan.cotton.one_subgenome.pve_0p05",
@@ -828,24 +1104,117 @@ def test_fit_runner_dispatches_scan_to_scan_helper(monkeypatch):
         0,
         {"experiment": "scan", "placement": "one_subgenome", "scan_pve": 0.05},
     )
-    scan_inputs = {"context_fingerprint": "8" * 64}
-
     result = run_fit_replicate(
         scenario,
-        _toy_kernels(n=14),
+        kernels,
         replicate=0,
         design_hash="9" * 64,
-        sample_ids=np.asarray([f"s{i:02d}" for i in range(14)]),
+        sample_ids=sample_ids,
         scan_comparators=scan_inputs,
     )
 
     assert result["failure"]["failed"] is False
-    assert called["comparators"] is scan_inputs
-    assert called["loco"] is False
+    assert set(result["comparators"]) == {
+        "canonical_multi_kernel",
+        "pooled_trace_sum",
+        "independent_subgenome",
+    }
     assert "truth" not in result
 
 
-def test_scan_resume_binds_current_data_not_only_declared_context(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("scenario_parameters", "message"),
+    [
+        ({"placement": "two_subgenomes", "scan_pve": 0.05}, "placement"),
+        ({"placement": "one_subgenome", "scan_pve": 0.10}, "scan_pve"),
+    ],
+)
+def test_scan_runner_rejects_truth_attached_to_wrong_arm(
+    tmp_path, scenario_parameters, message
+):
+    n = 12
+    kernels = _toy_kernels(n=n)
+    rng = np.random.default_rng(901)
+    sample_ids = np.asarray([f"s{i:02d}" for i in range(n)])
+    comparators = build_scan_comparators(
+        kernels,
+        sample_ids=sample_ids,
+        variant_ids={"A": ["a1"], "D": ["d1"]},
+        standardized_variants={
+            "A": rng.normal(size=(n, 1)),
+            "D": rng.normal(size=(n, 1)),
+        },
+        phenotype=rng.normal(size=n),
+        covariates=np.ones((n, 1)),
+        truth_metadata=_scan_truth_metadata(),
+    )
+    scenario = Scenario(
+        "A.scan.cotton.mismatched",
+        "fit",
+        "pilot",
+        1,
+        0,
+        {"experiment": "scan", **scenario_parameters},
+    )
+
+    result = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="2" * 64,
+        sample_ids=sample_ids,
+        shard_path=tmp_path / "mismatch.json",
+        scan_comparators=comparators,
+    )
+
+    assert result["failure"]["failed"] is True
+    assert message in result["failure"]["message"]
+
+
+def test_pilot_scan_rejects_realized_signal_pve_drift_over_one_point(tmp_path):
+    n = 12
+    kernels = _toy_kernels(n=n)
+    rng = np.random.default_rng(902)
+    sample_ids = np.asarray([f"s{i:02d}" for i in range(n)])
+    truth = _scan_truth_metadata()
+    truth["realized_signal_pve"] = 0.061
+    comparators = build_scan_comparators(
+        kernels,
+        sample_ids=sample_ids,
+        variant_ids={"A": ["a1"], "D": ["d1"]},
+        standardized_variants={
+            "A": rng.normal(size=(n, 1)),
+            "D": rng.normal(size=(n, 1)),
+        },
+        phenotype=rng.normal(size=n),
+        covariates=np.ones((n, 1)),
+        truth_metadata=truth,
+    )
+    scenario = Scenario(
+        "A.scan.cotton.one_subgenome.pve_0p05",
+        "fit",
+        "pilot",
+        1,
+        0,
+        {"experiment": "scan", "placement": "one_subgenome", "scan_pve": 0.05},
+    )
+
+    result = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="1" * 64,
+        sample_ids=sample_ids,
+        shard_path=tmp_path / "drift.json",
+        scan_comparators=comparators,
+    )
+
+    assert result["failure"]["failed"] is True
+    assert "realized signal PVE" in result["failure"]["message"]
+
+
+@pytest.mark.parametrize("mutation", ["phenotype", "pooled", "independent"])
+def test_scan_resume_binds_every_current_mapping(monkeypatch, tmp_path, mutation):
     monkeypatch.setattr(
         "scripts.benchmarks.v201.track_fit.run_scan_replicate",
         lambda *args, **kwargs: {
@@ -867,6 +1236,7 @@ def test_scan_resume_binds_current_data_not_only_declared_context(monkeypatch, t
         },
         phenotype=rng.normal(size=n),
         covariates=np.ones((n, 1)),
+        truth_metadata=_scan_truth_metadata(scan_pve=0.0),
     )
     scenario = Scenario(
         "A.scan.cotton.one_subgenome.pve_0",
@@ -886,7 +1256,22 @@ def test_scan_resume_binds_current_data_not_only_declared_context(monkeypatch, t
         shard_path=shard,
         scan_comparators=comparators,
     )
-    comparators["phenotype"] = np.asarray(comparators["phenotype"]) + 0.01
+    if mutation == "phenotype":
+        comparators["phenotype"] = np.asarray(comparators["phenotype"]) + 0.01
+    elif mutation == "pooled":
+        comparators["pooled_trace_sum"] = {
+            "pooled": np.asarray(comparators["pooled_trace_sum"]["pooled"]) + 0.01
+        }
+    else:
+        comparators["independent_subgenome"] = {
+            **comparators["independent_subgenome"],
+            "A": {
+                "A": np.asarray(
+                    comparators["independent_subgenome"]["A"]["A"]
+                )
+                + 0.01
+            },
+        }
 
     with pytest.raises(ShardConflict, match="existing shard differs"):
         run_fit_replicate(
@@ -910,15 +1295,18 @@ def test_comparator_preflight_is_two_row_frozen_and_hash_checked(tmp_path):
         path,
         **_preflight_inputs(),
         executables={"GCTA": gcta, "GEMMA": tmp_path / "missing-gemma"},
-        matched={
-            "GCTA": {"sample_order": True, "qc": True, "covariates": True},
-            "GEMMA": {"sample_order": True, "qc": True, "covariates": True},
-        },
     )
     loaded = read_comparator_preflight(path, expected_hash=written["sha256"])
 
     assert [row["comparator"] for row in loaded["rows"]] == ["GCTA", "GEMMA"]
-    assert loaded["rows"][0]["status"] == "COMPARABLE"
+    assert loaded["rows"][0]["status"] == "UNAVAILABLE_OR_NONCOMPARABLE"
+    assert loaded["rows"][0]["executable_basename"] == "gcta64"
+    assert loaded["rows"][0]["parsed_identity"] == "GCTA"
+    assert loaded["rows"][0]["parsed_version"] == "1.94.1"
+    assert loaded["rows"][0]["version_returncode"] == 0
+    assert loaded["rows"][0]["smoke_status"] == "NO_ADAPTER"
+    assert len(loaded["rows"][0]["binary_sha256"]) == 64
+    assert len(loaded["rows"][0]["genotype_hash"]) == 64
     assert loaded["rows"][1]["status"] == "UNAVAILABLE_OR_NONCOMPARABLE"
     assert loaded["rows"][1]["executable_path"] == ""
     with pytest.raises(FileExistsError, match="frozen"):
@@ -941,28 +1329,14 @@ def test_comparator_preflight_cannot_be_created_after_outcomes(tmp_path):
         )
 
 
-def test_comparator_preflight_rejects_string_flags_and_false_tool_identity(tmp_path):
+def test_comparator_preflight_records_false_tool_identity_and_returncode(tmp_path):
     impostor = tmp_path / "not-gcta"
     impostor.write_text("#!/bin/sh\necho 'GCTA 1.94.1'\n")
     impostor.chmod(0o755)
-    with pytest.raises(ValueError, match="native bool"):
-        write_comparator_preflight(
-            tmp_path / "bad-bool.tsv",
-            **_preflight_inputs(),
-            matched={
-                "GCTA": {"sample_order": "true", "qc": True, "covariates": True},
-                "GEMMA": {"sample_order": True, "qc": True, "covariates": True},
-            },
-        )
-
     result = write_comparator_preflight(
         tmp_path / "bad-identity.tsv",
         **_preflight_inputs(),
         executables={"GCTA": impostor, "GEMMA": tmp_path / "missing-gemma"},
-        matched={
-            "GCTA": {"sample_order": True, "qc": True, "covariates": True},
-            "GEMMA": {"sample_order": True, "qc": True, "covariates": True},
-        },
     )
     assert result["rows"][0]["status"] == "UNAVAILABLE_OR_NONCOMPARABLE"
     assert "identity" in result["rows"][0]["reason"]
@@ -974,25 +1348,38 @@ def test_comparator_preflight_rejects_string_flags_and_false_tool_identity(tmp_p
         tmp_path / "bad-returncode.tsv",
         **_preflight_inputs(),
         executables={"GCTA": failing, "GEMMA": tmp_path / "missing-gemma"},
-        matched={
-            "GCTA": {"sample_order": True, "qc": True, "covariates": True},
-            "GEMMA": {"sample_order": True, "qc": True, "covariates": True},
-        },
     )
     assert result["rows"][0]["status"] == "UNAVAILABLE_OR_NONCOMPARABLE"
-    assert "version" in result["rows"][0]["reason"]
+    assert result["rows"][0]["version_returncode"] == 1
 
 
-def test_fit_runner_only_reads_and_binds_frozen_comparator_preflight(tmp_path):
-    preflight_inputs = _preflight_inputs(n=18)
-    preflight = write_comparator_preflight(
+def test_preflight_reader_never_reexecutes_binary(monkeypatch, tmp_path):
+    gcta = tmp_path / "gcta64"
+    gcta.write_text("#!/bin/sh\necho 'GCTA 1.94.1'\n")
+    gcta.chmod(0o755)
+    written = write_comparator_preflight(
         tmp_path / "comparator_preflight.tsv",
-        **preflight_inputs,
-        executables={
-            "GCTA": tmp_path / "missing-gcta",
-            "GEMMA": tmp_path / "missing-gemma",
-        },
+        **_preflight_inputs(),
+        executables={"GCTA": gcta, "GEMMA": tmp_path / "missing-gemma"},
     )
+    gcta.write_text("#!/bin/sh\necho mutated\n")
+    monkeypatch.setattr(
+        "scripts.benchmarks.v201.track_fit.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("reader re-executed comparator")
+        ),
+    )
+
+    loaded = read_comparator_preflight(
+        written["path"], expected_hash=written["sha256"]
+    )
+
+    assert loaded["rows"][0]["binary_sha256"] == written["rows"][0][
+        "binary_sha256"
+    ]
+
+
+def test_preflight_read_error_becomes_immutable_failure_shard(tmp_path):
     scenario = Scenario(
         "A.recovery.cotton.balanced",
         "fit",
@@ -1002,112 +1389,57 @@ def test_fit_runner_only_reads_and_binds_frozen_comparator_preflight(tmp_path):
         {"experiment": "recovery", "allocation": "balanced", "total_pve": 0.4},
     )
     shard = tmp_path / "replicate.json"
-    with pytest.raises(ValueError, match="frozen hash"):
-        run_fit_replicate(
-        scenario,
-        _toy_kernels(n=18),
-        replicate=0,
-        design_hash="a" * 64,
-        sample_ids=np.asarray(preflight_inputs["sample_ids"]),
-        comparator_preflight_path=preflight["path"],
-        )
-    result = run_fit_replicate(
-        scenario,
-        _toy_kernels(n=18),
-        replicate=0,
-        design_hash="a" * 64,
-        sample_ids=np.asarray(preflight_inputs["sample_ids"]),
-        shard_path=shard,
-        comparator_preflight_path=preflight["path"],
-        comparator_preflight_hash=preflight["sha256"],
-    )
-
-    assert result["comparator_preflight_hash"] == preflight["sha256"]
-    assert {row["status"] for row in result["external_comparators"]} == {
-        "UNAVAILABLE_OR_NONCOMPARABLE"
-    }
-    preflight_path = tmp_path / "comparator_preflight.tsv"
-    preflight_path.write_text(preflight_path.read_text() + "\n")
-    with pytest.raises(ShardConflict, match="hash"):
-        run_fit_replicate(
-            scenario,
-            _toy_kernels(n=18),
-            replicate=0,
-            design_hash="a" * 64,
-            sample_ids=np.asarray(preflight_inputs["sample_ids"]),
-            shard_path=shard,
-            comparator_preflight_path=preflight_path,
-            comparator_preflight_hash=preflight["sha256"],
-        )
-
-
-def test_fit_runner_rejects_preflight_from_different_sample_order(tmp_path):
-    inputs = _preflight_inputs(n=12)
-    preflight = write_comparator_preflight(
-        tmp_path / "comparator_preflight.tsv",
-        **inputs,
-        executables={
-            "GCTA": tmp_path / "missing-gcta",
-            "GEMMA": tmp_path / "missing-gemma",
-        },
-    )
-    scenario = Scenario(
-        "A.recovery.cotton.balanced",
-        "fit",
-        "pilot",
-        1,
-        0,
-        {"experiment": "recovery", "allocation": "balanced", "total_pve": 0.4},
-    )
-
     result = run_fit_replicate(
         scenario,
         _toy_kernels(n=12),
         replicate=0,
-        design_hash="6" * 64,
-        sample_ids=np.asarray(inputs["sample_ids"][::-1]),
-        comparator_preflight_path=preflight["path"],
-        comparator_preflight_hash=preflight["sha256"],
+        design_hash="a" * 64,
+        sample_ids=np.asarray([f"s{i:02d}" for i in range(12)]),
+        shard_path=shard,
+        comparator_preflight_path=tmp_path / "missing.tsv",
+        comparator_preflight_hash="1" * 64,
     )
 
     assert result["failure"]["failed"] is True
-    assert "sample-order hash differs" in result["failure"]["message"]
+    assert result["failure"]["error_type"] == "FileNotFoundError"
+    assert json.loads(shard.read_text()) == result
 
 
-def test_scan_runner_compares_each_preflight_context_hash(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "scripts.benchmarks.v201.track_fit.run_scan_replicate",
-        lambda *args, **kwargs: {
-            "scan_arm": "primary",
-            "failure": {"failed": False, "error_type": None, "message": None},
-        },
-    )
+@pytest.mark.parametrize("mutation", ["binary", "genotype"])
+def test_scan_runner_rejects_mutated_preflight_evidence(tmp_path, mutation):
     n = 12
     kernels = _toy_kernels(n=n)
-    rng = np.random.default_rng(140)
-    sample_ids = [f"00{i}" for i in range(n)]
+    inputs = _preflight_inputs(n=n)
+    sample_ids = inputs["sample_ids"]
     comparators = build_scan_comparators(
         kernels,
         sample_ids=np.asarray(sample_ids),
-        variant_ids={"A": ["a1", "a2"], "D": ["d1"]},
-        standardized_variants={
-            "A": rng.normal(size=(n, 2)),
-            "D": rng.normal(size=(n, 1)),
-        },
-        phenotype=rng.normal(size=n),
-        covariates=np.column_stack((np.ones(n), np.arange(n))),
+        variant_ids=inputs["variant_ids"],
+        standardized_variants=inputs["genotypes"],
+        phenotype=np.linspace(-1.0, 1.0, n),
+        covariates=inputs["covariates"],
+        qc_declaration=inputs["qc_declaration"],
+        truth_metadata=_scan_truth_metadata(scan_pve=0.0),
     )
+    gcta = tmp_path / "gcta64"
+    gcta.write_text("#!/bin/sh\necho 'GCTA 1.94.1'\n")
+    gcta.chmod(0o755)
+    preflight_inputs = dict(inputs)
+    if mutation == "genotype":
+        preflight_inputs["genotypes"] = {
+            **inputs["genotypes"],
+            "A": inputs["genotypes"]["A"] + 1.0,
+        }
     preflight = write_comparator_preflight(
         tmp_path / "comparator_preflight.tsv",
-        sample_ids=sample_ids,
-        qc_declaration=comparators["context"]["qc_declaration"],
-        covariates=comparators["covariates"],
-        variant_ids={"A": ["a1", "a2"], "D": ["wrong-d1"]},
+        **preflight_inputs,
         executables={
-            "GCTA": tmp_path / "missing-gcta",
+            "GCTA": gcta,
             "GEMMA": tmp_path / "missing-gemma",
         },
     )
+    if mutation == "binary":
+        gcta.write_text("#!/bin/sh\necho 'GCTA 9.9.9'\n")
     scenario = Scenario(
         "A.scan.cotton.one_subgenome.pve_0",
         "fit",
@@ -1129,4 +1461,4 @@ def test_scan_runner_compares_each_preflight_context_hash(monkeypatch, tmp_path)
     )
 
     assert result["failure"]["failed"] is True
-    assert "variant_manifest_hash differs" in result["failure"]["message"]
+    assert f"{mutation}_hash differs" in result["failure"]["message"]
