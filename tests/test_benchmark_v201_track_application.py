@@ -358,7 +358,6 @@ def test_custom_release_audit_and_pairwise_aliases_are_strictly_supported(tmp_pa
     result["parallel_execution"] = result["provenance"].pop("parallel_execution")
     result["provenance"]["n_units_raw"] = result["provenance"].pop(
         "n_unique_edges")
-    result["provenance"].pop("n_groups_raw")
     result["results"]["INT"]["model_diagnostics"].pop("family_provenance")
     _write_json(result_path, result)
     audit_path = root / "audit" / "homoeogwas_audit.json"
@@ -383,7 +382,7 @@ def test_custom_release_audit_and_pairwise_aliases_are_strictly_supported(tmp_pa
 
     assert row["status"] == "PASS"
     assert row["primary_unit"] == "edge"
-    assert row["group_family_count"] is None
+    assert row["group_family_count"] == 17_404
     assert row["edge_family_count"] == 17_404
     assert row["family_hash"] == "2" * 64
     assert row["component_driver_distribution"] == {
@@ -392,21 +391,47 @@ def test_custom_release_audit_and_pairwise_aliases_are_strictly_supported(tmp_pa
     assert row["repair_required"] is False
 
 
-@pytest.mark.parametrize("mutation", ["family_count", "fwer_scope"])
-def test_legacy_unit_family_contract_must_match_primary_and_fwer(
+@pytest.mark.parametrize("mutation", [
+    "family_count",
+    "fwer_scope_mismatch",
+    "count_layer_mismatch",
+    "missing_provenance_scope",
+    "missing_fwer_unit",
+    "missing_fwer_scope",
+    "missing_fwer_family_id",
+    "missing_group_count",
+    "missing_edge_count",
+])
+def test_legacy_bootstrap_family_contract_is_fail_closed(
     tmp_path, mutation,
 ):
     root, run = _materialize_run(tmp_path)
     result_path = root / "interact_flowering_time.json"
     result = _result_payload()
     result["mode"] = result["provenance"]["mode"] = "pairwise"
+    provenance = result["provenance"]
+    family = result["results"]["INT"]["model_diagnostics"]["family_provenance"]
+    fwer = result["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"]
     if mutation == "family_count":
-        result["provenance"]["n_unique_edges"] = 999
-        result["results"]["INT"]["model_diagnostics"][
-            "family_provenance"]["n_unique_edges"] = 999
+        provenance["n_unique_edges"] = family["n_unique_edges"] = 999
+    elif mutation == "fwer_scope_mismatch":
+        fwer["family_scope"] = "joint"
+    elif mutation == "count_layer_mismatch":
+        family["n_groups_raw"] = 999
+    elif mutation == "missing_provenance_scope":
+        provenance.pop("family_scope")
+    elif mutation == "missing_fwer_unit":
+        fwer.pop("declared_hypothesis_unit")
+    elif mutation == "missing_fwer_scope":
+        fwer.pop("family_scope")
+    elif mutation == "missing_fwer_family_id":
+        fwer.pop("family_id")
+    elif mutation == "missing_group_count":
+        provenance.pop("n_groups_raw")
+        family.pop("n_groups_raw")
     else:
-        result["results"]["INT"]["model_diagnostics"][
-            "bootstrap_fwer"]["family_scope"] = "joint"
+        provenance.pop("n_unique_edges")
+        family.pop("n_unique_edges")
     _write_json(result_path, result)
     audit_path = root / "audit" / "homoeogwas_audit.json"
     _write_json(audit_path, {
@@ -426,7 +451,14 @@ def test_legacy_unit_family_contract_must_match_primary_and_fwer(
 
     row = export_application_rows(_write_registry(tmp_path, [run]))[0]
 
-    assert row["status"] == "SEMANTIC_MISMATCH"
+    expected = (
+        "SEMANTIC_MISMATCH"
+        if mutation in {
+            "family_count", "fwer_scope_mismatch", "count_layer_mismatch",
+        }
+        else "SCHEMA_INCOMPLETE"
+    )
+    assert row["status"] == expected
     assert row["audit_status"] == "PASS"
     assert row["repair_required"] is True
 

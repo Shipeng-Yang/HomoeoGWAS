@@ -693,7 +693,7 @@ def _validate_family_and_calibration(
             audit_status=audit_status,
         )
 
-    scope = provenance.get("family_scope", "primary_only")
+    scope = provenance.get("family_scope")
     if scope not in {"primary_only", "joint"}:
         raise _ExportFailure(
             "SCHEMA_INCOMPLETE",
@@ -706,11 +706,7 @@ def _validate_family_and_calibration(
             f"run {run.id!r}: primary family unit is missing",
             audit_status=audit_status,
         )
-    required_counts = (
-        (group_count, edge_count)
-        if scope == "joint"
-        else (edge_count,) if unit == "edge" else (group_count,)
-    )
+    required_counts = (group_count, edge_count)
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 1
         for value in required_counts
@@ -749,6 +745,24 @@ def _validate_family_and_calibration(
             audit_status=audit_status,
         )
 
+    family_layer = diagnostics.get("family_provenance")
+    if isinstance(family_layer, Mapping):
+        for field in ("n_groups_raw", "n_unique_edges"):
+            top_value = provenance.get(field)
+            nested_value = family_layer.get(field)
+            if top_value is None or nested_value is None:
+                raise _ExportFailure(
+                    "SCHEMA_INCOMPLETE",
+                    f"run {run.id!r}: family count layers lack {field}",
+                    audit_status=audit_status,
+                )
+            if top_value != nested_value:
+                raise _ExportFailure(
+                    "SEMANTIC_MISMATCH",
+                    f"run {run.id!r}: family count layers disagree for {field}",
+                    audit_status=audit_status,
+                )
+
     if method == "bootstrap":
         primary_b = primary.get("bootstrap_B")
         if (
@@ -765,6 +779,28 @@ def _validate_family_and_calibration(
             raise _ExportFailure(
                 "SCHEMA_INCOMPLETE",
                 f"run {run.id!r}: bootstrap_fwer is missing",
+                audit_status=audit_status,
+            )
+        required_fwer_fields = {
+            "declared_hypothesis_unit", "family_scope", "family_id",
+        }
+        missing_fwer_fields = sorted(required_fwer_fields - set(fwer))
+        if missing_fwer_fields:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: bootstrap FWER lacks required family fields: "
+                + ", ".join(missing_fwer_fields),
+                audit_status=audit_status,
+            )
+        expected_family_id = "joint" if scope == "joint" else unit
+        if (
+            fwer["declared_hypothesis_unit"] != unit
+            or fwer["family_scope"] != scope
+            or fwer["family_id"] != expected_family_id
+        ):
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: bootstrap FWER unit/scope/family_id disagree",
                 audit_status=audit_status,
             )
         fwer_b = fwer.get("B")
@@ -819,12 +855,6 @@ def _validate_family_and_calibration(
             raise _ExportFailure(
                 "SEMANTIC_MISMATCH",
                 f"run {run.id!r}: bootstrap FWER family count disagrees",
-                audit_status=audit_status,
-            )
-        if "family_scope" in fwer and fwer["family_scope"] != scope:
-            raise _ExportFailure(
-                "SEMANTIC_MISMATCH",
-                f"run {run.id!r}: bootstrap FWER family_scope disagrees",
                 audit_status=audit_status,
             )
     else:
@@ -1296,8 +1326,9 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         "repair_reason": None,
     })
     required = (
-        "sample_count", "marker_count", "requested_jobs", "effective_jobs",
-        "backend", "worker_pids",
+        "sample_count", "marker_count", "group_family_count",
+        "edge_family_count", "requested_jobs", "effective_jobs", "backend",
+        "worker_pids",
         "primary_unit", "calibration_method", "calibration_B", "family_hash",
     )
     missing = [name for name in required if row[name] is None]
