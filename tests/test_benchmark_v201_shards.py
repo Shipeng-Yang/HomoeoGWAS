@@ -17,7 +17,7 @@ from scripts.benchmarks.v201.shards import (
 
 def test_identical_resume_is_noop_and_conflict_is_rejected(tmp_path):
     path = tmp_path / "replicate-000007.json"
-    payload = {"design_hash": "a" * 64, "scenario_id": "s", "replicate": 7}
+    payload = {"design_hash": "a" * 64, "track": "fit", "scenario_id": "s", "replicate": 7}
     assert write_shard_exclusive(path, payload) == "created"
     assert write_shard_exclusive(path, payload) == "existing_identical"
     with pytest.raises(ShardConflict, match="existing shard differs"):
@@ -27,7 +27,7 @@ def test_identical_resume_is_noop_and_conflict_is_rejected(tmp_path):
 
 def test_concurrent_identical_writers_create_one_immutable_shard(tmp_path):
     path = tmp_path / "replicate-000000.json"
-    payload = {"design_hash": "b" * 64, "scenario_id": "s", "replicate": 0}
+    payload = {"design_hash": "b" * 64, "track": "fit", "scenario_id": "s", "replicate": 0}
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(lambda _: write_shard_exclusive(path, payload), range(8)))
     assert outcomes.count("created") == 1
@@ -37,19 +37,36 @@ def test_concurrent_identical_writers_create_one_immutable_shard(tmp_path):
 
 def test_load_shard_rejects_payload_that_does_not_match_expected_key(tmp_path):
     path = tmp_path / "replicate-000002.json"
-    payload = {"design_hash": "c" * 64, "scenario_id": "scenario", "replicate": 2}
+    payload = {"design_hash": "c" * 64, "track": "fit", "scenario_id": "scenario", "replicate": 2}
     write_shard_exclusive(path, payload)
     assert load_shard(path, ShardKey("fit", "scenario", 2)) == payload
     with pytest.raises(ShardConflict, match="shard key mismatch"):
         load_shard(path, ShardKey("fit", "scenario", 3))
 
 
+def test_load_shard_rejects_missing_or_mismatched_expected_key_track(tmp_path):
+    missing_track = tmp_path / "missing-track.json"
+    missing_track.write_text(json.dumps({
+        "design_hash": "c" * 64, "scenario_id": "scenario", "replicate": 2,
+    }))
+    with pytest.raises(ValueError, match="track"):
+        load_shard(missing_track, ShardKey("fit", "scenario", 2))
+
+    mismatched_track = tmp_path / "mismatched-track.json"
+    write_shard_exclusive(mismatched_track, {
+        "design_hash": "c" * 64, "track": "omnib", "scenario_id": "scenario", "replicate": 2,
+    })
+    with pytest.raises(ShardConflict, match="shard key mismatch"):
+        load_shard(mismatched_track, ShardKey("fit", "scenario", 2))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        {"design_hash": "short", "scenario_id": "s", "replicate": 0},
-        {"design_hash": "a" * 64, "scenario_id": "", "replicate": 0},
-        {"design_hash": "a" * 64, "scenario_id": "s", "replicate": -1},
+        {"design_hash": "short", "track": "fit", "scenario_id": "s", "replicate": 0},
+        {"design_hash": "a" * 64, "track": "fit", "scenario_id": "", "replicate": 0},
+        {"design_hash": "a" * 64, "track": "fit", "scenario_id": "s", "replicate": -1},
+        {"design_hash": "a" * 64, "scenario_id": "s", "replicate": 0},
     ],
 )
 def test_write_shard_rejects_invalid_minimum_contract(tmp_path, payload):
@@ -83,9 +100,15 @@ def test_project_budget_scales_each_measurement_and_reports_breakdown():
         ],
         effective_workers=3,
     )
-    assert projection["cpu_hours"] == 4.0
-    assert projection["elapsed_hours"] == pytest.approx(4 / 3)
-    assert projection["output_gb"] == 7.0
+    assert set(projection) == {"stage", "effective_workers", "totals", "limits", "breakdown"}
+    assert projection["totals"] == {
+        "cpu_seconds": 14_400.0,
+        "cpu_hours": 4.0,
+        "elapsed_hours": pytest.approx(4 / 3),
+        "output_bytes": 7_000_000_000.0,
+        "output_gb": 7.0,
+    }
+    assert json.dumps(projection)
     assert projection["limits"] == {
         "cpu_hours": 25_000,
         "elapsed_hours": 336,

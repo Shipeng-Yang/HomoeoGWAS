@@ -59,6 +59,8 @@ def _validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in design_hash)
     ):
         raise ValueError("shard payload has an invalid design_hash")
+    if not isinstance(result.get("track"), str) or not result["track"]:
+        raise ValueError("shard payload has an invalid track")
     if not isinstance(result.get("scenario_id"), str) or not result["scenario_id"]:
         raise ValueError("shard payload has an invalid scenario_id")
     replicate = result.get("replicate")
@@ -68,9 +70,11 @@ def _validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_key_match(payload: Mapping[str, Any], expected_key: ShardKey) -> None:
-    if payload["scenario_id"] != expected_key.scenario_id or payload["replicate"] != expected_key.replicate:
-        raise ShardConflict(f"shard key mismatch: {expected_key.relative_path()}")
-    if "track" in payload and payload["track"] != expected_key.track:
+    if (
+        payload["track"] != expected_key.track
+        or payload["scenario_id"] != expected_key.scenario_id
+        or payload["replicate"] != expected_key.replicate
+    ):
         raise ShardConflict(f"shard key mismatch: {expected_key.relative_path()}")
 
 
@@ -186,14 +190,17 @@ def project_budget(
     for row in breakdown.values():
         row["cpu_hours"] = row["projected_cpu_seconds"] / 3600
         row["output_gb"] = row["projected_output_bytes"] / _BYTES_PER_GB
-    projection: dict[str, Any] = {
-        "stage": stage,
-        "effective_workers": effective_workers,
+    totals = {
         "cpu_seconds": total_cpu_seconds,
         "cpu_hours": total_cpu_seconds / 3600,
         "elapsed_hours": total_cpu_seconds / effective_workers / 3600,
         "output_bytes": total_output_bytes,
         "output_gb": total_output_bytes / _BYTES_PER_GB,
+    }
+    projection: dict[str, Any] = {
+        "stage": stage,
+        "effective_workers": effective_workers,
+        "totals": totals,
         "limits": {
             "cpu_hours": budget.cpu_hours,
             "elapsed_hours": budget.elapsed_hours,
@@ -202,6 +209,6 @@ def project_budget(
         "breakdown": breakdown,
     }
     for name in ("cpu_hours", "elapsed_hours", "output_gb"):
-        if projection[name] > projection["limits"][name]:
+        if totals[name] > projection["limits"][name]:
             raise BudgetExceeded(f"{name} exceeds {stage} budget", projection)
     return projection
