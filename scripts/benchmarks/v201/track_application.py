@@ -8,6 +8,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -151,7 +152,7 @@ def _read_declared_artifacts(
                 "MISSING_AUTHORITATIVE_OUTPUT",
                 f"run {run.id!r}: declared {role} artifact is missing: {path}",
             ) from exc
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise _ExportFailure(
                 "UNREADABLE_AUTHORITATIVE_OUTPUT",
                 f"run {run.id!r}: cannot resolve declared {role} artifact "
@@ -326,6 +327,24 @@ def _adjusted_discoveries(
     return count, exported, dict(drivers)
 
 
+def _audit_input_is_bound(
+    value: str, result_path: Path, result_root: Path,
+) -> bool:
+    supplied = Path(value)
+    resolved_result = result_path.resolve(strict=True)
+    resolved_root = result_root.resolve(strict=True)
+    if supplied.is_absolute():
+        return supplied.resolve(strict=True) in {resolved_result, resolved_root}
+    parts = supplied.parts
+    if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
+        return False
+    return any(
+        len(target.parts) >= len(parts)
+        and target.parts[-len(parts):] == parts
+        for target in (resolved_result, resolved_root)
+    )
+
+
 def _audit_status_and_record(
     run: RegistryRun,
     result_path: Path,
@@ -333,19 +352,48 @@ def _audit_status_and_record(
     audit: Mapping[str, Any],
 ) -> tuple[str, Mapping[str, Any] | None]:
     if "overall_status" in audit:
+        schema_version = audit.get("audit_schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: production audit_schema_version must equal 1",
+            )
+        created_utc = audit.get("created_utc")
+        try:
+            if not isinstance(created_utc, str) or not created_utc.strip():
+                raise ValueError("empty timestamp")
+            datetime.fromisoformat(created_utc.strip())
+        except ValueError as exc:
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: production audit created_utc is not ISO time",
+            ) from exc
+        audit_input = audit.get("input")
+        if not isinstance(audit_input, str) or not audit_input.strip():
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: production audit input is not a path",
+            )
+        try:
+            input_is_bound = _audit_input_is_bound(
+                audit_input, result_path, run.result_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: production audit input cannot be resolved: {exc}",
+            ) from exc
+        if not input_is_bound:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: production audit input is not bound to the "
+                "declared result or result_root",
+            )
+
         status = str(audit.get("overall_status", "")).strip().upper()
-        if status == "ANALYSIS_INVALID":
-            raise _ExportFailure(
-                "AUDIT_FAILED",
-                f"run {run.id!r}: frozen audit failed with status ANALYSIS_INVALID",
-                audit_status=status,
-            )
-        if status not in _VALID_AUDIT_STATUSES:
-            raise _ExportFailure(
-                "AUDIT_FAILED",
-                f"run {run.id!r}: frozen audit failed with status {status or 'MISSING'}",
-                audit_status=status or None,
-            )
         records = audit.get("records")
         if (
             not isinstance(records, list)
@@ -435,21 +483,6 @@ def _audit_status_and_record(
                 f"run {run.id!r}: audit record status is unknown: {record_status}",
                 audit_status=status,
             )
-        if record_status == "ANALYSIS_INVALID":
-            computed = "ANALYSIS_INVALID"
-        elif record_status == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED":
-            computed = record_status
-        elif "REVIEW_REQUIRED" in record_status:
-            computed = "REVIEW_REQUIRED"
-        else:
-            computed = "AUDIT_COMPLETE"
-        if computed != status:
-            raise _ExportFailure(
-                "SEMANTIC_MISMATCH",
-                f"run {run.id!r}: audit overall_status {status} is inconsistent "
-                f"with record status {record_status}",
-                audit_status=status,
-            )
         if record["replication_status"] not in {"NOT_ASSESSED", "RECORDED"}:
             raise _ExportFailure(
                 "SCHEMA_INCOMPLETE",
@@ -481,6 +514,47 @@ def _audit_status_and_record(
             raise _ExportFailure(
                 "SCHEMA_INCOMPLETE",
                 f"run {run.id!r}: audit evidence_boundary is malformed",
+                audit_status=status,
+            )
+        has_error = any(flag["severity"] == "error" for flag in flags)
+        has_review = any(flag["severity"] == "review" for flag in flags)
+        discovery_count = record["discovery_count"]
+        replication_status = record["replication_status"]
+        if has_error:
+            computed_record = "ANALYSIS_INVALID"
+        elif discovery_count > 0 and replication_status == "NOT_ASSESSED":
+            computed_record = "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+        elif discovery_count > 0:
+            computed_record = "INTERNAL_DISCOVERY_REPLICATION_RECORDED"
+        elif has_review:
+            computed_record = "NO_FAMILYWISE_DISCOVERY_REVIEW_REQUIRED"
+        else:
+            computed_record = "NO_FAMILYWISE_DISCOVERY"
+        if computed_record == "ANALYSIS_INVALID":
+            computed_overall = "ANALYSIS_INVALID"
+        elif computed_record == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED":
+            computed_overall = computed_record
+        elif "REVIEW_REQUIRED" in computed_record:
+            computed_overall = "REVIEW_REQUIRED"
+        else:
+            computed_overall = "AUDIT_COMPLETE"
+        if computed_overall == "ANALYSIS_INVALID" or status == "ANALYSIS_INVALID":
+            raise _ExportFailure(
+                "AUDIT_FAILED",
+                f"run {run.id!r}: production audit recomputes to ANALYSIS_INVALID",
+                audit_status="ANALYSIS_INVALID",
+            )
+        if status not in _VALID_AUDIT_STATUSES:
+            raise _ExportFailure(
+                "AUDIT_FAILED",
+                f"run {run.id!r}: frozen audit failed with status {status or 'MISSING'}",
+                audit_status=status or None,
+            )
+        if record_status != computed_record or status != computed_overall:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: declared audit record/overall status disagrees "
+                "with production status recomputation",
                 audit_status=status,
             )
         return status, record
@@ -618,6 +692,177 @@ def _validate_family_and_calibration(
             f"{primary_statistic}+{primary_method}",
             audit_status=audit_status,
         )
+
+    scope = provenance.get("family_scope", "primary_only")
+    if scope not in {"primary_only", "joint"}:
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: family_scope is invalid",
+            audit_status=audit_status,
+        )
+    if unit not in {"edge", "group"}:
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: primary family unit is missing",
+            audit_status=audit_status,
+        )
+    required_counts = (
+        (group_count, edge_count)
+        if scope == "joint"
+        else (edge_count,) if unit == "edge" else (group_count,)
+    )
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 1
+        for value in required_counts
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: unit-specific frozen family count is missing or invalid",
+            audit_status=audit_status,
+        )
+    expected_family_count = (
+        group_count + edge_count
+        if scope == "joint"
+        else edge_count if unit == "edge" else group_count
+    )
+    primary_g = primary.get("G")
+    if (
+        isinstance(primary_g, bool)
+        or not isinstance(primary_g, int)
+        or primary_g < 1
+    ):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: primary G is missing or invalid",
+            audit_status=audit_status,
+        )
+    if primary_g != expected_family_count or n_planned != expected_family_count:
+        raise _ExportFailure(
+            "SEMANTIC_MISMATCH",
+            f"run {run.id!r}: frozen family count disagrees with G/n_planned",
+            audit_status=audit_status,
+        )
+    if not _is_sha256_hex(family_hash):
+        raise _ExportFailure(
+            "SCHEMA_INCOMPLETE",
+            f"run {run.id!r}: unit-specific frozen family hash is missing or invalid",
+            audit_status=audit_status,
+        )
+
+    if method == "bootstrap":
+        primary_b = primary.get("bootstrap_B")
+        if (
+            isinstance(primary_b, bool)
+            or not isinstance(primary_b, int)
+            or primary_b < 1
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: primary bootstrap_B must be a positive integer",
+                audit_status=audit_status,
+            )
+        if not isinstance(fwer, Mapping):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: bootstrap_fwer is missing",
+                audit_status=audit_status,
+            )
+        fwer_b = fwer.get("B")
+        if (
+            isinstance(fwer_b, bool)
+            or not isinstance(fwer_b, int)
+            or fwer_b < 1
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: bootstrap_fwer.B must be a positive integer",
+                audit_status=audit_status,
+            )
+        if fwer_b != primary_b or calibration_b != primary_b:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: primary/FWER bootstrap B values disagree",
+                audit_status=audit_status,
+            )
+        for layer_name, layer in (("result", result), ("provenance", provenance)):
+            if "bootstrap_B" not in layer:
+                continue
+            layer_b = layer["bootstrap_B"]
+            if (
+                isinstance(layer_b, bool)
+                or not isinstance(layer_b, int)
+                or layer_b < 1
+            ):
+                raise _ExportFailure(
+                    "SCHEMA_INCOMPLETE",
+                    f"run {run.id!r}: {layer_name}.bootstrap_B is invalid",
+                    audit_status=audit_status,
+                )
+            if layer_b != primary_b:
+                raise _ExportFailure(
+                    "SEMANTIC_MISMATCH",
+                    f"run {run.id!r}: {layer_name}.bootstrap_B disagrees with primary",
+                    audit_status=audit_status,
+                )
+        fwer_count = fwer.get("n_hypotheses")
+        if (
+            isinstance(fwer_count, bool)
+            or not isinstance(fwer_count, int)
+            or fwer_count < 1
+        ):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: bootstrap_fwer.n_hypotheses is missing or invalid",
+                audit_status=audit_status,
+            )
+        if fwer_count != expected_family_count:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: bootstrap FWER family count disagrees",
+                audit_status=audit_status,
+            )
+        if "family_scope" in fwer and fwer["family_scope"] != scope:
+            raise _ExportFailure(
+                "SEMANTIC_MISMATCH",
+                f"run {run.id!r}: bootstrap FWER family_scope disagrees",
+                audit_status=audit_status,
+            )
+    else:
+        permutation_fwer = diagnostics.get("permutation_fwer")
+        permutation_is_primary = (
+            provenance.get("primary_multiplicity") == "permutation_minp")
+        if permutation_is_primary and not isinstance(permutation_fwer, Mapping):
+            raise _ExportFailure(
+                "SCHEMA_INCOMPLETE",
+                f"run {run.id!r}: primary permutation_fwer is missing",
+                audit_status=audit_status,
+            )
+        if isinstance(permutation_fwer, Mapping):
+            if (
+                "family_scope" in permutation_fwer
+                and permutation_fwer["family_scope"] != scope
+            ):
+                raise _ExportFailure(
+                    "SEMANTIC_MISMATCH",
+                    f"run {run.id!r}: permutation FWER family_scope disagrees",
+                    audit_status=audit_status,
+                )
+            if permutation_fwer.get("method") != (
+                "freedman_lane_permutation_minp_plus_one"
+            ):
+                raise _ExportFailure(
+                    "SEMANTIC_MISMATCH",
+                    f"run {run.id!r}: permutation FWER method is invalid",
+                    audit_status=audit_status,
+                )
+            if "n_hypotheses" in permutation_fwer and (
+                permutation_fwer["n_hypotheses"] != expected_family_count
+            ):
+                raise _ExportFailure(
+                    "SEMANTIC_MISMATCH",
+                    f"run {run.id!r}: permutation FWER family count disagrees",
+                    audit_status=audit_status,
+                )
 
     canonical = result.get("mode") == "group" and statistic == "omnib"
     if canonical:
@@ -931,16 +1176,20 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         group_count = family_layer.get("n_groups_raw")
     if edge_count is None:
         edge_count = family_layer.get("n_unique_edges")
+    if unit == "edge" and edge_count is None:
+        edge_count = provenance.get("n_units_raw", result.get("n_units_raw"))
+    if unit == "group" and group_count is None:
+        group_count = provenance.get("n_units_raw", result.get("n_units_raw"))
 
     method = primary.get("calibration_method")
     if method == "bootstrap":
         calibration_b = primary.get("bootstrap_B")
-        if calibration_b is None:
-            fwer = diagnostics.get("bootstrap_fwer")
-            if isinstance(fwer, Mapping):
-                calibration_b = fwer.get("B")
     elif method == "permutation":
-        calibration_b = primary.get("perm_B", provenance.get("perm_B"))
+        permutation = primary.get("permutation")
+        if isinstance(permutation, Mapping):
+            calibration_b = permutation.get("B_requested")
+        else:
+            calibration_b = primary.get("perm_B", provenance.get("perm_B"))
     else:
         calibration_b = None
     family_hash = None
@@ -1047,8 +1296,8 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         "repair_reason": None,
     })
     required = (
-        "sample_count", "marker_count", "group_family_count", "edge_family_count",
-        "requested_jobs", "effective_jobs", "backend", "worker_pids",
+        "sample_count", "marker_count", "requested_jobs", "effective_jobs",
+        "backend", "worker_pids",
         "primary_unit", "calibration_method", "calibration_B", "family_hash",
     )
     missing = [name for name in required if row[name] is None]

@@ -136,6 +136,9 @@ def _audit_payload(
     else:
         overall_status = "AUDIT_COMPLETE"
     return {
+        "audit_schema_version": 1,
+        "created_utc": "2026-08-30T12:00:00+00:00",
+        "input": str(result.resolve()),
         "overall_status": overall_status,
         "n_results": 1,
         "records": [{
@@ -355,6 +358,8 @@ def test_custom_release_audit_and_pairwise_aliases_are_strictly_supported(tmp_pa
     result["parallel_execution"] = result["provenance"].pop("parallel_execution")
     result["provenance"]["n_units_raw"] = result["provenance"].pop(
         "n_unique_edges")
+    result["provenance"].pop("n_groups_raw")
+    result["results"]["INT"]["model_diagnostics"].pop("family_provenance")
     _write_json(result_path, result)
     audit_path = root / "audit" / "homoeogwas_audit.json"
     _write_json(audit_path, {
@@ -378,12 +383,52 @@ def test_custom_release_audit_and_pairwise_aliases_are_strictly_supported(tmp_pa
 
     assert row["status"] == "PASS"
     assert row["primary_unit"] == "edge"
+    assert row["group_family_count"] is None
     assert row["edge_family_count"] == 17_404
     assert row["family_hash"] == "2" * 64
     assert row["component_driver_distribution"] == {
         "minor_burden": 1, "kernel_hadamard": 1,
     }
     assert row["repair_required"] is False
+
+
+@pytest.mark.parametrize("mutation", ["family_count", "fwer_scope"])
+def test_legacy_unit_family_contract_must_match_primary_and_fwer(
+    tmp_path, mutation,
+):
+    root, run = _materialize_run(tmp_path)
+    result_path = root / "interact_flowering_time.json"
+    result = _result_payload()
+    result["mode"] = result["provenance"]["mode"] = "pairwise"
+    if mutation == "family_count":
+        result["provenance"]["n_unique_edges"] = 999
+        result["results"]["INT"]["model_diagnostics"][
+            "family_provenance"]["n_unique_edges"] = 999
+    else:
+        result["results"]["INT"]["model_diagnostics"][
+            "bootstrap_fwer"]["family_scope"] = "joint"
+    _write_json(result_path, result)
+    audit_path = root / "audit" / "homoeogwas_audit.json"
+    _write_json(audit_path, {
+        "status": "PASS",
+        "output_sha256": {"interact_json": _sha256(result_path)},
+        "component_driver_counts_among_formal_hits": {
+            "minor_burden": 1, "kernel_hadamard": 1,
+        },
+    })
+    run["analysis_shape"] = "legacy_pairwise_omnib"
+    run["artifact_inventory"] = [
+        {"role": "result", "path": result_path.relative_to(root).as_posix(),
+         "size": result_path.stat().st_size, "sha256": _sha256(result_path)},
+        {"role": "audit", "path": audit_path.relative_to(root).as_posix(),
+         "size": audit_path.stat().st_size, "sha256": _sha256(audit_path)},
+    ]
+
+    row = export_application_rows(_write_registry(tmp_path, [run]))[0]
+
+    assert row["status"] == "SEMANTIC_MISMATCH"
+    assert row["audit_status"] == "PASS"
+    assert row["repair_required"] is True
 
 
 def test_legacy_triad_alias_is_group_primary_without_merging_models(tmp_path):
@@ -461,6 +506,46 @@ def test_family_and_calibration_semantics_fail_closed(tmp_path, mutation):
     assert row["status"] in {"SEMANTIC_MISMATCH", "SCHEMA_INCOMPLETE"}
 
 
+@pytest.mark.parametrize("mutation", [
+    "missing_primary_B",
+    "missing_fwer_B",
+    "mismatched_fwer_B",
+    "mismatched_provenance_B",
+    "mismatched_result_B",
+])
+def test_bootstrap_replicate_count_is_strict_across_available_layers(
+    tmp_path, mutation,
+):
+    root, run = _materialize_run(tmp_path)
+    result_path = root / "interact_flowering_time.json"
+    result = _result_payload()
+    primary = result["results"]["INT"]
+    fwer = primary["model_diagnostics"]["bootstrap_fwer"]
+    if mutation == "missing_primary_B":
+        primary.pop("bootstrap_B")
+    elif mutation == "missing_fwer_B":
+        fwer.pop("B")
+    elif mutation == "mismatched_fwer_B":
+        fwer["B"] = 1999
+    elif mutation == "mismatched_provenance_B":
+        result["provenance"]["bootstrap_B"] = 1999
+    else:
+        result["bootstrap_B"] = 1999
+    _write_json(result_path, result)
+    run["artifact_inventory"][0].update(
+        size=result_path.stat().st_size, sha256=_sha256(result_path))
+
+    row = export_application_rows(_write_registry(tmp_path, [run]))[0]
+
+    expected = (
+        "SCHEMA_INCOMPLETE"
+        if mutation.startswith("missing_") else "SEMANTIC_MISMATCH"
+    )
+    assert row["status"] == expected
+    assert row["audit_status"] == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+    assert row["repair_required"] is True
+
+
 def test_standard_audit_pass_and_extra_record_are_rejected(tmp_path):
     pass_root, pass_run = _materialize_run(tmp_path, name="standard-pass")
     pass_audit = pass_root / "audit" / "homoeogwas_audit.json"
@@ -484,6 +569,77 @@ def test_standard_audit_pass_and_extra_record_are_rejected(tmp_path):
     assert rows[0]["status"] == "AUDIT_FAILED"
     assert rows[1]["status"] == "SEMANTIC_MISMATCH"
     assert all(row["repair_required"] for row in rows)
+
+
+@pytest.mark.parametrize("mutation", [
+    "simplified",
+    "boolean_schema",
+    "invalid_created_utc",
+    "blank_input",
+    "nul_input",
+    "unrelated_input",
+])
+def test_standard_audit_requires_bound_production_envelope(tmp_path, mutation):
+    root, run = _materialize_run(tmp_path)
+    audit_path = root / "audit" / "homoeogwas_audit.json"
+    audit = _audit_payload(root / "interact_flowering_time.json")
+    if mutation == "simplified":
+        audit.pop("audit_schema_version")
+        audit.pop("created_utc")
+        audit.pop("input")
+    elif mutation == "boolean_schema":
+        audit["audit_schema_version"] = True
+    elif mutation == "invalid_created_utc":
+        audit["created_utc"] = "not-an-ISO-time"
+    elif mutation == "blank_input":
+        audit["input"] = "   "
+    elif mutation == "nul_input":
+        audit["input"] = "bad\0path"
+    else:
+        audit["input"] = str((tmp_path / "unrelated").resolve())
+    _write_json(audit_path, audit)
+    run["artifact_inventory"][1].update(
+        size=audit_path.stat().st_size, sha256=_sha256(audit_path))
+
+    row = export_application_rows(_write_registry(tmp_path, [run]))[0]
+
+    assert row["status"] in {"SCHEMA_INCOMPLETE", "SEMANTIC_MISMATCH"}
+    assert row["repair_required"] is True
+
+
+def test_relative_production_audit_input_may_bind_result_root_by_suffix(tmp_path):
+    root, run = _materialize_run(tmp_path)
+    audit_path = root / "audit" / "homoeogwas_audit.json"
+    audit = _audit_payload(root / "interact_flowering_time.json")
+    audit["input"] = f"{root.parent.name}/{root.name}"
+    _write_json(audit_path, audit)
+    run["artifact_inventory"][1].update(
+        size=audit_path.stat().st_size, sha256=_sha256(audit_path))
+
+    row = export_application_rows(_write_registry(tmp_path, [run]))[0]
+
+    assert row["status"] == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
+    assert row["repair_required"] is False
+
+
+def test_error_flag_cannot_be_masked_by_declared_successful_audit_status(tmp_path):
+    root, run = _materialize_run(tmp_path)
+    audit_path = root / "audit" / "homoeogwas_audit.json"
+    audit = _audit_payload(root / "interact_flowering_time.json")
+    audit["records"][0]["flags"].append({
+        "code": "OMNIB_FWER_METHOD_MISMATCH",
+        "severity": "error",
+        "message": "The canonical family contract is invalid.",
+    })
+    _write_json(audit_path, audit)
+    run["artifact_inventory"][1].update(
+        size=audit_path.stat().st_size, sha256=_sha256(audit_path))
+
+    row = export_application_rows(_write_registry(tmp_path, [run]))[0]
+
+    assert row["status"] == "AUDIT_FAILED"
+    assert row["audit_status"] == "ANALYSIS_INVALID"
+    assert row["repair_required"] is True
 
 
 @pytest.mark.parametrize("field", [
