@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from scripts.benchmarks.v201.contracts import Scenario
+from scripts.benchmarks.v201.contracts import Scenario, derive_seed
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_fit import (
     build_fit_config,
@@ -43,6 +43,32 @@ def _write_dummy_plink_prefix(prefix):
     return prefix
 
 
+def _write_released_plink_prefix(prefix, sample_ids, *, seed):
+    from bed_reader import to_bed
+
+    rng = np.random.default_rng(seed)
+    n_markers = 12
+    dosage = rng.binomial(2, 0.3, size=(len(sample_ids), n_markers)).astype(
+        np.float32
+    )
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    to_bed(
+        str(prefix) + ".bed",
+        dosage,
+        properties={
+            "fid": ["F"] * len(sample_ids),
+            "iid": list(sample_ids),
+            "sid": [f"{prefix.parent.name}_v{index:02d}" for index in range(n_markers)],
+            "chromosome": [f"{prefix.parent.name}1"] * n_markers,
+            "bp_position": [100 * (index + 1) for index in range(n_markers)],
+            "allele_1": ["A"] * n_markers,
+            "allele_2": ["C"] * n_markers,
+        },
+        count_A1=True,
+    )
+    return prefix
+
+
 def _write_released_fit_output(
     root,
     *,
@@ -68,9 +94,11 @@ def _write_released_fit_output(
         + "".join(f"{sample_id}\t{index / 10:.1f}\n" for index, sample_id in enumerate(sample_ids))
     )
     bed_template = root / "input-geno" / "{subgenome}" / "all"
-    for subgenome in subgenomes:
-        _write_dummy_plink_prefix(
-            root / "input-geno" / subgenome / "all"
+    for index, subgenome in enumerate(subgenomes):
+        _write_released_plink_prefix(
+            root / "input-geno" / subgenome / "all",
+            sample_ids,
+            seed=701 + index,
         )
     config = {
         "fit_version": 1,
@@ -206,6 +234,57 @@ def _write_released_fit_output(
     summary_path = output / f"summary_{trait}.json"
     summary_path.write_text(json.dumps(summary))
     return summary
+
+
+def _production_released_inputs(root):
+    from homoeogwas.cli import build_kernels, join_samples
+
+    config = yaml.safe_load(
+        (root / "results" / "resolved_config.yaml").read_text()
+    )
+    samples, phenotype, _ = join_samples(config)
+    kernels, _ = build_kernels(config, samples)
+    return samples.tolist(), phenotype, kernels
+
+
+def _write_phenotype_values(root, sample_ids, values, trait="simulated_trait"):
+    (root / "phenotype.tsv").write_text(
+        "sample\t" + trait + "\n"
+        + "".join(
+            f"{sample_id}\t{float(value)!r}\n"
+            for sample_id, value in zip(sample_ids, values, strict=True)
+        )
+    )
+
+
+def _write_bound_coverage_output(
+    root,
+    *,
+    scenario,
+    design_hash,
+    sample_ids,
+    replicate=0,
+):
+    _write_released_fit_output(
+        root,
+        sample_ids=sample_ids,
+        bootstrap_B=scenario.bootstrap_B,
+    )
+    joined_ids, _, kernels = _production_released_inputs(root)
+    assert joined_ids == list(sample_ids)
+    seed = derive_seed(
+        design_hash, "fit", scenario.scenario_id, replicate, scenario.stage
+    )
+    phenotype, truth = simulate_fit_truth(
+        kernels,
+        scenario.parameters["allocation"],
+        seed=seed,
+        total_pve=scenario.parameters.get("total_pve"),
+        dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
+        null_subgenome=scenario.parameters.get("null_subgenome"),
+    )
+    _write_phenotype_values(root, sample_ids, phenotype)
+    return kernels, phenotype, truth
 
 
 def _preflight_inputs(n=4):
@@ -470,7 +549,7 @@ def test_parse_fit_metrics_reads_real_summary_and_bootstrap_table(tmp_path):
         "target_pve": {"A": 0.2, "D": 0.2, "e": 0.6},
         "realized_pve": {"A": 0.21, "D": 0.19, "e": 0.6},
     }
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     summary = _write_released_fit_output(
         tmp_path,
         sample_ids=sample_ids,
@@ -512,7 +591,7 @@ def test_parse_fit_metrics_reads_real_summary_and_bootstrap_table(tmp_path):
 def test_coverage_parser_binds_stage_specific_bootstrap_budget(
     tmp_path, stage, bootstrap_B
 ):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     _write_released_fit_output(
         tmp_path, sample_ids=sample_ids, bootstrap_B=bootstrap_B
     )
@@ -539,7 +618,7 @@ def test_coverage_parser_binds_stage_specific_bootstrap_budget(
 
 
 def test_parse_fit_metrics_rejects_stale_tool_or_sample_provenance(tmp_path):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary_path = tmp_path / "results" / "summary_simulated_trait.json"
     summary = json.loads(summary_path.read_text())
@@ -568,7 +647,7 @@ def test_parse_fit_metrics_rejects_stale_tool_or_sample_provenance(tmp_path):
 
 
 def test_parse_fit_metrics_rejects_nonboolean_acceptance_evidence(tmp_path):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary["acceptance_all_passed"] = "False"
     (tmp_path / "results" / "summary_simulated_trait.json").write_text(
@@ -586,7 +665,7 @@ def test_parse_fit_metrics_rejects_nonboolean_acceptance_evidence(tmp_path):
 
 @pytest.mark.parametrize("corruption", ["schema", "count"])
 def test_parse_fit_metrics_rejects_invalid_bootstrap_evidence(tmp_path, corruption):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary_path = tmp_path / "results" / "summary_simulated_trait.json"
     bootstrap_path = tmp_path / "results" / "pve_bootstrap_simulated_trait.tsv"
@@ -610,7 +689,7 @@ def test_parse_fit_metrics_rejects_invalid_bootstrap_evidence(tmp_path, corrupti
 
 
 def test_bootstrap_percentile_interval_may_exclude_point_estimate(tmp_path):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary["reml"]["pve_uncertainty"]["components"]["A"].update(
         {"ci_low": 0.26, "ci_high": 0.31}
@@ -636,12 +715,18 @@ def test_bootstrap_percentile_interval_may_exclude_point_estimate(tmp_path):
 
 
 def test_released_fit_rejects_wrong_phenotype_and_grm_provenance(tmp_path):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     phenotype_path = tmp_path / "phenotype.tsv"
-    phenotype_path.write_text("sample\tsimulated_trait\n0002\t0.0\n0001\t1.0\n")
+    phenotype_path.write_text(
+        "sample\tsimulated_trait\n"
+        + "".join(
+            f"{sample_id}\t{index / 10:.1f}\n"
+            for index, sample_id in enumerate(sample_ids[1:], start=1)
+        )
+    )
 
-    with pytest.raises(ValueError, match="phenotype sample order"):
+    with pytest.raises(ValueError, match="duplicate-averaging/inner sample join"):
         parse_fit_metrics(
             tmp_path,
             "simulated_trait",
@@ -650,7 +735,9 @@ def test_released_fit_rejects_wrong_phenotype_and_grm_provenance(tmp_path):
             experiment="coverage",
         )
 
-    phenotype_path.write_text("sample\tsimulated_trait\n0001\t0.0\n0002\t1.0\n")
+    _write_phenotype_values(
+        tmp_path, sample_ids, np.arange(24, dtype=np.float64) / 10.0
+    )
     summary["grm_info"]["source"] = "npz"
     (tmp_path / "results" / "summary_simulated_trait.json").write_text(
         json.dumps(summary)
@@ -666,7 +753,7 @@ def test_released_fit_rejects_wrong_phenotype_and_grm_provenance(tmp_path):
 
 
 def test_released_fit_rejects_summary_bed_source_different_from_config(tmp_path):
-    sample_ids = ["0001", "0002"]
+    sample_ids = [f"{index:04d}" for index in range(24)]
     summary = _write_released_fit_output(tmp_path, sample_ids=sample_ids)
     summary["grm_info"]["marker_input"]["grm"]["subgenomes"]["A"][
         "bed_prefix"
@@ -683,6 +770,187 @@ def test_released_fit_rejects_summary_bed_source_different_from_config(tmp_path)
             expected_sample_ids=sample_ids,
             experiment="coverage",
         )
+
+
+@pytest.mark.parametrize("fam_change", ["mismatch", "extra", "missing"])
+def test_released_fit_rejects_fam_iids_inconsistent_with_production_join(
+    tmp_path, fam_change
+):
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    fam_path = tmp_path / "input-geno" / "A" / "all.fam"
+    rows = fam_path.read_text().splitlines()
+    if fam_change == "mismatch":
+        fields = rows[0].split()
+        fields[1] = "wrong-iid"
+        rows[0] = "\t".join(fields)
+    elif fam_change == "extra":
+        rows.append("F\textra-iid\t0\t0\t0\t-9")
+    else:
+        rows.pop()
+    fam_path.write_text("\n".join(rows) + "\n")
+
+    with pytest.raises(ValueError, match="FAM|sample join"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            experiment="coverage",
+        )
+
+
+def test_released_fit_uses_production_duplicate_phenotype_average(tmp_path):
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    expected = np.arange(24, dtype=np.float64) / 10.0
+    phenotype_path = tmp_path / "phenotype.tsv"
+    phenotype_path.write_text(
+        "sample\tsimulated_trait\n"
+        f"{sample_ids[0]}\t-1.0\n"
+        f"{sample_ids[0]}\t1.0\n"
+        + "".join(
+            f"{sample_id}\t{float(expected[index])!r}\n"
+            for index, sample_id in enumerate(sample_ids[1:], start=1)
+        )
+    )
+
+    metrics = parse_fit_metrics(
+        tmp_path,
+        "simulated_trait",
+        expected_subgenomes=("A", "D"),
+        expected_sample_ids=sample_ids,
+        expected_phenotype=expected,
+        experiment="coverage",
+    )
+    assert metrics["released_input_binding"]["analysis_sample_ids"] == sample_ids
+
+    phenotype_path.write_text(
+        phenotype_path.read_text().replace(f"{sample_ids[0]}\t1.0", f"{sample_ids[0]}\t3.0")
+    )
+    with pytest.raises(ValueError, match="joined phenotype differs"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            expected_phenotype=expected,
+            experiment="coverage",
+        )
+
+
+def test_released_fit_rejects_trait_content_different_from_request(tmp_path):
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    expected = np.arange(24, dtype=np.float64) / 10.0
+    phenotype_path = tmp_path / "phenotype.tsv"
+    phenotype_path.write_text(
+        phenotype_path.read_text().replace(f"{sample_ids[7]}\t0.7", f"{sample_ids[7]}\t9.7")
+    )
+
+    with pytest.raises(ValueError, match="joined phenotype differs"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            expected_phenotype=expected,
+            experiment="coverage",
+        )
+
+
+def test_released_fit_rejects_bed_kernels_detached_from_request(tmp_path):
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    _write_released_fit_output(tmp_path, sample_ids=sample_ids)
+    _, _, released_kernels = _production_released_inputs(tmp_path)
+    detached = {name: value.copy() for name, value in released_kernels.items()}
+    detached["A"][0, 0] += 0.125
+
+    with pytest.raises(ValueError, match="BED-derived kernel differs"):
+        parse_fit_metrics(
+            tmp_path,
+            "simulated_trait",
+            expected_subgenomes=("A", "D"),
+            expected_sample_ids=sample_ids,
+            expected_kernels=detached,
+            experiment="coverage",
+        )
+
+
+def test_coverage_rejects_arbitrary_released_phenotype_as_immutable_failure(tmp_path):
+    root = tmp_path / "fit-output"
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    _write_released_fit_output(root, sample_ids=sample_ids)
+    _, _, kernels = _production_released_inputs(root)
+    scenario = Scenario(
+        "A.coverage.cotton.balanced",
+        "fit",
+        "pilot",
+        1,
+        2,
+        {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
+    )
+    shard = tmp_path / "arbitrary-phenotype.json"
+
+    result = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="a" * 64,
+        sample_ids=np.asarray(sample_ids),
+        shard_path=shard,
+        fit_output_dir=root,
+    )
+
+    assert result["failure"]["failed"] is True
+    assert "joined phenotype differs" in result["failure"]["message"]
+    assert json.loads(shard.read_text()) == result
+
+
+def test_coverage_binds_simulated_y_truth_and_bed_derived_kernels(tmp_path):
+    root = tmp_path / "fit-output"
+    sample_ids = [f"00{index:02d}" for index in range(24)]
+    scenario = Scenario(
+        "A.coverage.cotton.balanced",
+        "fit",
+        "pilot",
+        1,
+        2,
+        {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
+    )
+    kernels, phenotype, truth = _write_bound_coverage_output(
+        root,
+        scenario=scenario,
+        design_hash="b" * 64,
+        sample_ids=sample_ids,
+    )
+
+    result = run_fit_replicate(
+        scenario,
+        kernels,
+        replicate=0,
+        design_hash="b" * 64,
+        sample_ids=np.asarray(sample_ids),
+        fit_output_dir=root,
+    )
+
+    assert result["failure"]["failed"] is False, result["failure"]
+    assert result["coverage_request_binding"]["truth_hash"] == truth["truth_hash"]
+    assert result["coverage_request_binding"]["phenotype"]["shape"] == [24]
+    assert result["released_input_binding"]["joined_phenotype"]["shape"] == [24]
+    assert result["released_input_binding"]["kernel_order"] == ["A", "D"]
+    assert result["released_input_binding"]["requested_phenotype"]["sha256"] == result[
+        "coverage_request_binding"
+    ]["phenotype"]["sha256"]
+    assert result["released_request_binding"]["joined_phenotype"] == result[
+        "released_input_binding"
+    ]["joined_phenotype"]
+    assert result["released_request_binding"]["truth_hash"] == truth["truth_hash"]
+    assert result["released_input_binding"]["truth_hash"] == truth["truth_hash"]
+    assert result["released_input_binding"]["phenotype_max_abs_difference"] <= (
+        8.0 * np.finfo(np.float64).eps
+    )
+    assert phenotype.shape == (24,)
 
 def test_run_fit_replicate_resumes_only_same_sample_and_request(tmp_path):
     kernels = _toy_kernels(n=24)
@@ -759,8 +1027,7 @@ def test_run_fit_replicate_writes_real_failure_shard(tmp_path):
 
 def test_fit_runner_preserves_runtime_from_released_summary(tmp_path):
     output = tmp_path / "fit-output"
-    sample_ids = [f"s{i:02d}" for i in range(18)]
-    _write_released_fit_output(output, sample_ids=sample_ids)
+    sample_ids = [f"s{i:02d}" for i in range(24)]
     scenario = Scenario(
         "A.coverage.cotton.balanced",
         "fit",
@@ -769,10 +1036,16 @@ def test_fit_runner_preserves_runtime_from_released_summary(tmp_path):
         2,
         {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
     )
+    kernels, _, _ = _write_bound_coverage_output(
+        output,
+        scenario=scenario,
+        design_hash="b" * 64,
+        sample_ids=sample_ids,
+    )
 
     result = run_fit_replicate(
         scenario,
-        _toy_kernels(n=18),
+        kernels,
         replicate=0,
         design_hash="b" * 64,
         sample_ids=np.asarray(sample_ids),
@@ -785,8 +1058,7 @@ def test_fit_runner_preserves_runtime_from_released_summary(tmp_path):
 
 def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_path):
     output = tmp_path / "fit-output"
-    sample_ids = [f"00{i:02d}" for i in range(18)]
-    _write_released_fit_output(output, sample_ids=sample_ids)
+    sample_ids = [f"00{i:02d}" for i in range(24)]
     scenario = Scenario(
         "A.coverage.cotton.balanced",
         "fit",
@@ -796,10 +1068,16 @@ def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_pat
         {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
     )
     shard = tmp_path / "coverage.json"
+    kernels, _, _ = _write_bound_coverage_output(
+        output,
+        scenario=scenario,
+        design_hash="c" * 64,
+        sample_ids=sample_ids,
+    )
 
     result = run_fit_replicate(
         scenario,
-        _toy_kernels(n=18),
+        kernels,
         replicate=0,
         design_hash="c" * 64,
         sample_ids=np.asarray(sample_ids),
@@ -834,7 +1112,7 @@ def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_pat
     with pytest.raises(ShardConflict, match="existing shard differs"):
         run_fit_replicate(
             scenario,
-            _toy_kernels(n=18),
+            kernels,
             replicate=0,
             design_hash="c" * 64,
             sample_ids=np.asarray(sample_ids),
@@ -846,8 +1124,7 @@ def test_fit_runner_dispatches_coverage_and_binds_released_source_hashes(tmp_pat
 @pytest.mark.parametrize("source_kind", ["phenotype", "bed"])
 def test_coverage_resume_conflicts_when_input_source_mutates(tmp_path, source_kind):
     root = tmp_path / "fit-root"
-    sample_ids = [f"00{i:02d}" for i in range(18)]
-    _write_released_fit_output(root, sample_ids=sample_ids)
+    sample_ids = [f"00{i:02d}" for i in range(24)]
     scenario = Scenario(
         "A.coverage.cotton.balanced",
         "fit",
@@ -857,15 +1134,22 @@ def test_coverage_resume_conflicts_when_input_source_mutates(tmp_path, source_ki
         {"experiment": "coverage", "allocation": "balanced", "total_pve": 0.4},
     )
     shard = tmp_path / f"{source_kind}.json"
-    run_fit_replicate(
+    kernels, _, _ = _write_bound_coverage_output(
+        root,
+        scenario=scenario,
+        design_hash="3" * 64,
+        sample_ids=sample_ids,
+    )
+    first = run_fit_replicate(
         scenario,
-        _toy_kernels(n=18),
+        kernels,
         replicate=0,
         design_hash="3" * 64,
         sample_ids=np.asarray(sample_ids),
         shard_path=shard,
         fit_output_dir=root,
     )
+    assert first["failure"]["failed"] is False
     if source_kind == "phenotype":
         (root / "phenotype.tsv").write_text(
             "sample\tsimulated_trait\n"
@@ -878,7 +1162,7 @@ def test_coverage_resume_conflicts_when_input_source_mutates(tmp_path, source_ki
     with pytest.raises(ShardConflict, match="existing shard differs"):
         run_fit_replicate(
             scenario,
-            _toy_kernels(n=18),
+            kernels,
             replicate=0,
             design_hash="3" * 64,
             sample_ids=np.asarray(sample_ids),
@@ -1028,10 +1312,11 @@ def test_run_scan_replicate_executes_three_matched_production_comparators():
 
 def test_fit_runner_dispatches_loco_only_to_strict_released_loco_output(tmp_path):
     output = tmp_path / "loco-output"
-    sample_ids = [f"s{i:02d}" for i in range(14)]
+    sample_ids = [f"s{i:02d}" for i in range(24)]
     _write_released_fit_output(
         output, sample_ids=sample_ids, bootstrap=False, loco=True
     )
+    _, _, kernels = _production_released_inputs(output)
     scenario = Scenario(
         "A.loco.cotton.pve_0",
         "fit",
@@ -1043,7 +1328,7 @@ def test_fit_runner_dispatches_loco_only_to_strict_released_loco_output(tmp_path
 
     result = run_fit_replicate(
         scenario,
-        _toy_kernels(n=14),
+        kernels,
         replicate=0,
         design_hash="7" * 64,
         sample_ids=np.asarray(sample_ids),
@@ -1061,7 +1346,7 @@ def test_fit_runner_dispatches_loco_only_to_strict_released_loco_output(tmp_path
 
 def test_released_loco_rejects_stale_sumstats_provenance(tmp_path):
     output = tmp_path / "loco-output"
-    sample_ids = [f"s{i:02d}" for i in range(14)]
+    sample_ids = [f"s{i:02d}" for i in range(24)]
     summary = _write_released_fit_output(
         output, sample_ids=sample_ids, bootstrap=False, loco=True
     )

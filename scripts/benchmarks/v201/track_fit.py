@@ -554,6 +554,143 @@ def _released_config_context(root: str | Path) -> dict[str, Any]:
     }
 
 
+def _fam_iids(path: Path) -> list[str]:
+    """Read one PLINK FAM IID column without numeric coercion."""
+
+    try:
+        rows = [line.split() for line in path.read_text(encoding="utf-8").splitlines()]
+    except OSError as error:
+        raise ValueError(f"cannot read FAM sample provenance: {path}") from error
+    if not rows or any(len(row) < 2 or not row[1] for row in rows):
+        raise ValueError(f"FAM sample provenance is invalid: {path}")
+    iids = [row[1] for row in rows]
+    if len(set(iids)) != len(iids):
+        raise ValueError(f"FAM contains duplicate sample IIDs: {path}")
+    return iids
+
+
+def _released_fit_inputs(
+    context: Mapping[str, Any],
+    analysis_samples: Sequence[str],
+    *,
+    expected_phenotype: Sequence[float] | np.ndarray | None,
+    expected_kernels: Mapping[str, np.ndarray] | None,
+    expected_truth_hash: str | None = None,
+) -> dict[str, Any]:
+    """Reproduce production sample joining and BED-derived kernel construction."""
+
+    from homoeogwas.cli import build_kernels, join_samples
+    from homoeogwas.io import load_bed_hardcall
+
+    analysis_ids = list(analysis_samples)
+    bed_sources = context["bed_sources"]
+    observed_prefixes: set[Path] = set()
+    for key, fam_path in bed_sources.items():
+        if not key.endswith("_fam"):
+            continue
+        fam_iids = _fam_iids(fam_path)
+        missing = [sample for sample in analysis_ids if sample not in set(fam_iids)]
+        if missing:
+            raise ValueError(
+                f"FAM sample join is missing analysis IIDs for {key}: {missing[:3]}"
+            )
+        prefix = Path(str(fam_path)[: -len(".fam")])
+        if prefix in observed_prefixes:
+            continue
+        observed_prefixes.add(prefix)
+        try:
+            genotype = load_bed_hardcall(prefix)
+        except Exception as error:
+            raise ValueError(f"FAM/BED sample provenance is inconsistent: {prefix}") from error
+        if genotype.samples.astype(str).tolist() != fam_iids:
+            raise ValueError(f"FAM IID order differs from BED sample axis: {prefix}")
+
+    try:
+        joined_samples, joined_phenotype, _ = join_samples(dict(context["resolved"]))
+    except SystemExit as error:
+        raise ValueError(f"production fit sample join failed: {error}") from error
+    except Exception as error:
+        raise ValueError("production fit sample join failed") from error
+    joined_ids = [str(sample) for sample in joined_samples]
+    joined_y = np.ascontiguousarray(np.asarray(joined_phenotype, dtype=np.float64))
+    if joined_ids != analysis_ids:
+        raise ValueError(
+            "production fit duplicate-averaging/inner sample join differs from analysis samples"
+        )
+    requested_y: np.ndarray | None = None
+    phenotype_max_abs: float | None = None
+    if expected_phenotype is not None:
+        requested_y = np.ascontiguousarray(
+            np.asarray(expected_phenotype, dtype=np.float64)
+        )
+        phenotype_max_abs = (
+            float(np.max(np.abs(joined_y - requested_y)))
+            if requested_y.shape == joined_y.shape
+            else None
+        )
+        roundtrip_tolerance = 8.0 * np.finfo(np.float64).eps * max(
+            1.0,
+            float(np.max(np.abs(requested_y))) if requested_y.size else 1.0,
+        )
+        if (
+            requested_y.shape != joined_y.shape
+            or not np.all(np.isfinite(requested_y))
+            or phenotype_max_abs is None
+            or phenotype_max_abs > roundtrip_tolerance
+        ):
+            raise ValueError(
+                "production-joined phenotype differs from request simulation "
+                f"(joined={_exact_array_fingerprint(joined_y)['sha256']}, "
+                f"requested={_exact_array_fingerprint(requested_y)['sha256']}, "
+                f"max_abs={phenotype_max_abs})"
+            )
+
+    try:
+        released_kernels, grm_info = build_kernels(
+            dict(context["resolved"]), joined_samples
+        )
+    except SystemExit as error:
+        raise ValueError(f"production BED-derived kernel build failed: {error}") from error
+    except Exception as error:
+        raise ValueError("production BED-derived kernel build failed") from error
+    released_checked, _ = _checked_kernels(released_kernels)
+    if expected_kernels is not None:
+        requested_checked, requested_n = _checked_kernels(expected_kernels)
+        if requested_n != len(joined_ids) or list(requested_checked) != list(
+            released_checked
+        ):
+            raise ValueError("production BED-derived kernel order differs from request")
+        for name in requested_checked:
+            if _kernel_fingerprint(requested_checked[name]) != _kernel_fingerprint(
+                released_checked[name]
+            ):
+                raise ValueError(
+                    f"production BED-derived kernel differs from request: {name}"
+                )
+
+    binding = {
+        "analysis_sample_ids": joined_ids,
+        "analysis_sample_ids_sha256": sha256_payload(joined_ids),
+        "joined_phenotype": _exact_array_fingerprint(joined_y),
+        "requested_phenotype": (
+            _exact_array_fingerprint(requested_y)
+            if requested_y is not None
+            else None
+        ),
+        "phenotype_max_abs_difference": phenotype_max_abs,
+        "truth_hash": expected_truth_hash,
+        "kernel_order": list(released_checked),
+        "kernel_fingerprints": {
+            name: _kernel_fingerprint(value)
+            for name, value in released_checked.items()
+        },
+        "grm_info": _json_safe(grm_info),
+        "kernel_source": "production_build_kernels_from_resolved_bed",
+    }
+    binding["sha256"] = sha256_payload(binding)
+    return binding
+
+
 def parse_fit_metrics(
     out_dir: str | Path,
     trait: str,
@@ -561,6 +698,8 @@ def parse_fit_metrics(
     truth: Mapping[str, Any] | None = None,
     expected_subgenomes: Sequence[str] | None = None,
     expected_sample_ids: Sequence[str] | None = None,
+    expected_phenotype: Sequence[float] | np.ndarray | None = None,
+    expected_kernels: Mapping[str, np.ndarray] | None = None,
     expected_scenario: Scenario | None = None,
     experiment: str | None = None,
 ) -> dict[str, Any]:
@@ -678,24 +817,17 @@ def parse_fit_metrics(
             raise ValueError("expected sample IDs must be strings")
         if analysis_samples != expected_ids:
             raise ValueError("fit analysis sample order differs from the request")
-    phenotype_config = resolved_config.get("phenotype", {})
-    phenotype_path = Path(str(phenotype_config.get("path", ""))).resolve()
-    if not phenotype_path.is_file():
-        raise ValueError("fit phenotype provenance file is missing")
-    delimiter = "," if phenotype_path.suffix.lower() == ".csv" else "\t"
-    with phenotype_path.open(encoding="utf-8", newline="") as handle:
-        phenotype_reader = csv.DictReader(handle, delimiter=delimiter)
-        sample_col = phenotype_config.get("sample_col")
-        if (
-            not isinstance(sample_col, str)
-            or sample_col not in (phenotype_reader.fieldnames or [])
-            or trait not in (phenotype_reader.fieldnames or [])
-        ):
-            raise ValueError("fit phenotype sample/trait columns are invalid")
-        phenotype_rows = list(phenotype_reader)
-    phenotype_samples = [row[sample_col] for row in phenotype_rows]
-    if phenotype_samples != analysis_samples:
-        raise ValueError("fit phenotype sample order differs from analysis samples")
+    released_input_binding = _released_fit_inputs(
+        context,
+        analysis_samples,
+        expected_phenotype=expected_phenotype,
+        expected_kernels=expected_kernels,
+        expected_truth_hash=(
+            str(truth["truth_hash"])
+            if isinstance(truth, Mapping) and isinstance(truth.get("truth_hash"), str)
+            else None
+        ),
+    )
 
     declared_experiment = experiment or (
         str(expected_scenario.parameters.get("experiment"))
@@ -795,6 +927,7 @@ def parse_fit_metrics(
         "analysis_samples": analysis_samples,
         "summary_path": str(summary_path),
         "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+        "released_input_binding": released_input_binding,
         "released_source_manifest": _released_source_manifest(
             out_dir, trait, declared_experiment or "fit"
         ),
@@ -1143,6 +1276,7 @@ def run_scan_replicate(
     trait: str = "simulated_trait",
     expected_subgenomes: Sequence[str] | None = None,
     expected_sample_ids: Sequence[str] | None = None,
+    expected_kernels: Mapping[str, np.ndarray] | None = None,
     expected_scenario: Scenario | None = None,
     loco: bool = False,
     seed: int = 2026,
@@ -1157,6 +1291,7 @@ def run_scan_replicate(
             trait,
             expected_subgenomes=expected_subgenomes,
             expected_sample_ids=expected_sample_ids,
+            expected_kernels=expected_kernels,
             expected_scenario=expected_scenario,
             experiment="loco",
         )
@@ -1445,11 +1580,62 @@ def run_fit_replicate(
     experiment = scenario.parameters.get("experiment")
     if not isinstance(experiment, str):
         experiment = "invalid"
+    coverage_y: np.ndarray | None = None
+    coverage_truth: dict[str, Any] | None = None
+    coverage_request_binding: dict[str, Any] | None = None
+    coverage_setup_error: str | None = None
+    if experiment == "coverage":
+        try:
+            if "allocation" not in scenario.parameters:
+                raise ValueError("coverage scenario is missing its allocation")
+            coverage_y, coverage_truth = simulate_fit_truth(
+                checked,
+                scenario.parameters["allocation"],
+                seed=derive_seed(
+                    design_hash,
+                    "fit",
+                    scenario.scenario_id,
+                    replicate,
+                    scenario.stage,
+                ),
+                total_pve=scenario.parameters.get("total_pve"),
+                dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
+                null_subgenome=scenario.parameters.get("null_subgenome"),
+            )
+            coverage_request_binding = {
+                "sample_ids_sha256": samples["ordered_sample_ids_sha256"],
+                "phenotype": _exact_array_fingerprint(coverage_y),
+                "truth_hash": coverage_truth["truth_hash"],
+                "kernel_order": list(checked),
+                "kernel_fingerprints": fingerprints,
+            }
+            coverage_request_binding["sha256"] = sha256_payload(
+                coverage_request_binding
+            )
+        except Exception as error:
+            coverage_setup_error = f"{type(error).__name__}: {error}"
     released_source = (
         _released_source_manifest(fit_output_dir, trait, experiment)
         if fit_output_dir is not None
         else None
     )
+    released_request_binding: dict[str, Any] | None = None
+    released_binding_error: str | None = None
+    if fit_output_dir is not None:
+        try:
+            released_request_binding = _released_fit_inputs(
+                _released_config_context(fit_output_dir),
+                samples["ordered_sample_ids"],
+                expected_phenotype=coverage_y if experiment == "coverage" else None,
+                expected_kernels=checked,
+                expected_truth_hash=(
+                    coverage_truth["truth_hash"]
+                    if coverage_truth is not None
+                    else None
+                ),
+            )
+        except Exception as error:
+            released_binding_error = f"{type(error).__name__}: {error}"
     scan_context_hash = None
     scan_request_manifest = None
     if scan_comparators is not None:
@@ -1481,6 +1667,10 @@ def run_fit_replicate(
             "replicate": replicate,
             "source": source,
             "released_source_manifest": released_source,
+            "released_request_binding": released_request_binding,
+            "released_binding_error": released_binding_error,
+            "coverage_request_binding": coverage_request_binding,
+            "coverage_setup_error": coverage_setup_error,
             "scan_context_fingerprint": scan_context_hash,
             "scan_request_manifest": scan_request_manifest,
             "trait": trait,
@@ -1516,6 +1706,8 @@ def run_fit_replicate(
         "request_hash": request_hash,
         "result_source": source,
         "released_source_manifest": released_source,
+        "released_request_binding": released_request_binding,
+        "coverage_request_binding": coverage_request_binding,
         "scan_context_fingerprint": scan_context_hash,
         "scan_request_manifest": scan_request_manifest,
         "scan_truth": (
@@ -1531,6 +1723,8 @@ def run_fit_replicate(
     try:
         if comparator_preflight_path is None and comparator_preflight_hash is not None:
             raise ValueError("comparator_preflight_hash requires its frozen TSV")
+        if released_binding_error is not None:
+            raise ValueError(released_binding_error)
         if comparator_preflight_path is not None:
             if comparator_preflight_hash is None:
                 raise ValueError("comparator preflight requires its frozen hash")
@@ -1616,22 +1810,19 @@ def run_fit_replicate(
         elif experiment == "coverage":
             if fit_output_dir is None or scan_comparators is not None:
                 raise ValueError("coverage requires one released fit output")
-            if "allocation" not in scenario.parameters:
-                raise ValueError("coverage scenario is missing its allocation")
-            _, truth = simulate_fit_truth(
-                checked,
-                scenario.parameters["allocation"],
-                seed=seed,
-                total_pve=scenario.parameters.get("total_pve"),
-                dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
-                null_subgenome=scenario.parameters.get("null_subgenome"),
-            )
+            if coverage_setup_error is not None:
+                raise ValueError(coverage_setup_error)
+            if coverage_y is None or coverage_truth is None:
+                raise ValueError("coverage request simulation binding is missing")
+            truth = coverage_truth
             metrics = parse_fit_metrics(
                 fit_output_dir,
                 trait,
                 truth=truth,
                 expected_subgenomes=list(checked),
                 expected_sample_ids=samples["ordered_sample_ids"],
+                expected_phenotype=coverage_y,
+                expected_kernels=checked,
                 expected_scenario=scenario,
                 experiment="coverage",
             )
@@ -1644,6 +1835,7 @@ def run_fit_replicate(
                 trait=trait,
                 expected_subgenomes=list(checked),
                 expected_sample_ids=samples["ordered_sample_ids"],
+                expected_kernels=checked,
                 expected_scenario=scenario,
                 loco=experiment == "loco",
                 seed=seed,
