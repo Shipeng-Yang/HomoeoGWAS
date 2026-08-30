@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
-import json
-import os
-import subprocess
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -103,6 +101,8 @@ def test_child_fixture_expands_all_pair_edges(copies, edges):
 
     assert record["fixture"]["copies"] == copies
     assert record["fixture"]["unique_edges"] == edges
+    assert len(record["family_sha256"]) == 64
+    assert len(record["ranking_sha256"]) == 64
 
 
 def test_child_fixture_rejects_unsupported_copy_counts():
@@ -116,26 +116,19 @@ def test_release_fixture_keeps_three_copy_default():
     assert args.copies == 3
 
 
-def test_child_process_observes_launcher_thread_limits_and_copy_count():
-    environment = os.environ.copy()
-    for name in BENCHMARK.NUMERIC_THREAD_ENV:
-        environment[name] = "1"
-    completed = subprocess.run(
-        [
-            sys.executable, str(SCRIPT), "--child", "--child-jobs", "1",
-            "--n", "48", "--groups", "2", "--responses", "2",
-            "--copies", "4",
-        ],
-        cwd=SCRIPT.parents[1],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=True,
+def test_run_subprocess_observes_real_numeric_threadpools_and_process_tree():
+    record = BENCHMARK._run_subprocess(
+        1, Namespace(n=48, groups=2, responses=2, copies=4),
     )
 
-    record = json.loads(completed.stdout.splitlines()[-1])
     assert record["numeric_thread_env"] == {
         name: "1" for name in BENCHMARK.NUMERIC_THREAD_ENV
     }
+    assert record["runtime_oversubscription_guard_passed"] is True
+    assert record["numeric_threadpool_info"]
+    assert record["numeric_threadpool_max_threads"] <= 1
+    assert record["max_process_threads_by_pid"]
+    assert record["peak_rss_bytes"] > 0
+    assert record["peak_aggregate_rss_bytes"] > 0
     assert record["fixture"]["copies"] == 4
     assert record["fixture"]["unique_edges"] == 12

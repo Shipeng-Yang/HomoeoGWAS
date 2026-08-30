@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from threadpoolctl import threadpool_limits
+from threadpoolctl import threadpool_info, threadpool_limits
 
 from homoeogwas_launcher import NUMERIC_THREAD_ENV
 
@@ -98,6 +98,67 @@ def _array_hash(*arrays: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _json_hash(payload: object) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _ordered_family_identity(family, expanded) -> dict:
+    return {
+        "subgenomes": list(family.subgenomes),
+        "groups": [
+            {"group_id": group_id, "genes": list(genes)}
+            for group_id, genes in zip(
+                family.group_ids, family.genes, strict=True
+            )
+        ],
+        "edges": [
+            {
+                "edge_id": edge.edge_id,
+                "direction": edge.direction,
+                "sub_x": edge.sub_x,
+                "sub_y": edge.sub_y,
+                "gene_x": edge.gene_x,
+                "gene_y": edge.gene_y,
+                "source_group_ids": list(edge.source_group_ids),
+            }
+            for edge in expanded.edges
+        ],
+        "group_edge_indices": [
+            list(indices) for indices in expanded.group_edge_indices
+        ],
+    }
+
+
+def _ordered_ranking_identity(
+    family, expanded, edge_p, group_p, components, responses: int,
+) -> dict:
+    return {
+        "edge_output_rows": [
+            {
+                "row": index,
+                "edge_id": edge.edge_id,
+                "source_group_ids": list(edge.source_group_ids),
+            }
+            for index, edge in enumerate(expanded.edges)
+        ],
+        "group_output_rows": [
+            {
+                "row": index,
+                "group_id": group_id,
+                "edge_indices": list(expanded.group_edge_indices[index]),
+            }
+            for index, group_id in enumerate(family.group_ids)
+        ],
+        "response_output_columns": list(range(responses)),
+        "edge_p_shape": list(edge_p.shape),
+        "group_p_shape": list(group_p.shape),
+        "components_shape": list(components.shape),
+    }
+
+
 def _cpu_seconds() -> float:
     own = resource.getrusage(resource.RUSAGE_SELF)
     children = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -108,7 +169,10 @@ def _child_run(
         jobs: int, *, n: int, groups: int, responses: int,
         copies: int = 3, marker: Path | None = None) -> dict:
     from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
-    from homoeogwas.interact import SubgenomeData
+    from homoeogwas.interact import (
+        SubgenomeData,
+        _validate_canonical_parallel_runtime,
+    )
     from homoeogwas.omnib_family import (
         _prepare_checkpoint_omnib,
         score_omnib_null_indices,
@@ -144,6 +208,9 @@ def _child_run(
     assert len(expanded_fixture.edges) == (
         groups * copies * (copies - 1) // 2
     )
+    family_sha256 = _json_hash(_ordered_family_identity(
+        family, expanded_fixture
+    ))
     phenotype = rng.normal(size=n)
     scores, expanded = _prepare_checkpoint_omnib(
         subdata,
@@ -162,9 +229,31 @@ def _child_run(
         covariates=None,
     )
 
+    if marker is not None:
+        marker.write_text("score_ready\n")
+        go_marker = marker.with_suffix(".go")
+        deadline = time.monotonic() + 30.0
+        while not go_marker.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("benchmark parent did not release score phase")
+            time.sleep(0.005)
+
+    _validate_canonical_parallel_runtime(n_jobs=jobs)
+    runtime_oversubscription_guard_passed = True
     cpu_start = _cpu_seconds()
     wall_start = time.perf_counter()
     with threadpool_limits(limits=1):
+        numeric_threadpool_info = json.loads(json.dumps(
+            threadpool_info(), default=str,
+        ))
+        numeric_pools = [
+            pool for pool in numeric_threadpool_info
+            if pool.get("user_api") in {"blas", "openmp"}
+        ]
+        numeric_threadpool_max_threads = max(
+            (int(pool.get("num_threads") or 0) for pool in numeric_pools),
+            default=0,
+        )
         if marker is not None:
             marker.write_text("score_started\n")
         edge_p, group_p, components = score_omnib_null_indices(
@@ -181,6 +270,9 @@ def _child_run(
     wall = time.perf_counter() - wall_start
     cpu = _cpu_seconds() - cpu_start
     execution = dict(scores.parallel_execution)
+    ranking_sha256 = _json_hash(_ordered_ranking_identity(
+        family, expanded, edge_p, group_p, components, responses
+    ))
     return {
         "jobs": jobs,
         "effective_jobs": int(execution["effective_jobs"]),
@@ -190,9 +282,16 @@ def _child_run(
         "cpu_seconds": cpu,
         "cpu_percent": 100.0 * cpu / wall,
         "result_sha256": _array_hash(edge_p, group_p, components),
+        "family_sha256": family_sha256,
+        "ranking_sha256": ranking_sha256,
         "numeric_thread_env": {
             name: os.environ.get(name) for name in NUMERIC_THREAD_ENV
         },
+        "numeric_threadpool_info": numeric_threadpool_info,
+        "numeric_threadpool_max_threads": numeric_threadpool_max_threads,
+        "runtime_oversubscription_guard_passed": (
+            runtime_oversubscription_guard_passed
+        ),
         "fixture": {
             "seed": 20260828,
             "n": n,
@@ -288,12 +387,17 @@ def _run_subprocess(jobs: int, args) -> dict:
         peak_rss = max(peak_rss, sum(value[0] for value in memory))
         peak_pss = max(peak_pss, sum(value[1] for value in memory))
         phase = marker.read_text().strip() if marker.exists() else ""
-        if phase == "score_started" and observed_start is None:
+        if phase == "score_ready" and observed_start is None:
             observed_start = time.perf_counter()
             previous_ticks = {
                 pid: ticks for pid in process_ids
                 if (ticks := _process_cpu_ticks(pid)) is not None
             }
+            for pid in process_ids:
+                thread_count = _process_thread_count(pid)
+                if thread_count is not None:
+                    max_threads_by_pid[pid] = thread_count
+            marker.with_suffix(".go").write_text("go\n")
         if observed_start is not None and observed_wall is None:
             for pid in process_ids:
                 thread_count = _process_thread_count(pid)
@@ -314,6 +418,13 @@ def _run_subprocess(jobs: int, args) -> dict:
                 observed_wall = time.perf_counter() - observed_start
         time.sleep(0.05)
     stdout, stderr = process.communicate()
+    final_phase = marker.read_text().strip() if marker.exists() else ""
+    if (
+        observed_start is not None
+        and observed_wall is None
+        and final_phase == "score_finished"
+    ):
+        observed_wall = time.perf_counter() - observed_start
     temporary.cleanup()
     if process.returncode != 0:
         raise RuntimeError(
@@ -333,7 +444,7 @@ def _run_subprocess(jobs: int, args) -> dict:
         str(pid): 100.0 * ticks / os.sysconf("SC_CLK_TCK") / observed_wall
         for pid, ticks in sorted(sampled_cpu_ticks_by_pid.items())
     }
-    record["max_threads_by_pid"] = {
+    record["max_process_threads_by_pid"] = {
         str(pid): count for pid, count in sorted(max_threads_by_pid.items())
     }
     record["peak_aggregate_rss_bytes"] = peak_rss
