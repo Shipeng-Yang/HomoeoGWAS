@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import time
@@ -79,6 +80,14 @@ def _bed_template(fixture: Mapping[str, Any], out_dir: Path) -> str:
     prefixes = fixture.get("bed_prefixes")
     if not isinstance(prefixes, Mapping) or set(prefixes) != set(subgenomes):
         raise ValueError("bed_prefixes must contain exactly the declared subgenomes")
+    missing = [
+        f"{prefixes[subgenome]}{extension}"
+        for subgenome in subgenomes
+        for extension in (".bed", ".bim", ".fam")
+        if not Path(f"{prefixes[subgenome]}{extension}").is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"missing PLINK component: {missing[0]}")
     parts = [Path(str(prefixes[subgenome])).parts for subgenome in subgenomes]
     if len({len(value) for value in parts}) == 1:
         differing = [
@@ -92,6 +101,23 @@ def _bed_template(fixture: Mapping[str, Any], out_dir: Path) -> str:
                 template_parts = list(parts[0])
                 template_parts[index] = "{subgenome}"
                 return str(Path(*template_parts))
+    for subgenome in subgenomes:
+        destination_dir = out_dir / "geno" / subgenome
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for extension in (".bed", ".bim", ".fam"):
+            source = Path(f"{prefixes[subgenome]}{extension}").resolve()
+            destination = destination_dir / f"all{extension}"
+            if destination.is_symlink():
+                if destination.resolve(strict=False) == source:
+                    continue
+                raise FileExistsError(
+                    f"managed PLINK symlink points elsewhere: {destination}"
+                )
+            if destination.exists():
+                raise FileExistsError(
+                    f"managed PLINK path already exists: {destination}"
+                )
+            destination.symlink_to(source)
     return str(out_dir / "geno" / "{subgenome}" / "all")
 
 
@@ -150,7 +176,11 @@ def build_fit_config(
         "outputs": {"out_dir": str(output), "prefix": str(fixture["trait"])},
     }
     from homoeogwas.cli import validate_config
+    from homoeogwas.workflow import write_config
 
+    config_path = output / "configs" / "fit.generated.yaml"
+    if Path(write_config(cfg, config_path)) != config_path:
+        raise RuntimeError("fit config was not written as YAML")
     validate_config(cfg)
     return cfg
 
@@ -294,26 +324,67 @@ def simulate_fit_truth(
     )
     residual_target = round(1.0 - genetic_total, 15)
     rng = np.random.default_rng(int(seed))
-    components = {
+    relative_components = {
         name: _scaled_component(rng, kernel_factor(checked[name]), genetic_targets[name])
         for name in names
     }
-    components["e"] = _scaled_component(rng, np.eye(n), residual_target)
-    phenotype = np.sum(np.vstack(list(components.values())), axis=0)
-    phenotype -= phenotype.mean()
+    genetic_relative = np.sum(
+        np.vstack(list(relative_components.values())), axis=0
+    )
+    relative_genetic_variance = float(np.var(genetic_relative, ddof=1))
+    if genetic_total > 0.0:
+        if relative_genetic_variance <= 0.0:
+            raise ValueError("degenerate total genetic component draw")
+        common_genetic_scale = math.sqrt(
+            genetic_total / relative_genetic_variance
+        )
+    else:
+        common_genetic_scale = 0.0
+    components = {
+        name: value * common_genetic_scale
+        for name, value in relative_components.items()
+    }
+    genetic = np.sum(np.vstack(list(components.values())), axis=0)
+
+    residual = rng.standard_normal(n)
+    residual -= residual.mean()
+    genetic_ss = float(genetic @ genetic)
+    if genetic_ss > 0.0:
+        residual -= genetic * float(genetic @ residual) / genetic_ss
+    residual -= residual.mean()
+    residual_variance = float(np.var(residual, ddof=1))
+    if residual_target > 0.0:
+        if residual_variance <= 0.0:
+            raise ValueError("degenerate residual draw")
+        residual *= math.sqrt(residual_target / residual_variance)
+    else:
+        residual = np.zeros(n, dtype=np.float64)
+    components["e"] = residual
+    phenotype = genetic + residual
     total_variance = float(np.var(phenotype, ddof=1))
-    if total_variance <= 0.0:
-        raise ValueError("degenerate phenotype draw")
-    phenotype /= np.sqrt(total_variance)
+    if not np.isclose(total_variance, 1.0, rtol=1e-10, atol=1e-12):
+        raise RuntimeError("finite-sample phenotype variance is not one")
 
     target = {**genetic_targets, "e": residual_target}
-    realized_variance = {
+    component_effect_variance = {
         name: float(np.var(value, ddof=1)) for name, value in components.items()
     }
-    realized_pve = {
+    marginal_effect_pve = {
         name: float(value / total_variance)
-        for name, value in realized_variance.items()
+        for name, value in component_effect_variance.items()
     }
+    cross_covariance = {
+        left: {
+            right: float(
+                np.dot(components[left], components[right]) / (n - 1)
+            )
+            for right in components
+        }
+        for left in components
+    }
+    observed_total_genetic_pve = float(
+        np.var(genetic, ddof=1) / total_variance
+    )
     kernel_fingerprints = {
         name: _kernel_fingerprint(value) for name, value in checked.items()
     }
@@ -335,10 +406,16 @@ def simulate_fit_truth(
         "kernel_fingerprints": kernel_fingerprints,
         "seed": int(seed),
         "target_pve": target,
-        "target_component_variance": dict(target),
-        "realized_component_variance": realized_variance,
-        "realized_pve": realized_pve,
-        "total_variance_prescale": total_variance,
+        "target_allocation": dict(genetic_targets),
+        "component_effect_sample_variance": component_effect_variance,
+        "marginal_component_effect_pve": marginal_effect_pve,
+        "component_cross_covariance": cross_covariance,
+        "common_genetic_scale": float(common_genetic_scale),
+        "total_genetic_effect_sample_variance": float(
+            np.var(genetic, ddof=1)
+        ),
+        "observed_total_genetic_pve": observed_total_genetic_pve,
+        "observed_phenotype_sample_variance": total_variance,
     }
     truth["truth_hash"] = sha256_payload(truth)
     return phenotype, truth
@@ -383,7 +460,7 @@ def fit_pve_replicate(
 def _true_pve(truth: Mapping[str, Any] | None) -> dict[str, float] | None:
     if truth is None:
         return None
-    source = truth.get("realized_pve", truth)
+    source = truth.get("target_pve", truth)
     if not isinstance(source, Mapping):
         raise ValueError("truth must be a PVE mapping or contain realized_pve")
     result = {str(name): float(value) for name, value in source.items()}
@@ -412,10 +489,16 @@ def parse_fit_metrics(
     trait: str,
     *,
     truth: Mapping[str, Any] | None = None,
+    expected_subgenomes: Sequence[str] | None = None,
+    expected_sample_ids: Sequence[str] | None = None,
+    expected_scenario: Scenario | None = None,
+    experiment: str | None = None,
 ) -> dict[str, Any]:
     """Parse only released fit JSON/TSV outputs into replicate metrics."""
 
-    output = Path(out_dir)
+    import yaml
+
+    output = Path(out_dir).resolve()
     summary_path = output / f"summary_{trait}.json"
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -423,6 +506,95 @@ def parse_fit_metrics(
         raise ValueError(f"cannot read fit summary: {summary_path}") from error
     if not isinstance(summary, Mapping) or not isinstance(summary.get("reml"), Mapping):
         raise ValueError("fit summary does not contain a REML result")
+    if summary.get("tool") != "homoeogwas" or summary.get("command") != "fit":
+        raise ValueError("fit summary tool/command provenance is invalid")
+    if summary.get("trait") != trait:
+        raise ValueError("fit summary trait does not match the request")
+    subgenomes = summary.get("subgenomes")
+    if (
+        not isinstance(subgenomes, list)
+        or not subgenomes
+        or any(not isinstance(value, str) or not value for value in subgenomes)
+        or len(set(subgenomes)) != len(subgenomes)
+    ):
+        raise ValueError("fit summary subgenomes are invalid")
+    if expected_subgenomes is not None and subgenomes != list(expected_subgenomes):
+        raise ValueError("fit summary subgenome order differs from the request")
+    if summary.get("kernel_names") != subgenomes:
+        raise ValueError("fit summary kernel order differs from subgenomes")
+
+    generated_config_path = output / "configs" / "fit.generated.yaml"
+    resolved_config_path = output / "resolved_config.yaml"
+    analysis_samples_path = output / "analysis_samples.tsv"
+    reported_config = Path(str(summary.get("config", ""))).resolve()
+    outputs = summary.get("outputs")
+    if not isinstance(outputs, Mapping):
+        raise ValueError("fit summary outputs provenance is missing")
+    if reported_config != generated_config_path or not generated_config_path.is_file():
+        raise ValueError("fit summary generated config path is invalid")
+    if Path(str(outputs.get("out_dir", ""))).resolve() != output:
+        raise ValueError("fit summary output directory is invalid")
+    if Path(str(outputs.get("resolved_config", ""))).resolve() != resolved_config_path:
+        raise ValueError("fit summary resolved config path is invalid")
+    if Path(str(outputs.get("analysis_samples", ""))).resolve() != analysis_samples_path:
+        raise ValueError("fit summary analysis sample path is invalid")
+    if not resolved_config_path.is_file() or not analysis_samples_path.is_file():
+        raise ValueError("fit summary required provenance files are missing")
+    try:
+        resolved_config = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError("fit resolved config is unreadable") from error
+    if not isinstance(resolved_config, Mapping):
+        raise ValueError("fit resolved config is not a mapping")
+    if (
+        resolved_config.get("panel", {}).get("subgenomes") != subgenomes
+        or resolved_config.get("phenotype", {}).get("trait") != trait
+        or Path(str(resolved_config.get("outputs", {}).get("out_dir", ""))).resolve()
+        != output
+    ):
+        raise ValueError("fit resolved config does not match summary provenance")
+
+    with analysis_samples_path.open(encoding="utf-8", newline="") as handle:
+        sample_reader = csv.DictReader(handle, delimiter="\t")
+        if sample_reader.fieldnames != ["sample"]:
+            raise ValueError("fit analysis sample schema is invalid")
+        analysis_samples = [row["sample"] for row in sample_reader]
+    if (
+        any(not value for value in analysis_samples)
+        or len(set(analysis_samples)) != len(analysis_samples)
+        or summary.get("n_analysis") != len(analysis_samples)
+    ):
+        raise ValueError("fit analysis sample order/count is invalid")
+    if expected_sample_ids is not None:
+        expected_ids = list(expected_sample_ids)
+        if any(not isinstance(value, str) for value in expected_ids):
+            raise ValueError("expected sample IDs must be strings")
+        if analysis_samples != expected_ids:
+            raise ValueError("fit analysis sample order differs from the request")
+
+    declared_experiment = experiment or (
+        str(expected_scenario.parameters.get("experiment"))
+        if expected_scenario is not None
+        else None
+    )
+    if expected_scenario is not None:
+        if expected_scenario.track != "fit":
+            raise ValueError("expected scenario is not Track A")
+        if declared_experiment != expected_scenario.parameters.get("experiment"):
+            raise ValueError("fit experiment differs from the scenario")
+    if declared_experiment not in {None, "coverage", "scan", "loco"}:
+        raise ValueError("released fit parsing requires coverage, scan, or loco")
+    loco_enabled = bool(summary.get("scan", {}).get("loco_enabled", False))
+    config_loco = bool(
+        resolved_config.get("scan", {}).get("loco", {}).get("enabled", False)
+    )
+    if loco_enabled != config_loco:
+        raise ValueError("fit summary and config LOCO state differ")
+    if declared_experiment == "loco" and not loco_enabled:
+        raise ValueError("released LOCO output is not a production LOCO scan")
+    if declared_experiment == "scan" and loco_enabled:
+        raise ValueError("primary scan output must not be LOCO")
+
     reml = summary["reml"]
     if not isinstance(reml.get("pve"), Mapping):
         raise ValueError("fit summary REML result does not contain PVE")
@@ -438,7 +610,43 @@ def parse_fit_metrics(
         if true is not None
         else None
     )
-    optimizer_status = bool(reml.get("optimizer_status", False))
+    if type(reml.get("optimizer_status")) is not bool:
+        raise ValueError("fit optimizer status evidence must be boolean")
+    optimizer_status = reml["optimizer_status"]
+    acceptance = summary.get("acceptance")
+    if type(summary.get("acceptance_all_passed")) is not bool or not isinstance(
+        acceptance, list
+    ) or any(
+        not isinstance(item, Mapping)
+        or not isinstance(item.get("check"), str)
+        or not isinstance(item.get("passed"), bool)
+        for item in acceptance
+    ):
+        raise ValueError("fit acceptance evidence is invalid")
+    failed_acceptance = [
+        str(item["check"]) for item in acceptance if not item["passed"]
+    ]
+    acceptance_ok = summary["acceptance_all_passed"] and not (
+        failed_acceptance
+    )
+    if not acceptance_ok:
+        failure_type = "AcceptanceFailure"
+        failure_message = (
+            f"failed acceptance checks: {failed_acceptance}"
+            if failed_acceptance
+            else "acceptance_all_passed is false"
+        )
+    elif nonfinite:
+        failure_type = "NonFinitePVE"
+        failure_message = f"non-finite PVE components: {nonfinite}"
+    elif not optimizer_status:
+        failure_type = "OptimizerFailure"
+        failure_message = str(
+            reml.get("optimizer_message", "optimizer did not converge")
+        )
+    else:
+        failure_type = None
+        failure_message = None
     metrics: dict[str, Any] = {
         "true_pve": true,
         "estimated_pve": estimated,
@@ -455,23 +663,17 @@ def parse_fit_metrics(
         "converged": optimizer_status,
         "n_starts": int(reml.get("n_starts", 0)),
         "runtime_seconds": float(summary.get("runtime_sec", 0.0)),
-        "acceptance_all_passed": bool(summary.get("acceptance_all_passed", False)),
-        "acceptance": list(summary.get("acceptance", [])),
+        "acceptance_all_passed": acceptance_ok,
+        "acceptance": list(acceptance),
+        "failed_acceptance_checks": failed_acceptance,
         "nonfinite_pve_components": nonfinite,
+        "analysis_samples": analysis_samples,
         "summary_path": str(summary_path),
         "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
         "failure": {
-            "failed": not optimizer_status or bool(nonfinite),
-            "error_type": (
-                "NonFinitePVE" if nonfinite else "OptimizerFailure" if not optimizer_status else None
-            ),
-            "message": (
-                f"non-finite PVE components: {nonfinite}"
-                if nonfinite
-                else str(reml.get("optimizer_message", "optimizer did not converge"))
-                if not optimizer_status
-                else None
-            ),
+            "failed": failure_type is not None,
+            "error_type": failure_type,
+            "message": failure_message,
         },
     }
 
@@ -480,36 +682,138 @@ def parse_fit_metrics(
     if uncertainty is not None:
         if not isinstance(uncertainty, Mapping):
             raise ValueError("reml.pve_uncertainty must be a mapping")
-        if not bootstrap_path.exists():
-            raise ValueError(f"PVE uncertainty is missing bootstrap TSV: {bootstrap_path}")
+        reported_bootstrap = outputs.get("pve_bootstrap_samples")
+        if (
+            not bootstrap_path.is_file()
+            or Path(str(reported_bootstrap or "")).resolve() != bootstrap_path
+        ):
+            raise ValueError("bootstrap TSV provenance is missing or invalid")
         with bootstrap_path.open(encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle, delimiter="\t"))
+            reader = csv.DictReader(handle, delimiter="\t")
+            rows = list(reader)
         components = uncertainty.get("components")
-        if not isinstance(components, Mapping):
-            raise ValueError("PVE uncertainty does not contain component intervals")
-        intervals = {
-            str(name): {
-                "ci_low": float(item["ci_low"]),
-                "ci_high": float(item["ci_high"]),
+        component_names = list(estimated)
+        if not isinstance(components, Mapping) or set(components) != set(component_names):
+            raise ValueError("bootstrap component intervals do not match REML PVE")
+        expected_columns = ["replicate", *component_names] + [
+            f"boundary_{name}" for name in component_names
+        ]
+        if reader.fieldnames != expected_columns:
+            raise ValueError("bootstrap TSV schema is invalid")
+        try:
+            requested = int(uncertainty["B_requested"])
+            succeeded = int(uncertainty["B_success"])
+            failed = int(uncertainty["B_failed"])
+            level = float(uncertainty["level"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("bootstrap count/level metadata is invalid") from error
+        config_bootstrap = resolved_config.get("reml", {}).get("pve_bootstrap")
+        if not isinstance(config_bootstrap, Mapping) or not config_bootstrap.get(
+            "enabled", True
+        ):
+            raise ValueError("bootstrap was not enabled in the resolved config")
+        if (
+            requested < 1
+            or succeeded < 0
+            or failed < 0
+            or succeeded + failed != requested
+            or int(config_bootstrap.get("B", -1)) != requested
+            or not np.isclose(float(config_bootstrap.get("level", -1)), level)
+            or len(rows) != succeeded
+        ):
+            raise ValueError("bootstrap requested/success/failure counts are inconsistent")
+        if expected_scenario is not None:
+            if expected_scenario.stage == "formal" and requested != 200:
+                raise ValueError("bootstrap formal coverage requires B=200")
+            if (
+                expected_scenario.stage == "pilot"
+                and expected_scenario.bootstrap_B > 0
+                and requested != expected_scenario.bootstrap_B
+            ):
+                raise ValueError("bootstrap pilot B differs from the scenario")
+        replicate_ids: list[int] = []
+        sample_values: dict[str, list[float]] = {
+            name: [] for name in component_names
+        }
+        for row in rows:
+            try:
+                replicate_id = int(row["replicate"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("bootstrap replicate IDs are invalid") from error
+            replicate_ids.append(replicate_id)
+            for name in component_names:
+                try:
+                    value = float(row[name])
+                except (TypeError, ValueError) as error:
+                    raise ValueError("bootstrap PVE value is invalid") from error
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError("bootstrap PVE values must be finite in [0,1]")
+                sample_values[name].append(value)
+                if row[f"boundary_{name}"] not in {"True", "False"}:
+                    raise ValueError("bootstrap boundary values must be boolean")
+        if replicate_ids != list(range(succeeded)):
+            raise ValueError("bootstrap replicate IDs must be unique and consecutive")
+        intervals: dict[str, dict[str, float]] = {}
+        for name in component_names:
+            item = components[name]
+            if not isinstance(item, Mapping):
+                raise ValueError("bootstrap component interval is invalid")
+            try:
+                estimate = float(item["estimate"])
+                low = float(item["ci_low"])
+                high = float(item["ci_high"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("bootstrap component interval is invalid") from error
+            if not all(math.isfinite(value) for value in (estimate, low, high)) or not (
+                0.0 <= low <= estimate <= high <= 1.0
+            ):
+                raise ValueError("bootstrap interval must bracket its finite estimate")
+            if estimated[name] is None or not np.isclose(estimate, estimated[name]):
+                raise ValueError("bootstrap interval estimate differs from REML PVE")
+            intervals[name] = {
+                "estimate": estimate,
+                "ci_low": low,
+                "ci_high": high,
             }
-            for name, item in components.items()
+        genetic_names = [name for name in component_names if name != "e"]
+        total_samples = np.sum(
+            np.asarray([sample_values[name] for name in genetic_names], dtype=float),
+            axis=0,
+        )
+        alpha = 1.0 - level
+        total_estimate = float(
+            sum(float(estimated[name]) for name in genetic_names)
+        )
+        total_low = float(np.quantile(total_samples, alpha / 2.0))
+        total_high = float(np.quantile(total_samples, 1.0 - alpha / 2.0))
+        if not 0.0 <= total_low <= total_estimate <= total_high <= 1.0:
+            raise ValueError("bootstrap total-genetic interval is invalid")
+        intervals["total_genetic"] = {
+            "estimate": total_estimate,
+            "ci_low": total_low,
+            "ci_high": total_high,
         }
         coverage = (
             {
                 name: bool(
                     intervals[name]["ci_low"] <= true[name] <= intervals[name]["ci_high"]
                 )
-                for name in intervals
+                for name in component_names
             }
             if true is not None
             else None
         )
+        if coverage is not None:
+            target_total = float(sum(true[name] for name in genetic_names))
+            coverage["total_genetic"] = bool(
+                total_low <= target_total <= total_high
+            )
         metrics["pve_bootstrap"] = {
             "method": uncertainty.get("method"),
-            "level": float(uncertainty.get("level", 0.95)),
-            "B_requested": int(uncertainty.get("B_requested", 0)),
-            "B_success": int(uncertainty.get("B_success", len(rows))),
-            "B_failed": int(uncertainty.get("B_failed", 0)),
+            "level": level,
+            "B_requested": requested,
+            "B_success": succeeded,
+            "B_failed": failed,
             "intervals": intervals,
             "coverage": coverage,
             "rows": len(rows),
@@ -517,6 +821,8 @@ def parse_fit_metrics(
             "path": str(bootstrap_path),
             "sha256": hashlib.sha256(bootstrap_path.read_bytes()).hexdigest(),
         }
+    elif declared_experiment == "coverage":
+        raise ValueError("coverage released output is missing bootstrap evidence")
     elif bootstrap_path.exists():
         raise ValueError("bootstrap TSV exists without summary PVE uncertainty")
     else:
@@ -563,6 +869,324 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _released_source_manifest(
+    out_dir: str | Path,
+    trait: str,
+    experiment: str,
+) -> dict[str, Any]:
+    """Fingerprint every released artifact that may affect a resumed result."""
+
+    output = Path(out_dir).resolve()
+    paths = {
+        "summary": output / f"summary_{trait}.json",
+        "generated_config": output / "configs" / "fit.generated.yaml",
+        "resolved_config": output / "resolved_config.yaml",
+        "analysis_samples": output / "analysis_samples.tsv",
+    }
+    if experiment == "coverage":
+        paths["bootstrap"] = output / f"pve_bootstrap_{trait}.tsv"
+    if experiment in {"scan", "loco"}:
+        paths["sumstats"] = output / f"sumstats_{trait}.tsv"
+        paths["lambda_gc"] = output / f"lambda_gc_{trait}.tsv"
+    files: dict[str, dict[str, Any]] = {}
+    for name, path in paths.items():
+        exists = path.is_file()
+        files[name] = {
+            "path": str(path),
+            "exists": exists,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if exists else None,
+        }
+    manifest = {
+        "output_dir": str(output),
+        "experiment": experiment,
+        "files": files,
+    }
+    manifest["sha256"] = sha256_payload(manifest)
+    return manifest
+
+
+def _parse_released_scan_evidence(
+    out_dir: str | Path,
+    trait: str,
+    subgenomes: Sequence[str],
+) -> dict[str, Any]:
+    output = Path(out_dir).resolve()
+    summary_path = output / f"summary_{trait}.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    outputs = summary.get("outputs")
+    scan_summary = summary.get("scan")
+    if not isinstance(outputs, Mapping) or not isinstance(scan_summary, Mapping):
+        raise ValueError("released scan summary evidence is missing")
+    sumstats_path = output / f"sumstats_{trait}.tsv"
+    lambda_path = output / f"lambda_gc_{trait}.tsv"
+    reported_sumstats = outputs.get("sumstats")
+    if (
+        not isinstance(reported_sumstats, list)
+        or len(reported_sumstats) != 1
+        or Path(str(reported_sumstats[0])).resolve() != sumstats_path
+        or Path(str(outputs.get("lambda_gc_tsv", ""))).resolve() != lambda_path
+        or not sumstats_path.is_file()
+        or not lambda_path.is_file()
+    ):
+        raise ValueError("released scan output paths are missing or stale")
+    with sumstats_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"snp_id", "subgenome", "chrom", "pos", "p"}
+        if not required <= set(reader.fieldnames or []):
+            raise ValueError("released scan sumstats schema is invalid")
+        rows = list(reader)
+    if not rows or int(scan_summary.get("n_markers_kept", -1)) != len(rows):
+        raise ValueError("released scan marker count is empty or inconsistent")
+    pvalues: dict[str, list[float]] = {name: [] for name in subgenomes}
+    variant_ids: dict[str, list[str]] = {name: [] for name in subgenomes}
+    seen: set[str] = set()
+    for row in rows:
+        name = row["subgenome"]
+        marker = row["snp_id"]
+        if name not in pvalues or not marker or marker in seen:
+            raise ValueError("released scan variant family is invalid")
+        try:
+            pvalue = float(row["p"])
+            int(row["pos"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("released scan sumstats values are invalid") from error
+        if math.isinf(pvalue) or (math.isfinite(pvalue) and not 0.0 <= pvalue <= 1.0):
+            raise ValueError("released scan p-values must be in [0,1] or NaN")
+        seen.add(marker)
+        variant_ids[name].append(marker)
+        pvalues[name].append(pvalue)
+    fwer = experiment_wide_scan_fwer(pvalues, variant_ids=variant_ids)
+    with lambda_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames != ["scope", "level", "n_markers", "lambda_gc"]:
+            raise ValueError("released scan lambda-GC schema is invalid")
+        lambda_rows = list(reader)
+    if not lambda_rows:
+        raise ValueError("released scan lambda-GC evidence is empty")
+    lambda_gc: list[dict[str, Any]] = []
+    for row in lambda_rows:
+        try:
+            value = float(row["lambda_gc"])
+            n_markers = int(row["n_markers"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("released scan lambda-GC value is invalid") from error
+        if not math.isfinite(value) or value < 0.0 or n_markers < 0:
+            raise ValueError("released scan lambda-GC value must be finite")
+        lambda_gc.append({**row, "n_markers": n_markers, "lambda_gc": value})
+    all_rows = [row for row in lambda_gc if row["scope"] == "all"]
+    if len(all_rows) != 1 or all_rows[0]["n_markers"] != len(rows):
+        raise ValueError("released scan all-marker lambda-GC count is inconsistent")
+    return {
+        "fwer": fwer,
+        "lambda_gc": lambda_gc,
+        "sumstats_path": str(sumstats_path),
+        "sumstats_sha256": hashlib.sha256(sumstats_path.read_bytes()).hexdigest(),
+        "lambda_gc_path": str(lambda_path),
+        "lambda_gc_sha256": hashlib.sha256(lambda_path.read_bytes()).hexdigest(),
+    }
+
+
+def run_scan_replicate(
+    comparators: Mapping[str, Any] | None = None,
+    *,
+    released_output_dir: str | Path | None = None,
+    trait: str = "simulated_trait",
+    expected_subgenomes: Sequence[str] | None = None,
+    expected_sample_ids: Sequence[str] | None = None,
+    expected_scenario: Scenario | None = None,
+    loco: bool = False,
+    seed: int = 2026,
+) -> dict[str, Any]:
+    """Run matched primary scans, or strictly parse a released LOCO arm."""
+
+    if loco:
+        if comparators is not None or released_output_dir is None:
+            raise ValueError("LOCO requires a strictly bound released production output")
+        metrics = parse_fit_metrics(
+            released_output_dir,
+            trait,
+            expected_subgenomes=expected_subgenomes,
+            expected_sample_ids=expected_sample_ids,
+            expected_scenario=expected_scenario,
+            experiment="loco",
+        )
+        evidence = _parse_released_scan_evidence(
+            released_output_dir,
+            trait,
+            list(expected_subgenomes or []),
+        )
+        metrics["scan_arm"] = "loco_sensitivity"
+        metrics["separate_sensitivity_arm"] = True
+        metrics["comparators"] = {"canonical_multi_kernel": evidence}
+        if evidence["fwer"]["failure"]["failed"]:
+            metrics["failure"] = dict(evidence["fwer"]["failure"])
+        return metrics
+    if released_output_dir is not None:
+        raise ValueError("primary scan requires matched in-memory comparator inputs")
+    if comparators is None:
+        raise ValueError("primary scan comparator inputs are required")
+    required = {
+        "context_fingerprint",
+        "context",
+        "sample_ids",
+        "phenotype",
+        "covariates",
+        "standardized_variants",
+        "canonical_multi_kernel",
+        "pooled_trace_sum",
+        "independent_subgenome",
+    }
+    if not required <= set(comparators):
+        raise ValueError("primary scan comparator context is incomplete")
+    context_record = comparators["context"]
+    if not isinstance(context_record, Mapping):
+        raise ValueError("primary scan context record is invalid")
+    sample_ids = np.asarray(comparators["sample_ids"])
+    y = np.asarray(comparators["phenotype"], dtype=float)
+    X = np.asarray(comparators["covariates"], dtype=float)
+    variants = comparators["standardized_variants"]
+    variant_ids = context_record.get("variant_ids")
+    if not isinstance(variants, Mapping) or not isinstance(variant_ids, Mapping):
+        raise ValueError("primary scan variants are invalid")
+    if expected_subgenomes is not None and list(variant_ids) != list(
+        expected_subgenomes
+    ):
+        raise ValueError("primary scan subgenome order differs from the request")
+    if expected_sample_ids is not None and sample_ids.tolist() != list(
+        expected_sample_ids
+    ):
+        raise ValueError("primary scan sample order differs from the request")
+    if expected_scenario is not None and expected_scenario.parameters.get(
+        "experiment"
+    ) != "scan":
+        raise ValueError("primary scan scenario does not declare scan")
+    rebuilt = build_scan_comparators(
+        comparators["canonical_multi_kernel"],
+        sample_ids=sample_ids,
+        variant_ids=variant_ids,
+        standardized_variants=variants,
+        phenotype=y,
+        covariates=X,
+        qc_declaration=context_record.get("qc_declaration"),
+    )
+    if rebuilt["context_fingerprint"] != comparators["context_fingerprint"]:
+        raise ValueError("primary scan comparator context fingerprint differs")
+
+    from homoeogwas.io import GenoChunk
+    from homoeogwas.lmm import fit_multi_reml
+    from homoeogwas.scan import build_scan_context, scan_snps
+
+    def scan_with_fit(
+        kernel_set: Mapping[str, np.ndarray],
+        blocks: Sequence[str],
+        method_seed: int,
+    ) -> tuple[dict[str, list[float]], dict[str, Any]]:
+        fitted = fit_multi_reml(
+            y,
+            X,
+            dict(kernel_set),
+            n_starts=10,
+            random_state=int(method_seed % (2**32)),
+        )
+        scan_context = build_scan_context(
+            y,
+            X,
+            dict(kernel_set),
+            dict(fitted.sigma2),
+            sample_ids=sample_ids,
+        )
+        pvalues: dict[str, list[float]] = {}
+        for name in blocks:
+            ids = list(variant_ids[name])
+            geno = GenoChunk(
+                samples=np.asarray(sample_ids, dtype=object),
+                variant_ids=np.asarray(ids, dtype=object),
+                chrom=np.asarray([name] * len(ids), dtype=object),
+                pos=np.arange(1, len(ids) + 1, dtype=np.int64),
+                dosage=np.asarray(variants[name], dtype=np.float32),
+            )
+            scanned = scan_snps(
+                scan_context,
+                geno,
+                backend="cpu",
+                maf_min=float("-inf"),
+                call_rate_min=0.0,
+            )
+            by_id = {
+                str(marker): float(pvalue)
+                for marker, pvalue in zip(scanned.snp_id, scanned.p, strict=True)
+            }
+            pvalues[name] = [by_id.get(marker, float("nan")) for marker in ids]
+        fit_record = {
+            "estimated_pve": {
+                str(name): float(value) for name, value in fitted.pve.items()
+            },
+            "estimated_sigma2": {
+                str(name): float(value) for name, value in fitted.sigma2.items()
+            },
+            "optimizer_status": bool(fitted.optimizer_status),
+            "optimizer_message": str(fitted.optimizer_message),
+            "n_starts": int(fitted.n_starts),
+        }
+        return pvalues, fit_record
+
+    names = list(variant_ids)
+    started = time.perf_counter()
+    canonical_p, canonical_fit = scan_with_fit(
+        comparators["canonical_multi_kernel"], names, seed
+    )
+    pooled_p, pooled_fit = scan_with_fit(
+        comparators["pooled_trace_sum"], names, seed + 1
+    )
+    independent_p: dict[str, list[float]] = {}
+    independent_fits: dict[str, Any] = {}
+    for offset, name in enumerate(names, start=2):
+        pvalues, fit_record = scan_with_fit(
+            comparators["independent_subgenome"][name], [name], seed + offset
+        )
+        independent_p[name] = pvalues[name]
+        independent_fits[name] = fit_record
+
+    method_records = {
+        "canonical_multi_kernel": {
+            "fit": canonical_fit,
+            "fwer": experiment_wide_scan_fwer(
+                canonical_p, variant_ids=variant_ids
+            ),
+        },
+        "pooled_trace_sum": {
+            "fit": pooled_fit,
+            "fwer": experiment_wide_scan_fwer(pooled_p, variant_ids=variant_ids),
+        },
+        "independent_subgenome": {
+            "fit_by_subgenome": independent_fits,
+            "fwer": experiment_wide_scan_fwer(
+                independent_p, variant_ids=variant_ids
+            ),
+            "one_experiment_wide_family": True,
+        },
+    }
+    failed = any(
+        record["fwer"]["failure"]["failed"]
+        for record in method_records.values()
+    ) or any(
+        not fit["optimizer_status"]
+        for fit in [canonical_fit, pooled_fit, *independent_fits.values()]
+    )
+    return {
+        "scan_arm": "primary",
+        "separate_sensitivity_arm": False,
+        "context_fingerprint": comparators["context_fingerprint"],
+        "comparators": method_records,
+        "runtime_seconds": float(time.perf_counter() - started),
+        "failure": {
+            "failed": failed,
+            "error_type": "ScanOrOptimizerFailure" if failed else None,
+            "message": "non-finite scan results or optimizer failure" if failed else None,
+        },
+    }
+
+
 def run_fit_replicate(
     scenario: Scenario,
     kernels: Mapping[str, np.ndarray],
@@ -575,6 +1199,7 @@ def run_fit_replicate(
     trait: str = "simulated_trait",
     comparator_preflight_path: str | Path | None = None,
     comparator_preflight_hash: str | None = None,
+    scan_comparators: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run or parse one Track A replicate and write one immutable shard."""
 
@@ -605,7 +1230,74 @@ def run_fit_replicate(
             comparator_preflight_path,
             expected_hash=comparator_preflight_hash,
         )
-    source = "homoeogwas_outputs" if fit_output_dir is not None else "fit_multi_reml"
+    preflight_mismatches: list[str] = []
+    if preflight is not None:
+        for row in preflight["rows"]:
+            if row["sample_order_hash"] != samples["ordered_sample_ids_sha256"]:
+                preflight_mismatches.append(
+                    f"{row['comparator']} sample-order hash differs"
+                )
+    experiment = scenario.parameters.get("experiment")
+    if not isinstance(experiment, str):
+        experiment = "invalid"
+    released_source = (
+        _released_source_manifest(fit_output_dir, trait, experiment)
+        if fit_output_dir is not None
+        else None
+    )
+    scan_context_hash = None
+    if scan_comparators is not None:
+        try:
+            scan_record = scan_comparators["context"]
+            rebuilt_scan = build_scan_comparators(
+                scan_comparators["canonical_multi_kernel"],
+                sample_ids=scan_comparators["sample_ids"],
+                variant_ids=scan_record["variant_ids"],
+                standardized_variants=scan_comparators["standardized_variants"],
+                phenotype=scan_comparators["phenotype"],
+                covariates=scan_comparators["covariates"],
+                qc_declaration=scan_record.get("qc_declaration"),
+            )
+            scan_context_hash = rebuilt_scan["context_fingerprint"]
+        except Exception as error:  # retained as an immutable failure request
+            scan_context_hash = sha256_payload(
+                {
+                    "invalid_scan_context": type(error).__name__,
+                    "message": str(error),
+                    "declared": _json_safe(
+                        scan_comparators.get("context_fingerprint")
+                    ),
+                }
+            )
+    if preflight is not None and scan_comparators is not None:
+        scan_record = scan_comparators.get("context")
+        if not isinstance(scan_record, Mapping):
+            preflight_mismatches.append("scan context evidence is missing")
+        else:
+            current_hashes = {
+                "sample_order_hash": samples["ordered_sample_ids_sha256"],
+                "qc_hash": sha256_payload(scan_record.get("qc_declaration")),
+                "covariates_hash": str(
+                    scan_record.get("covariates", {}).get("sha256", "")
+                ),
+                "variant_manifest_hash": sha256_payload(
+                    scan_record.get("variant_ids")
+                ),
+            }
+            current_hashes["scan_context_hash"] = sha256_payload(current_hashes)
+            for row in preflight["rows"]:
+                for field, value in current_hashes.items():
+                    if row[field] != value:
+                        preflight_mismatches.append(
+                            f"{row['comparator']} {field} differs"
+                        )
+    source = (
+        "homoeogwas_outputs"
+        if fit_output_dir is not None
+        else "matched_scan_context"
+        if scan_comparators is not None
+        else "fit_multi_reml"
+    )
     request_hash = sha256_payload(
         {
             "design_hash": design_hash,
@@ -613,6 +1305,8 @@ def run_fit_replicate(
             "scenario": scenario.to_dict(),
             "replicate": replicate,
             "source": source,
+            "released_source_manifest": released_source,
+            "scan_context_fingerprint": scan_context_hash,
             "trait": trait,
             "comparator_preflight_hash": (
                 preflight["sha256"] if preflight is not None else None
@@ -640,13 +1334,15 @@ def run_fit_replicate(
         "stage": scenario.stage,
         "formal": scenario.stage == "formal",
         "qa_only": scenario.stage == "pilot",
-        "experiment": str(scenario.parameters.get("experiment", "recovery")),
+        "experiment": experiment,
         "seed": int(seed),
         "sample_manifest": samples,
         "kernel_fingerprints": fingerprints,
         "context_fingerprint": context_fingerprint,
         "request_hash": request_hash,
         "result_source": source,
+        "released_source_manifest": released_source,
+        "scan_context_fingerprint": scan_context_hash,
         "comparator_preflight_hash": (
             preflight["sha256"] if preflight is not None else None
         ),
@@ -656,18 +1352,28 @@ def run_fit_replicate(
     }
     started = time.perf_counter()
     try:
-        allocation = scenario.parameters.get("allocation", "balanced")
-        y, truth = simulate_fit_truth(
-            checked,
-            allocation,
-            seed=seed,
-            total_pve=scenario.parameters.get("total_pve"),
-            dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
-            null_subgenome=scenario.parameters.get("null_subgenome"),
-        )
-        if fit_output_dir is None:
+        if preflight_mismatches:
+            raise ValueError(
+                "comparator preflight differs from this run: "
+                + "; ".join(preflight_mismatches)
+            )
+        if experiment not in {"recovery", "coverage", "scan", "loco"}:
+            raise ValueError(f"unknown Track A experiment: {experiment!r}")
+        if experiment == "recovery":
+            if fit_output_dir is not None or scan_comparators is not None:
+                raise ValueError("recovery does not accept released or scan inputs")
+            if "allocation" not in scenario.parameters:
+                raise ValueError("recovery scenario is missing its allocation")
+            y, truth = simulate_fit_truth(
+                checked,
+                scenario.parameters["allocation"],
+                seed=seed,
+                total_pve=scenario.parameters.get("total_pve"),
+                dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
+                null_subgenome=scenario.parameters.get("null_subgenome"),
+            )
             fitted = fit_pve_replicate(y, checked, seed)
-            true = dict(truth["realized_pve"])
+            true = dict(truth["target_pve"])
             estimated = dict(fitted["estimated_pve"])
             metrics = {
                 **fitted,
@@ -689,10 +1395,43 @@ def run_fit_replicate(
                     ),
                 },
             }
-        else:
-            metrics = parse_fit_metrics(fit_output_dir, trait, truth=truth)
+            payload = {**base, "truth": truth, **metrics}
+        elif experiment == "coverage":
+            if fit_output_dir is None or scan_comparators is not None:
+                raise ValueError("coverage requires one released fit output")
+            if "allocation" not in scenario.parameters:
+                raise ValueError("coverage scenario is missing its allocation")
+            _, truth = simulate_fit_truth(
+                checked,
+                scenario.parameters["allocation"],
+                seed=seed,
+                total_pve=scenario.parameters.get("total_pve"),
+                dominant_subgenomes=scenario.parameters.get("dominant_subgenomes"),
+                null_subgenome=scenario.parameters.get("null_subgenome"),
+            )
+            metrics = parse_fit_metrics(
+                fit_output_dir,
+                trait,
+                truth=truth,
+                expected_subgenomes=list(checked),
+                expected_sample_ids=samples["ordered_sample_ids"],
+                expected_scenario=scenario,
+                experiment="coverage",
+            )
             metrics["target_pve"] = dict(truth["target_pve"])
-        payload = {**base, "truth": truth, **metrics}
+            payload = {**base, "truth": truth, **metrics}
+        else:
+            metrics = run_scan_replicate(
+                scan_comparators,
+                released_output_dir=fit_output_dir,
+                trait=trait,
+                expected_subgenomes=list(checked),
+                expected_sample_ids=samples["ordered_sample_ids"],
+                expected_scenario=scenario,
+                loco=experiment == "loco",
+                seed=seed,
+            )
+            payload = {**base, **metrics}
     except Exception as error:
         payload = {
             **base,
@@ -732,6 +1471,7 @@ def build_scan_comparators(
     standardized_variants: Mapping[str, np.ndarray],
     phenotype: Sequence[float] | np.ndarray,
     covariates: np.ndarray,
+    qc_declaration: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze matched canonical, pooled, and independent scan kernel sets."""
 
@@ -799,13 +1539,26 @@ def build_scan_comparators(
         },
         "phenotype": _numeric_fingerprint(response),
         "covariates": _numeric_fingerprint(fixed),
+        "qc_declaration": _json_safe(
+            qc_declaration
+            or {"maf_min": 0.05, "call_rate_min": 0.9}
+        ),
         "kernel_fingerprints": {
             name: _kernel_fingerprint(value) for name, value in frozen.items()
         },
     }
+    frozen_samples = np.asarray(samples["ordered_sample_ids"], dtype=object)
+    frozen_response = np.array(response, copy=True)
+    frozen_fixed = np.array(fixed, copy=True)
+    frozen_samples.setflags(write=False)
+    frozen_response.setflags(write=False)
+    frozen_fixed.setflags(write=False)
     return {
         "context_fingerprint": sha256_payload(context),
         "context": context,
+        "sample_ids": frozen_samples,
+        "phenotype": frozen_response,
+        "covariates": frozen_fixed,
         "standardized_variants": frozen_variants,
         "canonical_multi_kernel": frozen,
         "pooled_trace_sum": {"pooled": pooled},
@@ -855,6 +1608,19 @@ def experiment_wide_scan_fwer(
     if len(set(member_ids)) != len(member_ids):
         raise ValueError("variant IDs must be unique across the experiment")
     family_size = len(ordered_members)
+    if family_size == 0:
+        raise ValueError("experiment-wide FWER family is empty")
+    nonfinite_ids = [
+        member
+        for name, values in arrays.items()
+        for member, value in zip(
+            [item for item in ordered_members if item["subgenome"] == name],
+            values,
+            strict=True,
+        )
+        if not math.isfinite(float(value))
+    ]
+    finite_count = family_size - len(nonfinite_ids)
     adjusted: dict[str, list[float | None]] = {}
     rejected: dict[str, list[bool]] = {}
     for name, values in arrays.items():
@@ -870,11 +1636,35 @@ def experiment_wide_scan_fwer(
         "family_scope": "experiment_wide_subgenome_union",
         "alpha": float(alpha),
         "family_size": family_size,
+        "planned_count": family_size,
+        "finite_count": finite_count,
+        "nonfinite_ids": nonfinite_ids,
+        "missingness": {
+            "planned_count": family_size,
+            "finite_count": finite_count,
+            "nonfinite_count": len(nonfinite_ids),
+        },
         "ordered_family": ordered_members,
         "ordered_family_hash": sha256_payload(ordered_members),
+        "raw_p": {
+            name: [
+                float(value) if math.isfinite(float(value)) else None
+                for value in values
+            ]
+            for name, values in arrays.items()
+        },
         "adjusted_p": adjusted,
         "rejected": rejected,
         "directionwise_alpha_families": False,
+        "failure": {
+            "failed": bool(nonfinite_ids),
+            "error_type": "MissingPValues" if nonfinite_ids else None,
+            "message": (
+                "planned variants have non-finite p-values"
+                if nonfinite_ids
+                else None
+            ),
+        },
     }
 
 
@@ -888,6 +1678,8 @@ _PREFLIGHT_COLUMNS = (
     "sample_order_hash",
     "qc_hash",
     "covariates_hash",
+    "variant_manifest_hash",
+    "scan_context_hash",
     "status",
     "reason",
 )
@@ -912,7 +1704,13 @@ def _resolve_executable(candidate: str | Path) -> str | None:
     return str(Path(found).resolve()) if found else None
 
 
-def _executable_version(path: str) -> str:
+def _executable_version(path: str, comparator: str) -> tuple[str, str | None]:
+    basename = Path(path).name.lower()
+    if basename.endswith(".exe"):
+        basename = basename[:-4]
+    allowed = {"gcta", "gcta64"} if comparator == "GCTA" else {"gemma"}
+    if basename not in allowed:
+        return "", "executable identity does not match comparator"
     for flag in ("--version", "-v"):
         try:
             completed = subprocess.run(
@@ -924,18 +1722,70 @@ def _executable_version(path: str) -> str:
             )
         except (OSError, subprocess.SubprocessError):
             continue
-        text = (completed.stdout or completed.stderr).strip()
-        if text:
-            return " ".join(text.split())[:500]
-    return ""
+        if completed.returncode != 0:
+            continue
+        text = " ".join((completed.stdout or completed.stderr).split())[:500]
+        if (
+            text
+            and comparator.lower() in text.lower()
+            and re.search(r"\b\d+(?:\.\d+)+\b", text)
+        ):
+            return text, None
+    return "", "version command failed or returned invalid tool/version identity"
+
+
+def _preflight_hashes(
+    sample_ids: Sequence[str],
+    qc_declaration: Mapping[str, Any],
+    covariates: np.ndarray,
+    variant_ids: Mapping[str, Sequence[str]],
+) -> dict[str, str]:
+    samples = list(sample_ids)
+    if not samples or any(not isinstance(value, str) or not value for value in samples):
+        raise ValueError("preflight sample IDs must be non-empty strings")
+    if len(set(samples)) != len(samples):
+        raise ValueError("preflight sample IDs must be unique")
+    if not isinstance(qc_declaration, Mapping) or not qc_declaration:
+        raise ValueError("preflight QC declaration must be a non-empty mapping")
+    fixed = np.asarray(covariates, dtype=float)
+    if (
+        fixed.ndim != 2
+        or fixed.shape[0] != len(samples)
+        or fixed.shape[1] < 1
+        or not np.all(np.isfinite(fixed))
+    ):
+        raise ValueError("preflight covariates must be finite and sample-aligned")
+    if not isinstance(variant_ids, Mapping) or not variant_ids:
+        raise ValueError("preflight variant manifest must be a non-empty mapping")
+    ordered_variants: dict[str, list[str]] = {}
+    flat: list[str] = []
+    for name, raw_ids in variant_ids.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("preflight subgenome names must be non-empty strings")
+        ids = list(raw_ids)
+        if not ids or any(not isinstance(value, str) or not value for value in ids):
+            raise ValueError("preflight variant IDs must be non-empty strings")
+        ordered_variants[name] = ids
+        flat.extend(ids)
+    if len(set(flat)) != len(flat):
+        raise ValueError("preflight variant IDs must be experiment-wide unique")
+    hashes = {
+        "sample_order_hash": sha256_payload(samples),
+        "qc_hash": sha256_payload(_json_safe(qc_declaration)),
+        "covariates_hash": _numeric_fingerprint(fixed)["sha256"],
+        "variant_manifest_hash": sha256_payload(ordered_variants),
+    }
+    hashes["scan_context_hash"] = sha256_payload(hashes)
+    return hashes
 
 
 def write_comparator_preflight(
     path: str | Path,
     *,
-    sample_order_hash: str,
-    qc_hash: str,
-    covariates_hash: str,
+    sample_ids: Sequence[str],
+    qc_declaration: Mapping[str, Any],
+    covariates: np.ndarray,
+    variant_ids: Mapping[str, Sequence[str]],
     executables: Mapping[str, str | Path] | None = None,
     matched: Mapping[str, Mapping[str, bool]] | None = None,
     outcomes_exist: bool = False,
@@ -947,11 +1797,9 @@ def write_comparator_preflight(
         raise RuntimeError("comparator preflight must be frozen before outcomes exist")
     if output.exists():
         raise FileExistsError(f"comparator preflight is already frozen: {output}")
-    hashes = {
-        "sample_order_hash": _validated_sha256(sample_order_hash, "sample_order_hash"),
-        "qc_hash": _validated_sha256(qc_hash, "qc_hash"),
-        "covariates_hash": _validated_sha256(covariates_hash, "covariates_hash"),
-    }
+    hashes = _preflight_hashes(
+        sample_ids, qc_declaration, covariates, variant_ids
+    )
     configured = dict(executables or {"GCTA": "gcta64", "GEMMA": "gemma"})
     if set(configured) != {"GCTA", "GEMMA"}:
         raise ValueError("executables must contain exactly GCTA and GEMMA")
@@ -959,18 +1807,29 @@ def write_comparator_preflight(
     rows: list[dict[str, Any]] = []
     for comparator in ("GCTA", "GEMMA"):
         executable = _resolve_executable(configured[comparator])
-        version = _executable_version(executable) if executable else ""
+        version, executable_problem = (
+            _executable_version(executable, comparator)
+            if executable
+            else ("", "executable unavailable")
+        )
         flags = matches.get(comparator, {})
-        sample_match = bool(flags.get("sample_order", False))
-        qc_match = bool(flags.get("qc", False))
-        covariate_match = bool(flags.get("covariates", False))
+        if not isinstance(flags, Mapping):
+            raise ValueError("preflight match flags must be mappings of native bools")
+        raw_flags = {
+            "sample_order": flags.get("sample_order", False),
+            "qc": flags.get("qc", False),
+            "covariates": flags.get("covariates", False),
+        }
+        if any(type(value) is not bool for value in raw_flags.values()):
+            raise ValueError("preflight match flags must be native bool values")
+        sample_match = raw_flags["sample_order"]
+        qc_match = raw_flags["qc"]
+        covariate_match = raw_flags["covariates"]
         comparable = bool(
             executable and version and sample_match and qc_match and covariate_match
         )
-        if not executable:
-            reason = "executable unavailable"
-        elif not version:
-            reason = "version unavailable"
+        if executable_problem is not None:
+            reason = executable_problem
         elif not (sample_match and qc_match and covariate_match):
             reason = "sample order, QC, or covariates are not exactly matched"
         else:
@@ -1031,7 +1890,13 @@ def read_comparator_preflight(
             if raw[field] not in {"True", "False"}:
                 raise ValueError(f"comparator preflight {field} must be boolean")
             row[field] = raw[field] == "True"
-        for field in ("sample_order_hash", "qc_hash", "covariates_hash"):
+        for field in (
+            "sample_order_hash",
+            "qc_hash",
+            "covariates_hash",
+            "variant_manifest_hash",
+            "scan_context_hash",
+        ):
             _validated_sha256(raw[field], field)
         if raw["status"] not in {
             "COMPARABLE",
@@ -1045,6 +1910,14 @@ def read_comparator_preflight(
             and row["matched_qc"]
             and row["matched_covariates"]
         )
+        if raw["executable_path"]:
+            version, problem = _executable_version(
+                raw["executable_path"], raw["comparator"]
+            )
+            if raw["status"] == "COMPARABLE" and (
+                problem is not None or version != raw["version"]
+            ):
+                raise ValueError("comparator executable/version evidence changed")
         if (raw["status"] == "COMPARABLE") != can_compare:
             raise ValueError("comparator preflight status contradicts its evidence")
         rows.append(row)
@@ -1059,6 +1932,7 @@ __all__ = [
     "parse_fit_metrics",
     "read_comparator_preflight",
     "run_fit_replicate",
+    "run_scan_replicate",
     "select_pilot_samples",
     "simulate_fit_truth",
     "write_comparator_preflight",
