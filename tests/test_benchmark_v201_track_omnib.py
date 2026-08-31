@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import replace
 
@@ -19,9 +18,47 @@ from scripts.benchmarks.v201.track_omnib import (
     run_conditional_bank,
     run_encoding_check,
     run_end_to_end_null,
+    run_family_size_stress,
+    run_global_vc_bank,
     run_omnib_replicate,
     run_power_replicate,
 )
+
+
+def test_global_vc_producer_is_detection_only_and_pilot_has_no_formal_fields(tiny_context):
+    payload = run_global_vc_bank(
+        tiny_context, bank="calibration", count=1, design_hash="e" * 64,
+        qa_only=True, scenario_id="B.global_vc.synthetic.gaussian.calibration",
+    )
+    assert payload["hypothesis_unit"] == "global"
+    assert payload["detection_only"] is True
+    assert payload["response_count"] == 1
+    assert payload["inference_status"] == "noninferential_do_not_threshold"
+    assert not ({"threshold", "rejected", "causal_recall", "group_ids"} & set(payload))
+
+
+def test_family_size_stress_serializes_response_level_evidence():
+    context = build_synthetic_omnib_context(n=72, groups=80, copies=2, seed=2)
+    payload = run_family_size_stress(
+        context, family_size=80, response_count=2, calibration_count=2,
+        design_hash="f" * 64, qa_only=True, n_jobs=1,
+        scenario_id="B.family_size.synthetic.g80",
+    )
+    assert set(payload["rejections_by_method"]) == set(METHOD_NAMES)
+    assert all(len(values) == 2 for values in payload["rejections_by_method"].values())
+    assert payload["fwer"] == {
+        method: np.mean(values)
+        for method, values in payload["rejections_by_method"].items()
+    }
+    assert payload["calibration_minima_hashes"] == {
+        method: sha256_payload(values)
+        for method, values in payload["calibration_minima_by_method"].items()
+    }
+    assert payload["tested_family_sizes"]["snpxsnp"] > payload["group_count"]
+    assert payload["tested_family_hashes"]["snpxsnp"] == sha256_payload({
+        "method": "snpxsnp",
+        "ordered_member_ids": payload["tested_family_members"]["snpxsnp"],
+    })
 
 
 @pytest.fixture(scope="module")
@@ -281,6 +318,12 @@ def test_exact_encoding_check_restores_primary_family(tiny_context):
     assert result["request_hash"]
     assert result["context_fingerprint"]
     assert result["null_covariance"]["sha256"]
+    for name in (
+        "allele_flip_25pct", "allele_flip_50pct", "allele_flip_100pct",
+        "within_gene_snp_column_permutation",
+    ):
+        assert result["exact_checks"][name]["observed_arrays_identical"] is True
+        assert result["exact_checks"][name]["ranking_hash_identical"] is True
 
 
 def test_robustness_checks_are_not_mislabeled_as_exact():
@@ -509,6 +552,23 @@ def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
         for check in result["exact_checks"].values()
     )
     assert result["all_required_exact"] is expected
+    exact_schema = {
+        "status", "required", "observed_arrays_identical",
+        "adjusted_decisions_identical", "ranking_hash_identical",
+        "rejection_sets_identical", "baseline_observed_hash",
+        "candidate_observed_hash", "requested_jobs", "effective_jobs",
+        "backend", "worker_pids", "skip_reason",
+    }
+    assert all(set(record) == exact_schema for record in result["exact_checks"].values())
+    robustness_schema = {
+        "status", "error_type", "message", "fwer", "power",
+        "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
+        "absolute_power_regret", "note",
+    }
+    assert all(
+        set(record) == robustness_schema
+        for record in result["robustness_checks"].values()
+    )
 
 
 def test_power_dispatcher_uses_declared_calibration_count(tiny_context):
@@ -569,6 +629,12 @@ def test_power_cells_share_one_frozen_backbone_calibration_bank(tiny_context):
             scenario_id=f"B.power.synthetic.{architecture}",
         )
         hashes.append(payload["calibration_bank_manifest_hash"])
+        assert "snpxsnp_calibration_artifact" not in payload["calibration_bank"]
+        assert "snpxsnp_calibration_artifact" not in payload["target_bank"]
+        assert (
+            payload["target_bank"]["snpxsnp_calibration_reference"]
+            == payload["calibration_artifact"]["snpxsnp_calibration_reference"]
+        )
     assert hashes[0] == hashes[1]
 
 
@@ -621,12 +687,9 @@ def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
         assert payload["tested_family_hashes"][method] == sha256_payload(
             {"method": method, "ordered_member_ids": members}
         )
-        values = np.ascontiguousarray(original.p_by_method[method])
-        digest = hashlib.sha256()
-        digest.update(str(values.dtype).encode("ascii"))
-        digest.update(repr(values.shape).encode("ascii"))
-        digest.update(values.tobytes())
-        assert payload["score_matrix_hashes"][method] == digest.hexdigest()
+        assert payload["score_matrix_hashes"][method] == sha256_payload(
+            original.p_by_method[method].tolist()
+        )
 
     # The score bank stays group x response while SNPxSNP calibration covers
     # the complete, independently larger raw SNP-pair family.

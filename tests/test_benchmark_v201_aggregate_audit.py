@@ -1,3 +1,4 @@
+import copy
 import csv
 import hashlib
 import json
@@ -12,11 +13,15 @@ from scripts.benchmarks.v201 import aggregate as aggregate_module
 from scripts.benchmarks.v201.aggregate import (
     ACCEPTANCE_RULES,
     TABLE_SCHEMAS,
+    BenchmarkAggregateError,
+    _validate_config_manifest,
+    _validate_context_artifact,
     aggregate_benchmark,
 )
 from scripts.benchmarks.v201.audit import (
     BenchmarkAuditError,
     _audit_application_scenario,
+    _audit_families_and_parallel,
     _audit_fit_scenario,
     _audit_power_evidence,
     _audit_scaling_scenario,
@@ -38,6 +43,8 @@ from scripts.benchmarks.v201.track_fit import run_fit_replicate
 from scripts.benchmarks.v201.track_omnib import (
     build_synthetic_omnib_context,
     run_conditional_bank,
+    run_global_vc_bank,
+    run_omnib_replicate,
     run_power_replicate,
 )
 from scripts.benchmarks.v201.track_scaling import (
@@ -293,6 +300,59 @@ def test_audit_seals_then_detects_changed_shard(tmp_path, monkeypatch):
         audit_benchmark(root)
 
 
+def test_audit_document_self_hash_is_verified_on_replay(tmp_path, monkeypatch):
+    root = _write_null_shards(tmp_path, monkeypatch, rejections=0, total=20)
+    audit_benchmark(root)
+    path = root / "audit" / "benchmark_audit.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["audit_sha256"] == sha256_payload({
+        key: value for key, value in document.items() if key != "audit_sha256"
+    })
+    first_gate = next(iter(document["gates"].values()))
+    first_gate["status"] = "tampered"
+    path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAuditError, match="self-hash"):
+        audit_benchmark(root)
+
+
+def test_audit_rejects_symlink_lock_and_stages_before_publish(tmp_path, monkeypatch):
+    symlink_root = _write_null_shards(
+        tmp_path / "symlink", monkeypatch, rejections=0, total=20
+    )
+    target = symlink_root / "lock-target"
+    target.write_text("target\n", encoding="utf-8")
+    (symlink_root / ".benchmark-audit.lock").symlink_to(target)
+    with pytest.raises(BenchmarkAuditError, match="lock"):
+        audit_benchmark(symlink_root)
+
+    root = _write_null_shards(
+        tmp_path / "staging", monkeypatch, rejections=0, total=20
+    )
+    audit_benchmark(root)
+    before = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (root / "tables").glob("*.tsv")
+    }
+    original = aggregate_module._atomic_tsv
+    calls = 0
+
+    def fail_in_staging(path, fields, rows):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("staging failure")
+        return original(path, fields, rows)
+
+    monkeypatch.setattr(aggregate_module, "_atomic_tsv", fail_in_staging)
+    with pytest.raises(RuntimeError, match="staging failure"):
+        audit_benchmark(root)
+    after = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (root / "tables").glob("*.tsv")
+    }
+    assert after == before
+
+
 def test_decision_disagreement_and_seed_overlap_fail_closed(tmp_path, monkeypatch):
     root = _write_null_shards(tmp_path, monkeypatch, rejections=1, total=20)
     shard = next((root / "formal" / "omnib").rglob("replicate-*.json"))
@@ -346,6 +406,16 @@ def test_pilot_is_noninferential_and_has_no_formal_decision(tmp_path, monkeypatc
     )
     assert "noninferential_do_not_threshold" in acceptance
     assert "formal_pass" not in acceptance
+    with (root / "tables" / "benchmark_acceptance.tsv").open(
+        encoding="utf-8", newline="",
+    ) as handle:
+        assert "passed" not in next(csv.reader(handle, delimiter="\t"))
+    with (root / "tables" / "omnib_null_replicates.tsv").open(
+        encoding="utf-8", newline="",
+    ) as handle:
+        pilot_header = next(csv.reader(handle, delimiter="\t"))
+    assert "threshold" not in pilot_header
+    assert "rejected" not in pilot_header
 
 
 def test_explicit_failed_shard_is_retained_in_failure_denominator(tmp_path, monkeypatch):
@@ -398,6 +468,75 @@ def test_input_manifest_rehashes_files_and_rejects_directory_drift(
     with pytest.raises(BenchmarkAuditError, match="input directory"):
         audit_benchmark(root)
 
+
+def test_configs_are_manifest_complete_and_parse_as_yaml(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    config = configs / "scientific.yaml"
+    config.write_text("interact:\n  mode: group\n  statistic: omniB\n", encoding="utf-8")
+    digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    manifest = configs / "manifest.tsv"
+    manifest.write_text(
+        f"path\tsha256\nconfigs/scientific.yaml\t{digest}\n", encoding="utf-8"
+    )
+    assert _validate_config_manifest(tmp_path, manifest) == {
+        "configs/scientific.yaml": digest
+    }
+    config.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+    digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    manifest.write_text(
+        f"path\tsha256\nconfigs/scientific.yaml\t{digest}\n", encoding="utf-8"
+    )
+    with pytest.raises(BenchmarkAggregateError, match="YAML"):
+        _validate_config_manifest(tmp_path, manifest)
+
+
+def test_context_artifact_binds_real_manifest_sources(tmp_path):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    source = inputs / "groups.tsv"
+    source.write_text("group_id\n", encoding="utf-8")
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    family_ids = [f"group-{index:03d}" for index in range(80)]
+    family = {
+        "subgenomes": ["A", "B"], "group_ids": family_ids,
+        "genes": [[f"a-{index}", f"b-{index}"] for index in range(80)],
+    }
+    context = {"family": family, "subgenomes": [], "sample_idx": {}}
+    artifact = {
+        "schema": "homoeogwas-v201-omnib-context-v1",
+        "backbone": "cotton", "context_manifest": context,
+        "context_fingerprint": sha256_payload(context),
+        "family_manifest": family, "family_hash": sha256_payload(family),
+        "group_count": 80, "ordered_family_ids": family_ids,
+        "ordered_family_ids_hash": sha256_payload(family_ids),
+        "source_inputs": [{
+            "path": "inputs/groups.tsv", "sha256": source_sha, "type": "groups",
+        }],
+    }
+    artifact_path = inputs / "cotton.context.json"
+    artifact_path.write_text(canonical_json(artifact) + "\n", encoding="utf-8")
+    artifact_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    records = {
+        "inputs/groups.tsv": {"size": source.stat().st_size, "sha256": source_sha,
+                              "type": "groups"},
+        "inputs/cotton.context.json": {"size": artifact_path.stat().st_size,
+                                       "sha256": artifact_sha,
+                                       "type": "omnib_context"},
+    }
+    record = {
+        "artifact_path": "inputs/cotton.context.json",
+        "artifact_sha256": artifact_sha,
+        "group_count": 80, "ordered_family_ids": family_ids,
+        "ordered_family_ids_hash": sha256_payload(family_ids),
+        "context_fingerprint": sha256_payload(context),
+        "family_hash": sha256_payload(family),
+    }
+    _validate_context_artifact(tmp_path, "cotton", record, records)
+    artifact["source_inputs"][0]["sha256"] = "0" * 64
+    artifact_path.write_text(canonical_json(artifact) + "\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAggregateError, match="source input is unbound"):
+        _validate_context_artifact(tmp_path, "cotton", record, records)
 
 def test_design_lock_distinguishes_target_release_from_harness(
     tmp_path, monkeypatch,
@@ -539,6 +678,61 @@ def test_real_conditional_snpxsnp_group_rows_and_raw_family_are_distinct():
     assert bank["tested_family_sizes"]["snpxsnp"] > len(checked["snpxsnp"])
 
 
+def test_global_vc_heldout_is_bound_to_registered_calibration_bank():
+    context = build_synthetic_omnib_context(n=32, groups=2, copies=2, seed=9)
+    calibration_id = "B.global_vc.synthetic.gaussian.calibration"
+    heldout_id = "B.global_vc.synthetic.gaussian.heldout"
+    calibration = {
+        "track": "omnib", "replicate": 0,
+        **run_global_vc_bank(
+            context, bank="calibration", count=1, design_hash="1" * 64,
+            qa_only=True, scenario_id=calibration_id,
+        ),
+    }
+    heldout = {
+        "track": "omnib", "replicate": 0,
+        **run_global_vc_bank(
+            context, bank="heldout", count=1, design_hash="1" * 64,
+            qa_only=True, scenario_id=heldout_id,
+        ),
+    }
+    evidence = SimpleNamespace(
+        shards=((Path("cal.json"), calibration), (Path("held.json"), heldout)),
+        registry=(),
+    )
+    _audit_families_and_parallel(evidence)
+    heldout["calibration_p_values"] = [
+        (heldout["calibration_p_values"][0] + 0.25) % 1.0
+    ]
+    heldout["calibration_p_hash"] = sha256_payload(heldout["calibration_p_values"])
+    with pytest.raises(BenchmarkAuditError, match="global VC calibration"):
+        _audit_families_and_parallel(evidence)
+
+
+def test_family_size_audit_recomputes_response_level_fwer():
+    context = build_synthetic_omnib_context(n=72, groups=80, copies=2, seed=3)
+    scenario = Scenario(
+        "B.family_size.synthetic.g80", "omnib", "pilot", 20, 199,
+        {"experiment": "family_size", "family_size": 80,
+         "null_model": "gaussian", "snpxsnp_status": "applicable"},
+    )
+    payload = run_omnib_replicate(
+        scenario, context, replicate=0, design_hash="b" * 64, n_jobs=1,
+    )
+    evidence = SimpleNamespace(shards=((Path("family.json"), payload),), registry=(scenario,))
+    _audit_families_and_parallel(evidence)
+    rows = aggregate_module._omnib_rows(payload, scenario)["omnib_null_replicates.tsv"]
+    snpxsnp = [row for row in rows if row["method"] == "snpxsnp"]
+    assert len(snpxsnp) == 20
+    assert snpxsnp[0]["family_size"] == 80
+    assert snpxsnp[0]["score_family_size"] == 80
+    assert snpxsnp[0]["tested_family_size"] > 80
+    assert snpxsnp[0]["tested_family_hash"] == payload["tested_family_hashes"]["snpxsnp"]
+    payload["fwer"]["omnib"] = 0.123
+    with pytest.raises(BenchmarkAuditError, match="family-size"):
+        _audit_families_and_parallel(evidence)
+
+
 def _real_scaling_payload(*, native_valid=True):
     anchor = ScalingAnchor("small_qa", 192, 192, 3, 3, 199, (1, 4), 3)
     runs = []
@@ -608,6 +802,28 @@ def test_track_a_true_pve_cannot_diverge_from_frozen_truth():
         _audit_fit_scenario(payload, scenario)
 
 
+def test_track_a_boundary_labels_are_recomputed_from_estimated_pve():
+    kernels = {}
+    rng = np.random.default_rng(12)
+    for name in ("A", "D"):
+        values = rng.normal(size=(36, 18))
+        values -= values.mean(axis=0)
+        kernel = values @ values.T / values.shape[1]
+        kernels[name] = kernel / (np.trace(kernel) / 36)
+    scenario = Scenario(
+        "A.recovery.cotton.balanced", "fit", "pilot", 1, 199,
+        {"qa_only": True, "panel": "cotton", "experiment": "recovery",
+         "allocation": "balanced", "total_pve": 0.4},
+    )
+    payload = run_fit_replicate(
+        scenario, kernels, replicate=0, design_hash="e" * 64,
+        sample_ids=np.asarray([f"sample-{index}" for index in range(36)]),
+    )
+    payload["boundary_components"] = ["fabricated"]
+    with pytest.raises(BenchmarkAuditError, match="boundary"):
+        _audit_fit_scenario(payload, scenario)
+
+
 def test_power_registry_metadata_and_single_response_are_fail_closed():
     context = build_synthetic_omnib_context(n=72, groups=2, copies=3, seed=7)
     design_hash = "c" * 64
@@ -632,6 +848,12 @@ def test_power_registry_metadata_and_single_response_are_fail_closed():
          "null_model": "gaussian", "calibration_scenario_id": calibration_id},
     )
     _audit_power_evidence(payload, scenario)
+    detached = copy.deepcopy(payload)
+    detached["target_bank"]["snpxsnp_calibration_reference"][
+        "calibration_p_sha256"
+    ] = "0" * 64
+    with pytest.raises(BenchmarkAuditError, match="frozen calibration"):
+        _audit_power_evidence(detached, scenario)
     payload["architecture"] = "mixed_sign"
     with pytest.raises(BenchmarkAuditError, match="registry"):
         _audit_power_evidence(payload, scenario)

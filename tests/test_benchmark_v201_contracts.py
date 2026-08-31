@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.benchmarks.v201.aggregate import _expected_replicates
 from scripts.benchmarks.v201.contracts import (
     Budget,
     ScalingAnchor,
@@ -109,6 +110,10 @@ def test_omnib_scenarios_carry_canonical_group_edge_contract():
         if row.track != "omnib":
             continue
         parameters = row.parameters
+        if parameters["experiment"] == "global_vc":
+            assert parameters["hypothesis_unit"] == "global"
+            assert parameters["detection_only"] is True
+            continue
         assert parameters["mode"] == "group"
         assert parameters["statistic"] == "omniB"
         assert parameters["hypothesis_unit"] == "group"
@@ -133,6 +138,48 @@ def test_power_scenarios_declare_independent_calibration_bank_size():
             == f"B.conditional.{row.parameters['backbone']}.gaussian.calibration"
             for row in power
         )
+
+
+def test_registry_has_global_vc_and_locked_family_size_stress_matrix():
+    rows = [row for row in build_scenarios("formal") if row.track == "omnib"]
+    global_rows = [row for row in rows if row.parameters["experiment"] == "global_vc"]
+    assert {(row.parameters["backbone"], row.parameters["bank"]) for row in global_rows} == {
+        (backbone, bank)
+        for backbone in ("cotton", "wheat", "quartet")
+        for bank in ("calibration", "heldout")
+    }
+    assert all(row.parameters["hypothesis_unit"] == "global" for row in global_rows)
+    assert all(row.parameters["detection_only"] is True for row in global_rows)
+    assert all(list(_expected_replicates(row)) == [0] for row in global_rows)
+
+    stress = [row for row in rows if row.parameters["experiment"] == "family_size"]
+    assert {(row.parameters["backbone"], row.parameters["family_size"]) for row in stress} == {
+        (backbone, size)
+        for backbone in ("cotton", "wheat", "quartet")
+        for size in (80, 500, 2_000)
+    }
+    assert all(
+        row.parameters["snpxsnp_status"]
+        == ("applicable" if row.parameters["family_size"] == 80 else "not_applicable_above_80")
+        for row in stress
+    )
+    assert all(list(_expected_replicates(row)) == [0] for row in stress)
+
+
+def test_cotton_never_registers_multi_edge_group_and_negative_controls_are_explicit():
+    power = [
+        row for row in build_scenarios("formal")
+        if row.track == "omnib" and row.parameters["experiment"] == "power"
+    ]
+    assert not any(
+        row.parameters["backbone"] == "cotton"
+        and row.parameters["architecture"] == "multi_edge_group"
+        for row in power
+    )
+    for row in power:
+        negative = row.parameters["architecture"] in {"additive_only", "mispaired"}
+        assert row.parameters["control_type"] == ("negative" if negative else "positive")
+        assert row.parameters["report_metric"] == ("specificity" if negative else "power")
 
 
 def test_conditional_registry_locks_complete_null_matrix_and_gate_roles():

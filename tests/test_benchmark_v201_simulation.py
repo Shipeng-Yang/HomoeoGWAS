@@ -122,10 +122,26 @@ def test_draw_null_uses_root_factor_and_locks_stress_distributions():
 
     _, additive_meta = draw_null("additive_only", root_v, np.random.default_rng(4), pc1)
     assert additive_meta["interaction_present"] is False
-    assert additive_meta["main_effect"] == "pc1"
+    assert additive_meta["main_effect"] == "independent_genotype_main_effect"
 
-    with pytest.raises(NotImplementedError, match="explicit held-out subgenome kernel"):
-        draw_null("omitted_kernel", root_v, np.random.default_rng(5), pc1)
+    structure, structure_meta = draw_null(
+        "structure_aligned", root_v, np.random.default_rng(4), pc1
+    )
+    assert structure_meta["main_effect"] == "pc1_aligned"
+    assert not np.array_equal(structure, draw_null(
+        "additive_only", root_v, np.random.default_rng(4), pc1
+    )[0])
+
+    omitted = np.eye(200) + 0.25 * np.ones((200, 200))
+    value, omitted_meta = draw_null(
+        "omitted_kernel", root_v, np.random.default_rng(5), pc1,
+        omitted_kernel=omitted, omitted_subgenome="B", omitted_variance=0.25,
+    )
+    assert value.shape == (200,)
+    assert omitted_meta["omitted_subgenome"] == "B"
+    assert omitted_meta["omitted_variance"] == 0.25
+    assert omitted_meta["fitted_null_includes_omitted_kernel"] is False
+    assert len(omitted_meta["omitted_kernel_sha256"]) == 64
 
 
 def test_draw_null_rejects_unknown_malformed_and_degenerate_inputs():

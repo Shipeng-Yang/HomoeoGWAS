@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral
@@ -10,12 +11,14 @@ from types import MappingProxyType
 import numpy as np
 from scipy.linalg import orth
 
+from homoeogwas.diagnostics import boundary_lrt, compare_nested_reml
 from homoeogwas.group_family import (
     EdgeRecord,
     ExpandedEdgeFamily,
     MasterGroupFamily,
     expand_pair_edges,
 )
+from homoeogwas.kernel import hadamard_kernel, normalize_kernel
 from homoeogwas.omnib_family import (
     OmniBFamilyScores,
     bootstrap_minp_calibration,
@@ -30,6 +33,95 @@ METHOD_NAMES = (
     "legacy_burden_product",
     "snpxsnp",
 )
+GLOBAL_VC_METHOD = "global_hadamard_variance_component"
+
+
+def _numeric_array_hash(values: np.ndarray) -> str:
+    array = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(repr(array.shape).encode("ascii"))
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def score_global_hadamard_vc(
+    responses: np.ndarray,
+    fixed_effects: np.ndarray,
+    subgenome_grms: Mapping[str, np.ndarray],
+    *,
+    fit_kwargs: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Fit one genuine global K_hom variance-component test per response.
+
+    This is deliberately separate from :data:`METHOD_NAMES`: it tests a
+    single global variance component and cannot localize a homoeolog group.
+    The null contains every frozen additive subgenome GRM; the alternative
+    adds the trace-normalized Hadamard product and uses the published nested
+    REML + Self--Liang boundary LRT implementation.
+    """
+
+    if not isinstance(subgenome_grms, Mapping) or len(subgenome_grms) < 2:
+        raise ValueError("global Hadamard VC requires at least two subgenome GRMs")
+    labels = tuple(subgenome_grms)
+    if len(set(labels)) != len(labels) or any(
+        not isinstance(label, str) or not label for label in labels
+    ):
+        raise ValueError("subgenome GRM labels must be unique non-empty strings")
+    checked = {
+        label: normalize_kernel(np.asarray(subgenome_grms[label], dtype=float), mode="trace")
+        for label in labels
+    }
+    n = next(iter(checked.values())).shape[0]
+    if any(value.shape != (n, n) for value in checked.values()):
+        raise ValueError("subgenome GRMs must be aligned square matrices")
+    Y = np.asarray(responses, dtype=float)
+    if Y.ndim == 1:
+        Y = Y[:, None]
+    X = np.asarray(fixed_effects, dtype=float)
+    if Y.ndim != 2 or Y.shape[0] != n or X.ndim != 2 or X.shape[0] != n:
+        raise ValueError("responses/fixed_effects must align to subgenome GRMs")
+    if not np.all(np.isfinite(Y)) or not np.all(np.isfinite(X)):
+        raise ValueError("global Hadamard VC inputs must be finite")
+    khom = normalize_kernel(hadamard_kernel(checked), mode="trace")
+    null_name = "+".join(labels) + "+e"
+    alt_name = "+".join(labels) + "+hom+e"
+    model_specs = {
+        null_name: list(labels),
+        alt_name: [*labels, "hom"],
+    }
+    kernels = {**checked, "hom": khom}
+    p_values: list[float] = []
+    statistics: list[float] = []
+    convergence: list[bool] = []
+    for column in range(Y.shape[1]):
+        comparison = compare_nested_reml(
+            Y[:, column], X, kernels, model_specs=model_specs,
+            fit_kwargs=dict(fit_kwargs or {}),
+        )
+        test = boundary_lrt(comparison, null_name, alt_name)
+        if not test.both_converged or test.clipped:
+            raise RuntimeError("global Hadamard VC nested REML did not converge cleanly")
+        p_values.append(float(test.p_mixture))
+        statistics.append(float(test.statistic))
+        convergence.append(bool(test.both_converged))
+    return {
+        "method": GLOBAL_VC_METHOD,
+        "hypothesis_unit": "global",
+        "detection_only": True,
+        "p_values": p_values,
+        "lrt_statistics": statistics,
+        "both_converged": convergence,
+        "kernel_manifest": {
+            "construction": "hadamard_product",
+            "normalization": "trace",
+            "subgenomes": list(labels),
+            "additive_kernel_sha256": {
+                label: _numeric_array_hash(value) for label, value in checked.items()
+            },
+            "global_hadamard_sha256": _numeric_array_hash(khom),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -117,6 +209,52 @@ class MethodScoreBank:
         object.__setattr__(
             self, "tested_family_sizes", MappingProxyType(checked_sizes)
         )
+
+
+def _payload_hash(value: object) -> str:
+    from .contracts import sha256_payload
+
+    return sha256_payload(value)
+
+
+@dataclass(frozen=True)
+class SNPxSNPCalibrationArtifact:
+    """Frozen raw SNP-product null scores shared by every matched target."""
+
+    member_ids: tuple[str, ...]
+    group_memberships: tuple[tuple[int, ...], ...]
+    calibration_p: np.ndarray
+
+    def __post_init__(self) -> None:
+        values = np.array(self.calibration_p, dtype=float, copy=True)
+        if (
+            values.ndim != 2
+            or values.shape[0] != len(self.member_ids)
+            or values.shape[1] < 1
+            or len(self.member_ids) != len(set(self.member_ids))
+            or len(self.group_memberships) != len(self.member_ids)
+            or any(not item for item in self.member_ids)
+            or not np.all(np.isfinite(values))
+        ):
+            raise ValueError("invalid frozen SNPxSNP calibration artifact")
+        values.setflags(write=False)
+        object.__setattr__(self, "calibration_p", values)
+
+    def reference_payload(self) -> dict[str, object]:
+        return {
+            "schema": "snpxsnp_calibration_v1",
+            "member_ids": list(self.member_ids),
+            "member_ids_sha256": _payload_hash(list(self.member_ids)),
+            "group_memberships": [list(value) for value in self.group_memberships],
+            "calibration_shape": list(self.calibration_p.shape),
+            "calibration_p_sha256": _numeric_array_hash(self.calibration_p),
+        }
+
+    def to_payload(self) -> dict[str, object]:
+        payload = self.reference_payload()
+        payload["calibration_p"] = self.calibration_p.tolist()
+        payload["artifact_sha256"] = _payload_hash(payload)
+        return payload
 
 
 def _validate_expanded_structure(
@@ -278,8 +416,10 @@ def score_snpxsnp_family(
     gene_blocks: Mapping[tuple[str, str], np.ndarray],
     responses: np.ndarray,
     *,
-    calibration_responses: np.ndarray,
-) -> tuple[np.ndarray, int]:
+    calibration_responses: np.ndarray | None = None,
+    calibration_artifact: SNPxSNPCalibrationArtifact | None = None,
+    return_artifact: bool = False,
+) -> tuple[np.ndarray, int] | tuple[np.ndarray, int, SNPxSNPCalibrationArtifact]:
     """Empirically correct every tested SNP product before forming group p.
 
     ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
@@ -291,10 +431,18 @@ def score_snpxsnp_family(
     _validate_frozen_family(family, expanded)
     sample_count = _validate_score_context(scores)
     target = _response_matrix(responses, sample_count, name="responses")
-    calibration = _response_matrix(
-        calibration_responses,
-        sample_count,
-        name="calibration_responses",
+    if (calibration_responses is None) is (calibration_artifact is None):
+        raise ValueError(
+            "provide exactly one of calibration_responses or calibration_artifact"
+        )
+    calibration = (
+        _response_matrix(
+            calibration_responses,
+            sample_count,
+            name="calibration_responses",
+        )
+        if calibration_responses is not None
+        else None
     )
     if not isinstance(gene_blocks, Mapping):
         raise ValueError("gene_blocks must map (subgenome, gene) to ndarrays")
@@ -331,7 +479,7 @@ def score_snpxsnp_family(
     W = np.asarray(scores.W, dtype=float)
     Cw = W @ np.asarray(scores.null_design, dtype=float)
     target_w = _whiten_columns(W, target)
-    calibration_w = _whiten_columns(W, calibration)
+    calibration_w = _whiten_columns(W, calibration) if calibration is not None else None
     groups_by_edge: list[tuple[int, ...]] = []
     for edge_index in range(len(expanded.edges)):
         groups_by_edge.append(tuple(
@@ -343,9 +491,26 @@ def score_snpxsnp_family(
     target_rows: list[np.ndarray] = []
     calibration_rows: list[np.ndarray] = []
     raw_group_membership: list[tuple[int, ...]] = []
+    member_ids: list[str] = []
     for edge_index, edge in enumerate(expanded.edges):
         left = checked_blocks[(edge.sub_x, edge.gene_x)]
         right = checked_blocks[(edge.sub_y, edge.gene_y)]
+        left_columns = np.asarray(
+            scores.gated_snp.get(
+                (edge.sub_x, edge.gene_x), np.arange(left.shape[1])
+            ),
+            dtype=int,
+        )
+        right_columns = np.asarray(
+            scores.gated_snp.get(
+                (edge.sub_y, edge.gene_y), np.arange(right.shape[1])
+            ),
+            dtype=int,
+        )
+        if left_columns.shape != (left.shape[1],) or right_columns.shape != (
+            right.shape[1],
+        ):
+            raise ValueError("gated SNP indices do not match genotype blocks")
         for left_index in range(left.shape[1]):
             for right_index in range(right.shape[1]):
                 design = _nested_snp_product_design(
@@ -355,16 +520,31 @@ def score_snpxsnp_family(
                     continue
                 reduced, added = design
                 target_rows.append(_batch_nested_f(target_w, reduced, added))
-                calibration_rows.append(
-                    _batch_nested_f(calibration_w, reduced, added)
-                )
+                if calibration_w is not None:
+                    calibration_rows.append(
+                        _batch_nested_f(calibration_w, reduced, added)
+                    )
                 raw_group_membership.append(groups_by_edge[edge_index])
+                member_ids.append(
+                    f"{edge.edge_id}|{int(left_columns[left_index])}|"
+                    f"{int(right_columns[right_index])}"
+                )
 
     tested_family_count = len(target_rows)
     if tested_family_count < 1:
         raise ValueError("SNPxSNP family has no genotype-estimable tested products")
     target_p = np.asarray(target_rows, dtype=float)
-    calibration_p = np.asarray(calibration_rows, dtype=float)
+    if calibration_artifact is None:
+        calibration_artifact = SNPxSNPCalibrationArtifact(
+            tuple(member_ids), tuple(raw_group_membership),
+            np.asarray(calibration_rows, dtype=float),
+        )
+    elif (
+        calibration_artifact.member_ids != tuple(member_ids)
+        or calibration_artifact.group_memberships != tuple(raw_group_membership)
+    ):
+        raise ValueError("SNPxSNP target family differs from frozen calibration artifact")
+    calibration_p = calibration_artifact.calibration_p
     group_p = np.full((len(family.group_ids), target.shape[1]), np.nan)
     pair_indices_by_group = [
         np.asarray(
@@ -390,13 +570,17 @@ def score_snpxsnp_family(
                 group_p[group_index, response_index] = float(
                     np.min(adjusted[pair_indices])
                 )
-    return group_p, tested_family_count
+    result = (group_p, tested_family_count)
+    return (*result, calibration_artifact) if return_artifact else result
 
 
 __all__ = [
+    "GLOBAL_VC_METHOD",
     "METHOD_NAMES",
     "MethodScoreBank",
+    "SNPxSNPCalibrationArtifact",
     "group_component_p",
     "score_legacy_burden_product",
     "score_snpxsnp_family",
+    "score_global_hadamard_vc",
 ]

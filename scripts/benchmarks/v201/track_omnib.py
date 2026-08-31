@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -27,10 +28,13 @@ from homoeogwas.omnib_family import (
 )
 
 from .comparators import (
+    GLOBAL_VC_METHOD,
     METHOD_NAMES,
     MethodScoreBank,
+    SNPxSNPCalibrationArtifact,
     _nested_snp_product_design,
     group_component_p,
+    score_global_hadamard_vc,
     score_snpxsnp_family,
 )
 from .contracts import Scenario, derive_seed, sha256_payload
@@ -105,6 +109,7 @@ class ConditionalBank:
     tested_family_members: Mapping[str, tuple[str, ...]]
     tested_family_hashes: Mapping[str, str]
     score_matrix_hashes: Mapping[str, str]
+    snpxsnp_calibration: SNPxSNPCalibrationArtifact
     calibration_reference: Mapping[str, Any]
     execution: Mapping[str, Any]
     runtime_seconds: float
@@ -138,7 +143,12 @@ class ConditionalBank:
     def p_by_method(self) -> Mapping[str, np.ndarray]:
         return self.score_bank.p_by_method
 
-    def to_payload(self, *, include_scores: bool = True) -> dict[str, Any]:
+    def to_payload(
+        self,
+        *,
+        include_scores: bool = True,
+        include_snpxsnp_artifact: bool = True,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "requested_role": self.requested_role,
             "canonical_role": self.canonical_role,
@@ -160,6 +170,9 @@ class ConditionalBank:
             },
             "tested_family_hashes": dict(self.tested_family_hashes),
             "score_matrix_hashes": dict(self.score_matrix_hashes),
+            "snpxsnp_calibration_reference": (
+                self.snpxsnp_calibration.reference_payload()
+            ),
             "calibration_reference": dict(self.calibration_reference),
             "execution": dict(self.execution),
             "requested_jobs": self.execution.get("requested_jobs", 1),
@@ -175,7 +188,52 @@ class ConditionalBank:
                 method: _json_safe(values)
                 for method, values in self.score_bank.p_by_method.items()
             }
+        if self.canonical_role == "calibration" and include_snpxsnp_artifact:
+            payload["snpxsnp_calibration_artifact"] = (
+                self.snpxsnp_calibration.to_payload()
+            )
         return payload
+
+    def statistical_artifact(self) -> dict[str, Any]:
+        """Restart-stable inferential commitment (no PID/runtime fields)."""
+
+        minima = {
+            method: _json_safe(np.where(
+                np.isfinite(values).any(axis=0),
+                np.where(np.isfinite(values), values, np.inf).min(axis=0),
+                np.nan,
+            ))
+            for method, values in self.score_bank.p_by_method.items()
+        }
+        artifact = {
+            "artifact_schema": "conditional_calibration_v1",
+            "stage": self.stage,
+            "canonical_role": self.canonical_role,
+            "seed_ids": list(self.seed_ids),
+            "seeds": list(self.seeds),
+            "response_hash": self.response_hash,
+            "response_metadata": [dict(item) for item in self.response_metadata],
+            "family_ids": list(self.family_ids),
+            "family_hash": self.family_hash,
+            "design_hash": self.design_hash,
+            "tested_family_sizes": dict(self.score_bank.tested_family_sizes),
+            "tested_family_members": {
+                method: list(value) for method, value in self.tested_family_members.items()
+            },
+            "tested_family_hashes": dict(self.tested_family_hashes),
+            "score_matrix_hashes": dict(self.score_matrix_hashes),
+            "snpxsnp_calibration_reference": (
+                self.snpxsnp_calibration.reference_payload()
+            ),
+            "method_minima": minima,
+            "method_minima_hashes": {
+                method: sha256_payload(value) for method, value in minima.items()
+            },
+            "failed_response_indices": list(
+                self.failure.get("failed_response_indices", [])
+            ),
+        }
+        return artifact
 
 
 @dataclass(frozen=True)
@@ -185,6 +243,9 @@ class _PreparedScenario:
     expanded: ExpandedEdgeFamily
     root_v: np.ndarray
     pc1: np.ndarray
+    genotype_main_effect: np.ndarray
+    omitted_kernel: np.ndarray
+    omitted_subgenome: str
     gene_blocks: Mapping[tuple[str, str], np.ndarray]
     family_hash: str
     setup_seed_id: str
@@ -399,6 +460,30 @@ def _context_root(context: OmniBBenchmarkContext) -> np.ndarray:
     return (vectors * np.sqrt(np.clip(values, 1e-12, None))) @ vectors.T
 
 
+def _subgenome_kernel(context: OmniBBenchmarkContext, label: str) -> np.ndarray:
+    values = np.asarray(context.subdata[label].X[context.sample_idx], dtype=float)
+    means = np.nanmean(values, axis=0)
+    values = np.where(np.isfinite(values), values, means)
+    centered = values - values.mean(axis=0)
+    scale = centered.std(axis=0, ddof=1)
+    usable = np.isfinite(scale) & (scale > 0)
+    standardized = centered[:, usable] / scale[usable]
+    kernel = standardized @ standardized.T / standardized.shape[1]
+    return 0.5 * (kernel + kernel.T)
+
+
+def _independent_main_effect(context: OmniBBenchmarkContext) -> np.ndarray:
+    label = context.family.subgenomes[0]
+    values = np.asarray(context.subdata[label].X[context.sample_idx], dtype=float)
+    means = np.nanmean(values, axis=0)
+    values = np.where(np.isfinite(values), values, means)
+    centered = values - values.mean(axis=0)
+    scale = centered.std(axis=0, ddof=1)
+    usable = np.isfinite(scale) & (scale > 0)
+    left, singular, _ = np.linalg.svd(centered[:, usable] / scale[usable], full_matrices=False)
+    return standardize(left[:, 0] * singular[0])
+
+
 def _root_from_covariance(covariance: np.ndarray) -> np.ndarray:
     values, vectors = np.linalg.eigh(0.5 * (covariance + covariance.T))
     return (vectors * np.sqrt(np.clip(values, 1e-12, None))) @ vectors.T
@@ -472,6 +557,9 @@ def _prepare_scenario(
         expanded=expanded,
         root_v=_root_from_covariance(scores.null_covariance),
         pc1=_pc1(context),
+        genotype_main_effect=_independent_main_effect(context),
+        omitted_kernel=_subgenome_kernel(context, context.family.subgenomes[-1]),
+        omitted_subgenome=context.family.subgenomes[-1],
         gene_blocks=blocks,
         family_hash=_family_hash(context.family),
         setup_seed_id=setup_seed_id,
@@ -485,7 +573,8 @@ def _method_scores(
     *,
     n_jobs: int,
     calibration_responses: np.ndarray | None = None,
-) -> tuple[MethodScoreBank, dict[str, Any]]:
+    snpxsnp_calibration: SNPxSNPCalibrationArtifact | None = None,
+) -> tuple[MethodScoreBank, dict[str, Any], SNPxSNPCalibrationArtifact]:
     _edge, group, components = score_omnib_responses(
         prepared.scores,
         prepared.context.family,
@@ -498,16 +587,21 @@ def _method_scores(
         group_component_p(components, prepared.expanded, component_index=index)
         for index in range(3)
     ]
-    snpxsnp, snpxsnp_size = score_snpxsnp_family(
+    snpxsnp_result = score_snpxsnp_family(
         prepared.scores,
         prepared.context.family,
         prepared.expanded,
         prepared.gene_blocks,
         responses,
         calibration_responses=(
-            responses if calibration_responses is None else calibration_responses
+            None
+            if snpxsnp_calibration is not None
+            else responses if calibration_responses is None else calibration_responses
         ),
+        calibration_artifact=snpxsnp_calibration,
+        return_artifact=True,
     )
+    snpxsnp, snpxsnp_size, frozen_snpxsnp = snpxsnp_result
     group_count = len(prepared.context.family.group_ids)
     return (
         MethodScoreBank(
@@ -530,7 +624,159 @@ def _method_scores(
             },
         ),
         response_execution,
+        frozen_snpxsnp,
     )
+
+
+def _local_five_scores(
+    prepared: _PreparedScenario,
+    responses: np.ndarray,
+    *,
+    n_jobs: int,
+) -> dict[str, np.ndarray]:
+    _edge, group, components = score_omnib_responses(
+        prepared.scores, prepared.context.family, prepared.expanded,
+        responses, n_jobs=n_jobs,
+    )
+    component = [
+        group_component_p(components, prepared.expanded, component_index=index)
+        for index in range(3)
+    ]
+    return {
+        "omnib": group,
+        "minor_burden": component[0],
+        "pc1": component[1],
+        "kernel_hadamard": component[2],
+        "legacy_burden_product": component[0].copy(),
+    }
+
+
+def run_family_size_stress(
+    context: OmniBBenchmarkContext,
+    *,
+    family_size: int,
+    response_count: int,
+    calibration_count: int,
+    design_hash: str,
+    qa_only: bool,
+    n_jobs: int,
+    scenario_id: str,
+) -> dict[str, Any]:
+    """Run the statistical family-size stress without conflating Track C."""
+
+    started = time.perf_counter()
+    if len(context.family.group_ids) != family_size:
+        raise ValueError("family-size context does not match declared family_size")
+    prepared = _prepare_scenario(
+        context, design_hash=design_hash, stage=_stage(qa_only),
+        scenario_id=scenario_id, n_jobs=n_jobs,
+    )
+    calibration, *_ = _draw_bank_responses(
+        prepared, requested_role="calibration", canonical_role="calibration",
+        count=calibration_count, design_hash=design_hash, stage=_stage(qa_only),
+        scenario_id=scenario_id + ".calibration", replicate_offset=0,
+        null_model="gaussian",
+    )
+    target, *_ = _draw_bank_responses(
+        prepared, requested_role="heldout", canonical_role="heldout",
+        count=response_count, design_hash=design_hash, stage=_stage(qa_only),
+        scenario_id=scenario_id + ".heldout", replicate_offset=0,
+        null_model="gaussian",
+    )
+    if family_size <= 80:
+        calibration_scores, _, snpxsnp_calibration = _method_scores(
+            prepared, calibration, n_jobs=n_jobs,
+            calibration_responses=calibration,
+        )
+        target_scores, _, target_snpxsnp = _method_scores(
+            prepared, target, n_jobs=n_jobs,
+            snpxsnp_calibration=snpxsnp_calibration,
+        )
+        calibration_map = dict(calibration_scores.p_by_method)
+        target_map = dict(target_scores.p_by_method)
+        tested_sizes = dict(target_scores.tested_family_sizes)
+        tested_members = {
+            method: tuple(context.family.group_ids)
+            for method in calibration_map
+        }
+        tested_members["snpxsnp"] = target_snpxsnp.member_ids
+        snpxsnp_status = "applicable"
+    else:
+        calibration_map = _local_five_scores(prepared, calibration, n_jobs=n_jobs)
+        target_map = _local_five_scores(prepared, target, n_jobs=n_jobs)
+        tested_sizes = {method: family_size for method in calibration_map}
+        tested_members = {
+            method: tuple(context.family.group_ids) for method in calibration_map
+        }
+        snpxsnp_status = "not_applicable_above_80"
+    tested_hashes = {
+        method: sha256_payload({
+            "method": method, "ordered_member_ids": list(members),
+        })
+        for method, members in tested_members.items()
+    }
+    thresholds = {
+        method: empirical_threshold(values) for method, values in calibration_map.items()
+    }
+    rejection = {
+        method: apply_threshold(target_map[method], thresholds[method])
+        for method in calibration_map
+    }
+    calibration_minima = {
+        method: _json_safe(np.where(
+            np.isfinite(values).any(axis=0),
+            np.where(np.isfinite(values), values, np.inf).min(axis=0),
+            np.nan,
+        ))
+        for method, values in calibration_map.items()
+    }
+    target_minima = {
+        method: _json_safe(np.where(
+            np.isfinite(values).any(axis=0),
+            np.where(np.isfinite(values), values, np.inf).min(axis=0),
+            np.nan,
+        ))
+        for method, values in target_map.items()
+    }
+    rejections_by_method = {
+        method: values.astype(bool).tolist() for method, values in rejection.items()
+    }
+    inference = (
+        {"qa_cutoffs": thresholds}
+        if qa_only else {"thresholds": thresholds}
+    )
+    return {
+        "experiment": "family_size", "family_size": family_size,
+        "group_count": family_size, "snpxsnp_status": snpxsnp_status,
+        "methods": sorted(calibration_map),
+        "tested_family_sizes": tested_sizes,
+        "tested_family_members": {
+            method: list(members) for method, members in tested_members.items()
+        },
+        "tested_family_hashes": tested_hashes,
+        "calibration_minima_by_method": calibration_minima,
+        "target_minima_by_method": target_minima,
+        "calibration_minima_hashes": {
+            method: sha256_payload(values)
+            for method, values in calibration_minima.items()
+        },
+        "target_minima_hashes": {
+            method: sha256_payload(values)
+            for method, values in target_minima.items()
+        },
+        "rejections_by_method": rejections_by_method,
+        "fwer": {method: float(np.mean(values))
+                 for method, values in rejections_by_method.items()},
+        "failure_rate": 0.0, "runtime_seconds": float(time.perf_counter() - started),
+        "calibration_count": calibration_count, "response_count": response_count,
+        "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
+        "failure": {"failed": False, "status": "completed"},
+        "requested_jobs": n_jobs,
+        "effective_jobs": int(prepared.scores.parallel_execution.get("effective_jobs", 1)),
+        "parallel_backend": prepared.scores.parallel_execution.get("backend", "serial"),
+        "worker_pids": list(prepared.scores.parallel_execution.get("worker_pids", [])),
+        **inference,
+    }
 
 
 def _tested_family_members(prepared: _PreparedScenario) -> dict[str, tuple[str, ...]]:
@@ -609,6 +855,10 @@ def _draw_bank_responses(
                 prepared.root_v,
                 rng,
                 prepared.pc1,
+                genotype_main_effect=prepared.genotype_main_effect,
+                omitted_kernel=prepared.omitted_kernel,
+                omitted_subgenome=prepared.omitted_subgenome,
+                omitted_variance=0.25,
             )
         else:
             response, row_metadata = response_factory(rng, replicate)
@@ -652,6 +902,7 @@ def _bank_from_prepared(
     response_factory: Any = None,
     calibration_responses: np.ndarray | None = None,
     calibration_reference: Mapping[str, Any] | None = None,
+    snpxsnp_calibration: SNPxSNPCalibrationArtifact | None = None,
 ) -> ConditionalBank:
     started = time.perf_counter()
     canonical_role = _canonical_role(bank)
@@ -700,11 +951,12 @@ def _bank_from_prepared(
         }
     failure: dict[str, Any] = {"failed": False, "failed_response_indices": []}
     try:
-        score_bank, response_execution = _method_scores(
+        score_bank, response_execution, frozen_snpxsnp = _method_scores(
             prepared,
             responses,
             n_jobs=n_jobs,
             calibration_responses=calibration_responses,
+            snpxsnp_calibration=snpxsnp_calibration,
         )
     except Exception as error:
         failure = {
@@ -772,9 +1024,10 @@ def _bank_from_prepared(
         tested_family_members=members,
         tested_family_hashes=tested_hashes,
         score_matrix_hashes={
-            method: _array_hash(values)
+            method: sha256_payload(_json_safe(values))
             for method, values in score_bank.p_by_method.items()
         },
+        snpxsnp_calibration=frozen_snpxsnp,
         calibration_reference=dict(calibration_reference),
         execution=response_execution,
         runtime_seconds=float(time.perf_counter() - started),
@@ -873,6 +1126,110 @@ def run_conditional_bank(
         calibration_responses=calibration_responses,
         calibration_reference=calibration_reference,
     )
+
+
+def _global_grms(prepared: _PreparedScenario) -> dict[str, np.ndarray]:
+    return {
+        label: _subgenome_kernel(prepared.context, label)
+        for label in prepared.context.family.subgenomes
+    }
+
+
+def run_global_vc_bank(
+    context: OmniBBenchmarkContext,
+    *,
+    bank: str,
+    count: int,
+    design_hash: str,
+    qa_only: bool,
+    scenario_id: str,
+) -> dict[str, Any]:
+    """Run the standalone global K_hom VC comparator on frozen null banks."""
+
+    started = time.perf_counter()
+    count = _validate_count(count)
+    role = _canonical_role(bank)
+    if role not in {"calibration", "heldout"}:
+        raise ValueError("global VC bank must be calibration or heldout")
+    _require_formal_budget(count, qa_only, "global VC bank")
+    stage = _stage(qa_only)
+    prepared = _prepare_scenario(
+        context, design_hash=design_hash, stage=stage,
+        scenario_id=scenario_id, n_jobs=1,
+    )
+    target, target_seeds, target_ids, target_meta = _draw_bank_responses(
+        prepared, requested_role=role, canonical_role=role, count=count,
+        design_hash=design_hash, stage=stage, scenario_id=scenario_id,
+        replicate_offset=0, null_model="gaussian",
+    )
+    calibration_scenario_id = scenario_id.replace(".heldout", ".calibration")
+    if role == "calibration":
+        calibration = target
+        calibration_ids = target_ids
+    else:
+        calibration, _seeds, calibration_ids, _meta = _draw_bank_responses(
+            prepared, requested_role="calibration", canonical_role="calibration",
+            count=count, design_hash=design_hash, stage=stage,
+            scenario_id=calibration_scenario_id, replicate_offset=0,
+            null_model="gaussian",
+        )
+        if set(calibration_ids) & set(target_ids):
+            raise RuntimeError("global VC calibration and heldout seed IDs overlap")
+    grms = _global_grms(prepared)
+    calibration_result = score_global_hadamard_vc(
+        calibration, np.ones((calibration.shape[0], 1)), grms,
+        fit_kwargs={"n_starts": 1},
+    )
+    target_result = (
+        calibration_result if role == "calibration" else score_global_hadamard_vc(
+            target, np.ones((target.shape[0], 1)), grms,
+            fit_kwargs={"n_starts": 1},
+        )
+    )
+    calibration_p = np.asarray(calibration_result["p_values"], dtype=float)
+    target_p = np.asarray(target_result["p_values"], dtype=float)
+    if not np.all(np.isfinite(calibration_p)) or not np.all(np.isfinite(target_p)):
+        raise RuntimeError("global VC produced a non-finite p-value")
+    threshold = float(np.quantile(calibration_p, 0.05, method="lower"))
+    evidence: dict[str, Any]
+    if qa_only:
+        evidence = {
+            "qa_calibration_cutoff": threshold,
+            "qa_detection_flags": (target_p <= threshold).tolist(),
+        }
+    else:
+        evidence = {
+            "threshold": threshold,
+            "rejected": (target_p <= threshold).tolist(),
+        }
+    return {
+        "experiment": "global_vc",
+        "scenario_id": scenario_id,
+        "stage": stage,
+        "method": GLOBAL_VC_METHOD,
+        "hypothesis_unit": "global",
+        "detection_only": True,
+        "response_count": count,
+        "target_role": role,
+        "calibration_scenario_id": calibration_scenario_id,
+        "calibration_response_ids": list(calibration_ids),
+        "target_response_ids": list(target_ids),
+        "target_seeds": list(target_seeds),
+        "target_response_metadata": list(target_meta),
+        "calibration_p_values": calibration_p.tolist(),
+        "target_p_values": target_p.tolist(),
+        "calibration_p_hash": sha256_payload(calibration_p.tolist()),
+        "target_p_hash": sha256_payload(target_p.tolist()),
+        "kernel_manifest": target_result["kernel_manifest"],
+        "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
+        "failure": {"failed": False, "status": "completed"},
+        "requested_jobs": 1,
+        "effective_jobs": 1,
+        "parallel_backend": "serial",
+        "worker_pids": [os.getpid()],
+        "runtime_seconds": float(time.perf_counter() - started),
+        **evidence,
+    }
 
 
 def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None:
@@ -1149,7 +1506,10 @@ def _group_signal(
         raise ValueError("causal_groups must select one or more declared groups")
     signals: list[np.ndarray] = []
     metadata: list[dict[str, Any]] = []
-    causal_ids = list(family.group_ids[:causal_groups])
+    causal_ids = (
+        [] if architecture in {"additive_only", "mispaired"}
+        else list(family.group_ids[:causal_groups])
+    )
     for group_index in range(causal_groups):
         blocks = {
             subgenome: prepared.gene_blocks[(subgenome, family.genes[group_index][copy_index])]
@@ -1225,8 +1585,8 @@ def run_power_replicate(
         or null_model != "gaussian"
     ):
         raise ValueError("power calibration bank differs from the frozen Gaussian bank")
-    calibration_payload = calibration_bank.to_payload(include_scores=False)
-    calibration_manifest_hash = sha256_payload(calibration_payload)
+    calibration_artifact = calibration_bank.statistical_artifact()
+    calibration_manifest_hash = sha256_payload(calibration_artifact)
     request_record = request_identity or {
         "entrypoint": "run_power_replicate",
         "scenario_id": scenario_id,
@@ -1275,7 +1635,11 @@ def run_power_replicate(
         rng: np.random.Generator, _replicate: int
     ) -> tuple[np.ndarray, dict[str, Any]]:
         residual, residual_metadata = draw_null(
-            null_model, prepared.root_v, rng, prepared.pc1
+            null_model, prepared.root_v, rng, prepared.pc1,
+            genotype_main_effect=prepared.genotype_main_effect,
+            omitted_kernel=prepared.omitted_kernel,
+            omitted_subgenome=prepared.omitted_subgenome,
+            omitted_variance=0.25,
         )
         phenotype, pve_metadata = compose_exact_pve(signal, residual, interaction_pve)
         return phenotype, {
@@ -1302,6 +1666,7 @@ def run_power_replicate(
             calibration.seed_ids,
             calibration_scenario_id,
         ),
+        snpxsnp_calibration=calibration.snpxsnp_calibration,
     )
     _assert_independent_banks(calibration, target)
     thresholds: dict[str, float | None] = {}
@@ -1319,7 +1684,8 @@ def run_power_replicate(
     causal_index = np.array(
         [context.family.group_ids.index(group_id) for group_id in causal_ids], dtype=int
     )
-    causal_detection = {
+    negative_control = architecture in {"additive_only", "mispaired"}
+    causal_detection = {} if negative_control else {
         method: (
             np.nanmin(target.p_by_method[method][causal_index], axis=0)
             < thresholds[method]
@@ -1344,7 +1710,7 @@ def run_power_replicate(
         )
         for method, values in target.p_by_method.items()
     }
-    causal_minima = {
+    causal_minima = {} if negative_control else {
         method: np.asarray(values[causal_index], dtype=float)
         for method, values in target.p_by_method.items()
     }
@@ -1360,7 +1726,7 @@ def run_power_replicate(
         method: sha256_payload(_json_safe(values))
         for method, values in causal_minima.items()
     }
-    recall = {
+    recall = {} if negative_control else {
         method: (
             np.mean(causal_minima[method] < thresholds[method], axis=0).tolist()
             if thresholds[method] is not None
@@ -1383,6 +1749,7 @@ def run_power_replicate(
             "architecture": architecture,
             "interaction_pve": float(interaction_pve),
             "causal_group_ids": causal_ids,
+            "control_type": "negative" if negative_control else "positive",
             "signal_metadata": signal_metadata,
             "calibration_role": calibration.canonical_role,
             "target_role": target.canonical_role,
@@ -1399,19 +1766,18 @@ def run_power_replicate(
             "calibration_response_hash": calibration.response_hash,
             "calibration_scenario_id": calibration_scenario_id,
             "calibration_bank_manifest_hash": calibration_manifest_hash,
+            "calibration_artifact": calibration_artifact,
             "target_response_hash": target.response_hash,
             "threshold_source": "independent_calibration_bank",
             "thresholds": thresholds,
             "rejections_by_method": rejections,
-            "causal_detection_by_method": causal_detection,
-            "recall_by_method": recall,
             "calibration_minima_by_method": calibration_minima,
             "target_minima_by_method": target_minima,
-            "causal_minima_by_method": causal_minima,
             "calibration_minima_hashes": calibration_minima_hashes,
             "target_minima_hashes": target_minima_hashes,
-            "causal_minima_hashes": causal_minima_hashes,
-            "calibration_bank": calibration.to_payload(include_scores=False),
+            "calibration_bank": calibration.to_payload(
+                include_scores=False, include_snpxsnp_artifact=False
+            ),
             "target_bank": target.to_payload(include_scores=False),
             "effective_jobs": target.execution.get("effective_jobs", 1),
             "parallel_backend": target.execution.get("backend", "serial"),
@@ -1444,6 +1810,22 @@ def run_power_replicate(
             "runtime_seconds": float(time.perf_counter() - started),
         }
     )
+    if negative_control:
+        payload["false_positive_by_method"] = {
+            method: np.any(np.asarray(values, dtype=bool), axis=0).tolist()
+            for method, values in rejections.items()
+        }
+        payload["specificity_by_method"] = {
+            method: [not value for value in payload["false_positive_by_method"][method]]
+            for method in METHOD_NAMES
+        }
+    else:
+        payload.update({
+            "causal_detection_by_method": causal_detection,
+            "recall_by_method": recall,
+            "causal_minima_by_method": causal_minima,
+            "causal_minima_hashes": causal_minima_hashes,
+        })
     result = _json_safe(payload)
     if shard_path is not None:
         write_shard_exclusive(Path(shard_path), result)
@@ -1458,6 +1840,7 @@ def _score_fixed_context(
     bootstrap_seed: int,
     n_jobs: int,
 ) -> dict[str, Any]:
+    context = _canonical_encoding_context(context)
     scores, _expanded = score_omnib_family(
         context.subdata,
         context.family,
@@ -1504,6 +1887,36 @@ def _score_fixed_context(
             "sha256": _array_hash(scores.null_covariance),
         },
     }
+
+
+def _canonical_encoding_context(
+    context: OmniBBenchmarkContext,
+) -> OmniBBenchmarkContext:
+    """Canonicalize stable column IDs and empirical minor-allele orientation.
+
+    Synthetic benchmark column indices are the frozen variant IDs.  Sorting
+    each gene mapping by that ID removes input-column traversal effects, while
+    orienting every dosage column to empirical AF <= 0.5 makes 2-X allele
+    recoding an exact array identity before any numerical scoring occurs.
+    """
+
+    matrices: dict[str, np.ndarray] = {}
+    mappings: dict[str, dict[str, np.ndarray]] = {}
+    for label, data in context.subdata.items():
+        values = np.array(data.X, dtype=float, copy=True)
+        with np.errstate(invalid="ignore"):
+            af = np.nanmean(values[context.sample_idx], axis=0) / 2.0
+        flip = np.isfinite(af) & (af > 0.5)
+        finite = np.isfinite(values[:, flip])
+        oriented = values[:, flip]
+        oriented[finite] = 2.0 - oriented[finite]
+        values[:, flip] = oriented
+        matrices[label] = values
+        mappings[label] = {
+            gene: np.sort(np.asarray(indices, dtype=int))
+            for gene, indices in data.gene_snp.items()
+        }
+    return _replace_subdata(context, matrices, mappings)
 
 
 def _copy_context(
@@ -1617,6 +2030,7 @@ def _exact_comparison(
         baseline["adjusted"], candidate["adjusted"], equal_nan=True
     ) and np.array_equal(baseline["decisions"], candidate["decisions"])
     return {
+        "status": "completed",
         "required": required,
         "observed_arrays_identical": bool(observed_identical),
         "adjusted_decisions_identical": bool(decisions_identical),
@@ -1624,6 +2038,11 @@ def _exact_comparison(
         "rejection_sets_identical": set(baseline["rejections"]) == set(candidate["rejections"]),
         "baseline_observed_hash": _array_hash(baseline["observed"]),
         "candidate_observed_hash": _array_hash(candidate["observed"]),
+        "requested_jobs": None,
+        "effective_jobs": None,
+        "backend": None,
+        "worker_pids": [],
+        "skip_reason": None,
     }
 
 
@@ -1826,6 +2245,8 @@ def run_encoding_check(
                 )
                 robustness[name] = {
                     "status": "completed",
+                    "error_type": None,
+                    "message": None,
                     **_robustness_metrics(baseline, candidate),
                 }
             except Exception as error:
@@ -1836,9 +2257,11 @@ def run_encoding_check(
                     "fwer": None,
                     "power": None,
                     "rank_correlation": None,
+                    "top_k": None,
                     "top_k_jaccard": None,
                     "non_estimable_rate": None,
                     "absolute_power_regret": None,
+                    "note": "robustness scoring failed; no metric was inferred",
                 }
     required_checks = [check for check in exact_checks.values() if check["required"]]
     exact_fields = (
@@ -1913,7 +2336,9 @@ def run_omnib_replicate(
     if replicate < 0 or replicate >= scenario.replicates:
         raise ValueError("replicate is outside the scenario registry range")
     experiment = scenario.parameters.get("experiment")
-    if experiment not in {"end2end", "conditional", "power", "encoding"}:
+    if experiment not in {
+        "end2end", "conditional", "power", "encoding", "global_vc", "family_size",
+    }:
         raise ValueError(f"unsupported Track B experiment: {experiment!r}")
     canonical_bank = (
         _canonical_role(str(scenario.parameters.get("bank", "heldout")))
@@ -1930,7 +2355,7 @@ def run_omnib_replicate(
     }
     if experiment == "power":
         request_record["calibration_bank_manifest_hash"] = (
-            sha256_payload(power_calibration_bank.to_payload(include_scores=False))
+            sha256_payload(power_calibration_bank.statistical_artifact())
             if isinstance(power_calibration_bank, ConditionalBank) else None
         )
     request_hash = _request_hash(
@@ -1985,6 +2410,37 @@ def run_omnib_replicate(
                 "experiment": "conditional",
                 "bank": bank.to_payload(),
                 "failure": dict(bank.failure),
+            }
+        elif experiment == "global_vc":
+            payload = run_global_vc_bank(
+                context,
+                bank=str(scenario.parameters["bank"]),
+                count=scenario.replicates,
+                design_hash=design_hash,
+                qa_only=qa_only,
+                scenario_id=scenario.scenario_id,
+            )
+            payload = {
+                "track": "omnib",
+                "replicate": replicate,
+                "design_hash": design_hash,
+                **payload,
+            }
+        elif experiment == "family_size":
+            declared_size = int(scenario.parameters["family_size"])
+            payload = {
+                **_base_replicate_payload(
+                    context, replicate=replicate, design_hash=design_hash,
+                    stage=scenario.stage, scenario_id=scenario.scenario_id,
+                    n_jobs=n_jobs,
+                ),
+                **run_family_size_stress(
+                    context, family_size=declared_size,
+                    response_count=scenario.replicates,
+                    calibration_count=scenario.bootstrap_B,
+                    design_hash=design_hash, qa_only=qa_only, n_jobs=n_jobs,
+                    scenario_id=scenario.scenario_id,
+                ),
             }
         elif experiment == "power":
             payload = run_power_replicate(
@@ -2063,6 +2519,8 @@ __all__ = [
     "empirical_threshold",
     "run_conditional_bank",
     "run_encoding_check",
+    "run_global_vc_bank",
+    "run_family_size_stress",
     "run_end_to_end_null",
     "run_omnib_replicate",
     "run_power_replicate",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from scripts.benchmarks.v201.audit import _audit_fit_scenario
 from scripts.benchmarks.v201.contracts import Scenario, derive_seed, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_fit import (
+    _released_config_context,
+    _released_fit_inputs,
     build_fit_config,
     build_scan_comparators,
     experiment_wide_scan_fwer,
@@ -1394,6 +1397,11 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
         output, sample_ids=sample_ids, bootstrap=False, loco=True
     )
     _, _, kernels = _production_released_inputs(output)
+    binding = _released_fit_inputs(
+        _released_config_context(output), sample_ids,
+        expected_phenotype=None, expected_kernels=kernels,
+        expected_truth_hash=None,
+    )
     scenario = Scenario(
         f"A.loco.cotton.pve_{scan_pve}", "fit", "formal", 1, 0,
         {"experiment": "loco", "scan_pve": scan_pve, "panel": "cotton"},
@@ -1401,6 +1409,15 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     truth = {
         "scan_pve": scan_pve, "distance_unit": "bp",
         "causal_variants": causal_variants,
+        "analysis_context": {
+            "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
+            "joined_phenotype": binding["joined_phenotype"],
+            "kernel_order": binding["kernel_order"],
+            "kernel_fingerprints": binding["kernel_fingerprints"],
+            "generated_config_sha256": hashlib.sha256(
+                (output / "configs" / "fit.generated.yaml").read_bytes()
+            ).hexdigest(),
+        },
     }
     truth["truth_hash"] = sha256_payload(truth)
     result = run_fit_replicate(
@@ -1410,6 +1427,7 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     )
     assert result["failure"]["failed"] is False
     assert result["released_scan_truth_binding"]["distance_unit"] == "bp"
+    assert result["released_request_binding"]["truth_hash"] == truth["truth_hash"]
     assert result["scan_request_manifest"]["bp_positions_explicit"] is True
     assert _audit_fit_scenario(result, scenario) is True
 

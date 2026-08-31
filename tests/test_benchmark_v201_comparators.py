@@ -13,8 +13,10 @@ from homoeogwas.group_family import (
 )
 from homoeogwas.interact import SubgenomeData
 from scripts.benchmarks.v201.comparators import (
+    GLOBAL_VC_METHOD,
     MethodScoreBank,
     group_component_p,
+    score_global_hadamard_vc,
     score_legacy_burden_product,
     score_snpxsnp_family,
 )
@@ -27,6 +29,30 @@ METHODS = (
     "legacy_burden_product",
     "snpxsnp",
 )
+
+
+def test_global_hadamard_vc_is_real_detection_only_and_not_local_method():
+    rng = np.random.default_rng(20260830)
+    n = 28
+    Xa = rng.normal(size=(n, 6))
+    Xb = rng.normal(size=(n, 6))
+    grms = {"A": Xa @ Xa.T / Xa.shape[1], "B": Xb @ Xb.T / Xb.shape[1]}
+    responses = rng.normal(size=(n, 2))
+    result = score_global_hadamard_vc(
+        responses,
+        np.ones((n, 1)),
+        grms,
+        fit_kwargs={"n_starts": 1, "maxiter": 50},
+    )
+    assert GLOBAL_VC_METHOD not in METHODS
+    assert result["method"] == GLOBAL_VC_METHOD
+    assert result["hypothesis_unit"] == "global"
+    assert result["detection_only"] is True
+    assert len(result["p_values"]) == 2
+    assert all(0.0 <= value <= 1.0 for value in result["p_values"])
+    assert "group_ids" not in result
+    assert "causal_recall" not in result
+    assert result["kernel_manifest"]["construction"] == "hadamard_product"
 
 
 def _edge(

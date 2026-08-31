@@ -134,6 +134,41 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
             include_robustness=True,
         ))
 
+    # A standalone, non-localizing variance-component comparator.  It is not
+    # one of the six local METHOD_NAMES and therefore has its own response
+    # banks, threshold and evidence rows.
+    for backbone in ("cotton", "wheat", "quartet"):
+        copies, edges = {
+            "cotton": (2, 1), "wheat": (3, 3), "quartet": (4, 6),
+        }[backbone]
+        for bank in ("calibration", "heldout"):
+            rows.append(_scenario(
+                f"B.global_vc.{backbone}.gaussian.{bank}", "omnib", stage,
+                20 if stage == "pilot" else 2_000,
+                199 if stage == "pilot" else 0,
+                backbone=backbone, experiment="global_vc", bank=bank,
+                null_model="gaussian", method="global_hadamard_variance_component",
+                hypothesis_unit="global", detection_only=True,
+                copies=copies, edges_per_group=edges, direct_four_way=False,
+            ))
+
+    # Statistical family-size stress is separate from machine-scaling Track C.
+    for backbone in ("cotton", "wheat", "quartet"):
+        for family_size in (80, 500, 2_000):
+            rows.append(omnib_row(
+                f"B.family_size.{backbone}.g{family_size}",
+                20 if stage == "pilot" else 1_000,
+                199 if stage == "pilot" else 2_000,
+                backbone=backbone, experiment="family_size",
+                family_size=family_size, null_model="gaussian", stress=True,
+                acceptance_eligible=False,
+                snpxsnp_status=(
+                    "applicable" if family_size == 80
+                    else "not_applicable_above_80"
+                ),
+                global_vc_reported_separately=True,
+            ))
+
     architectures = (
         "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
         "single_snp_pair", "mixed_sign", "multi_edge_group", "additive_only",
@@ -141,6 +176,9 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
     )
     for backbone in ("cotton", "wheat", "quartet"):
         for architecture in architectures:
+            if backbone == "cotton" and architecture == "multi_edge_group":
+                continue
+            negative_control = architecture in {"additive_only", "mispaired"}
             for causal_groups in (1, 4):
                 for pve in (0.02, 0.05, 0.10):
                     rows.append(omnib_row(
@@ -151,6 +189,9 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                         interaction_pve=pve,
                         calibration_count=20 if stage == "pilot" else 2_000,
                         response_count=1,
+                        control_type="negative" if negative_control else "positive",
+                        report_metric="specificity" if negative_control else "power",
+                        causal_group_ids=[] if negative_control else "derived_from_frozen_family",
                         null_model="gaussian",
                         calibration_scenario_id=(
                             f"B.conditional.{backbone}.gaussian.calibration"

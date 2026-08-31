@@ -1698,6 +1698,34 @@ def run_fit_replicate(
             if fit_output_dir is None or released_source is None or released_request_binding is None:
                 raise ValueError("released LOCO truth requires bound production output")
             released_truth_manifest = _truth_manifest(released_scan_truth)
+            expected_analysis_context = {
+                "analysis_sample_ids_sha256": released_request_binding[
+                    "analysis_sample_ids_sha256"
+                ],
+                "joined_phenotype": released_request_binding["joined_phenotype"],
+                "kernel_order": released_request_binding["kernel_order"],
+                "kernel_fingerprints": released_request_binding[
+                    "kernel_fingerprints"
+                ],
+                "generated_config_sha256": released_source["files"][
+                    "generated_config"
+                ]["sha256"],
+            }
+            if released_truth_manifest.get("analysis_context") != expected_analysis_context:
+                raise ValueError(
+                    "released LOCO truth is not bound to the pre-run analysis context"
+                )
+            released_request_binding = {
+                **released_request_binding,
+                "truth_hash": released_scan_truth["truth_hash"],
+            }
+            released_request_binding["sha256"] = sha256_payload(
+                {
+                    key: value
+                    for key, value in released_request_binding.items()
+                    if key != "sha256"
+                }
+            )
             if released_truth_manifest.get("distance_unit") != "bp":
                 raise ValueError("released LOCO truth distance unit must be bp")
             if released_truth_manifest.get("scan_pve") != scenario.parameters.get("scan_pve"):

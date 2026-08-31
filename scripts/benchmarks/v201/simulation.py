@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from itertools import combinations
 from numbers import Real
@@ -19,7 +20,7 @@ _NULL_ALIASES = {
     "contamination_1pct_6sd": "contamination_1pct_6sd",
     "contamination": "contamination_1pct_6sd",
     "additive_only": "additive_only",
-    "structure_aligned": "additive_only",
+    "structure_aligned": "structure_aligned",
     "omitted_kernel": "omitted_kernel",
     "omitted_kernel_sensitivity": "omitted_kernel",
 }
@@ -129,6 +130,11 @@ def draw_null(
     root_V: np.ndarray,
     rng: np.random.Generator,
     pc1: np.ndarray,
+    *,
+    genotype_main_effect: np.ndarray | None = None,
+    omitted_kernel: np.ndarray | None = None,
+    omitted_subgenome: str | None = None,
+    omitted_variance: float | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Draw one standardized Track B null response with audit metadata.
 
@@ -141,11 +147,6 @@ def draw_null(
         raise ValueError(f"unknown null kind: {kind!r}")
     root, pc = _validate_null_inputs(root_V, rng, pc1)
     canonical_kind = _NULL_ALIASES[kind]
-    if canonical_kind == "omitted_kernel":
-        raise NotImplementedError(
-            "omitted_kernel requires an explicit held-out subgenome kernel; "
-            "the PC1 surrogate is forbidden"
-        )
     n, rank = root.shape
     metadata: dict[str, Any] = {
         "kind": kind,
@@ -164,7 +165,9 @@ def draw_null(
         "contamination_1pct_6sd": (
             "standardize(standardize(root_V @ standard_normal) + signed_six_sd_outliers)"
         ),
-        "additive_only": ("standardize(standardize(root_V @ standard_normal) + standardize(pc1))"),
+        "additive_only": ("standardize(null_draw + independent_genotype_main_effect)"),
+        "structure_aligned": ("standardize(null_draw + standardize(pc1))"),
+        "omitted_kernel": ("standardize(fitted_null_draw + held_out_subgenome_kernel_effect)"),
     }
     metadata["response_generation"] = generation[canonical_kind]
 
@@ -213,14 +216,51 @@ def draw_null(
             }
         )
     elif canonical_kind == "additive_only":
-        main_effect = standardize(pc)
+        raw_main = np.roll(pc, 1) if genotype_main_effect is None else np.asarray(
+            genotype_main_effect, dtype=float
+        )
+        if raw_main.shape != (n,) or not np.all(np.isfinite(raw_main)):
+            raise ValueError("genotype_main_effect must be a finite aligned vector")
+        main_effect = standardize(raw_main)
         response = standardize(response) + main_effect
         metadata.update(
             {
-                "main_effect": "pc1",
+                "main_effect": "independent_genotype_main_effect",
                 "main_effect_scale": 1.0,
+                "main_effect_pc1_correlation": float(np.corrcoef(main_effect, pc)[0, 1]),
             }
         )
+    elif canonical_kind == "structure_aligned":
+        response = standardize(response) + standardize(pc)
+        metadata.update({"main_effect": "pc1_aligned", "main_effect_scale": 1.0})
+    elif canonical_kind == "omitted_kernel":
+        if omitted_kernel is None or not isinstance(omitted_subgenome, str) or not omitted_subgenome:
+            raise ValueError("omitted_kernel requires an explicit kernel and subgenome")
+        K = np.asarray(omitted_kernel, dtype=float)
+        if K.shape != (n, n) or not np.all(np.isfinite(K)):
+            raise ValueError("omitted_kernel must be a finite aligned square matrix")
+        K = 0.5 * (K + K.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(K)
+        if float(eigenvalues.min()) < -1e-8:
+            raise ValueError("omitted_kernel must be positive semidefinite")
+        if (
+            isinstance(omitted_variance, bool)
+            or not isinstance(omitted_variance, Real)
+            or not 0.0 < float(omitted_variance) < 1.0
+        ):
+            raise ValueError("omitted_variance must be in (0, 1)")
+        effect = (eigenvectors * np.sqrt(np.clip(eigenvalues, 0.0, None))) @ (
+            rng.standard_normal(n)
+        )
+        response = np.sqrt(1.0 - float(omitted_variance)) * standardize(response)
+        response += np.sqrt(float(omitted_variance)) * standardize(effect)
+        digest = hashlib.sha256(np.ascontiguousarray(K).tobytes()).hexdigest()
+        metadata.update({
+            "omitted_subgenome": omitted_subgenome,
+            "omitted_variance": float(omitted_variance),
+            "omitted_kernel_sha256": digest,
+            "fitted_null_includes_omitted_kernel": False,
+        })
     return standardize(response), metadata
 
 

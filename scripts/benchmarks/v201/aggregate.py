@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .comparators import METHOD_NAMES
 from .contracts import canonical_json, sha256_payload
 from .scenarios import build_scenarios
@@ -91,13 +93,14 @@ TABLE_SCHEMAS: dict[str, tuple[str, ...]] = {
     "omnib_null_replicates.tsv": _COMMON + (
         "method", "null_model", "stress", "bank_role", "response_index",
         "minimum_p", "threshold", "rejected", "family_size", "family_hash",
-        "family_order_hash", "response_seed_id", "calibration_seed_id",
+        "family_order_hash", "score_family_size", "tested_family_size",
+        "tested_family_hash", "response_seed_id", "calibration_seed_id",
         "successes", "total", "estimate", "ci_low", "ci_high",
         "failures",
     ),
     "omnib_power_replicates.tsv": _COMMON + (
-        "method", "architecture", "interaction_pve", "causal_groups",
-        "response_index", "detected", "recall", "threshold", "family_hash",
+        "method", "architecture", "control_type", "interaction_pve", "causal_groups",
+        "response_index", "detected", "false_positive", "specificity", "recall", "threshold", "family_hash",
         "calibration_response_hash", "target_response_hash",
         "null_calibration_gate", "eligible_for_power_summary", "successes", "total",
         "estimate", "ci_low", "ci_high", "failures",
@@ -137,6 +140,33 @@ TABLE_SCHEMAS: dict[str, tuple[str, ...]] = {
         "failures", "failure_rate", "passed", "status", "evidence_path", "reason",
     ),
 }
+
+_PILOT_FORMAL_FIELDS = {
+    "fit_pve_coverage.tsv": {"covered"},
+    "fit_scan_metrics.tsv": {"rejected", "causal_detected"},
+    "omnib_null_replicates.tsv": {"threshold", "rejected"},
+    "omnib_power_replicates.tsv": {
+        "detected", "false_positive", "specificity", "recall", "threshold",
+        "null_calibration_gate", "eligible_for_power_summary",
+    },
+    "benchmark_acceptance.tsv": {"passed"},
+}
+
+
+def table_schemas(stage: str) -> dict[str, tuple[str, ...]]:
+    """Return stage-appropriate table headers without pilot inference fields."""
+
+    if stage not in {"pilot", "formal"}:
+        raise ValueError("table stage must be pilot or formal")
+    if stage == "formal":
+        return dict(TABLE_SCHEMAS)
+    return {
+        name: tuple(
+            field for field in fields
+            if field not in _PILOT_FORMAL_FIELDS.get(name, set())
+        )
+        for name, fields in TABLE_SCHEMAS.items()
+    }
 
 _HEX = set("0123456789abcdef")
 _REGISTRY_HEADER = (
@@ -229,7 +259,9 @@ def _read_registry(path: Path) -> tuple[RegistryRow, ...]:
 
 def _expected_replicates(row: RegistryRow) -> range:
     experiment = row.parameters.get("experiment")
-    if row.track in {"scaling", "application"} or experiment == "conditional":
+    if row.track in {"scaling", "application"} or experiment in {
+        "conditional", "global_vc", "family_size",
+    }:
         return range(1)
     return range(row.replicates)
 
@@ -244,6 +276,8 @@ def _file_sha256(path: Path, label: str) -> str:
 
 
 def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
+    if path.is_symlink():
+        raise BenchmarkAggregateError("config manifest must not be a symlink")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
@@ -257,9 +291,16 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for row in rows:
         relative = row["path"]
-        if not relative or relative in hashes:
+        if (
+            not relative
+            or relative in hashes
+            or Path(relative).suffix.lower() not in {".yaml", ".yml"}
+        ):
             raise BenchmarkAggregateError("config manifest has invalid or duplicate paths")
-        candidate = (root / relative).resolve()
+        unresolved = root / relative
+        if unresolved.is_symlink() or not unresolved.is_file():
+            raise BenchmarkAggregateError("declared config is not a regular file")
+        candidate = unresolved.resolve()
         try:
             candidate.relative_to(root)
         except ValueError as error:
@@ -267,11 +308,28 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
         digest = _sha256_hex(row["sha256"], "config hash")
         if _file_sha256(candidate, "declared config") != digest:
             raise BenchmarkAggregateError("declared config hash mismatch")
+        try:
+            parsed = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as error:
+            raise BenchmarkAggregateError("declared config YAML is invalid") from error
+        if not isinstance(parsed, Mapping) or not parsed:
+            raise BenchmarkAggregateError(
+                "declared config YAML must be a nonempty mapping"
+            )
         hashes[relative] = digest
+    actual_configs = {
+        item.relative_to(root).as_posix()
+        for item in (root / "configs").rglob("*")
+        if item.is_file() and item.name != "manifest.tsv"
+    }
+    if set(hashes) != actual_configs:
+        raise BenchmarkAggregateError("config directory differs from manifest")
     return hashes
 
 
 def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]]:
+    if path.is_symlink():
+        raise BenchmarkAggregateError("input manifest must not be a symlink")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
@@ -318,6 +376,91 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
     if declared_inputs != actual_inputs:
         raise BenchmarkAggregateError("input directory differs from manifest")
     return records
+
+
+def _validate_context_artifact(
+    root: Path,
+    backbone: str,
+    record: Mapping[str, Any],
+    input_records: Mapping[str, Mapping[str, Any]],
+) -> None:
+    required_record = {
+        "artifact_path", "artifact_sha256", "group_count",
+        "ordered_family_ids", "ordered_family_ids_hash",
+        "context_fingerprint", "family_hash",
+    }
+    if not isinstance(record, Mapping) or set(record) != required_record:
+        raise BenchmarkAggregateError(
+            f"design backbone context is invalid: {backbone}"
+        )
+    artifact_path = record.get("artifact_path")
+    input_record = input_records.get(str(artifact_path))
+    if (
+        not isinstance(artifact_path, str)
+        or not isinstance(input_record, Mapping)
+        or input_record.get("type") != "omnib_context"
+        or input_record.get("sha256") != record.get("artifact_sha256")
+    ):
+        raise BenchmarkAggregateError(
+            f"context artifact is not bound to the input manifest: {backbone}"
+        )
+    artifact = _strict_json(root / artifact_path)
+    expected_artifact_fields = {
+        "schema", "backbone", "context_manifest", "context_fingerprint",
+        "family_manifest", "family_hash", "group_count", "ordered_family_ids",
+        "ordered_family_ids_hash", "source_inputs",
+    }
+    family = artifact.get("family_manifest")
+    context = artifact.get("context_manifest")
+    source_inputs = artifact.get("source_inputs")
+    if (
+        set(artifact) != expected_artifact_fields
+        or artifact.get("schema") != "homoeogwas-v201-omnib-context-v1"
+        or artifact.get("backbone") != backbone
+        or not isinstance(family, Mapping)
+        or not isinstance(context, Mapping)
+        or context.get("family") != family
+        or artifact.get("family_hash") != sha256_payload(family)
+        or artifact.get("context_fingerprint") != sha256_payload(context)
+        or family.get("group_ids") != artifact.get("ordered_family_ids")
+        or artifact.get("group_count") != len(artifact.get("ordered_family_ids", []))
+        or artifact.get("group_count") != 80
+        or artifact.get("ordered_family_ids_hash")
+        != sha256_payload(artifact.get("ordered_family_ids"))
+        or not isinstance(source_inputs, list)
+        or not source_inputs
+    ):
+        raise BenchmarkAggregateError(f"context artifact is invalid: {backbone}")
+    seen: set[str] = set()
+    for source in source_inputs:
+        if not isinstance(source, Mapping) or set(source) != {"path", "sha256", "type"}:
+            raise BenchmarkAggregateError(f"context source input is invalid: {backbone}")
+        source_path = source.get("path")
+        manifest_source = input_records.get(str(source_path))
+        if (
+            not isinstance(source_path, str)
+            or source_path == artifact_path
+            or source_path in seen
+            or not isinstance(manifest_source, Mapping)
+            or dict(source) != {
+                "path": source_path,
+                "sha256": manifest_source.get("sha256"),
+                "type": manifest_source.get("type"),
+            }
+        ):
+            raise BenchmarkAggregateError(f"context source input is unbound: {backbone}")
+        seen.add(source_path)
+    expected_record = {
+        "artifact_path": artifact_path,
+        "artifact_sha256": input_record.get("sha256"),
+        "group_count": artifact["group_count"],
+        "ordered_family_ids": artifact["ordered_family_ids"],
+        "ordered_family_ids_hash": artifact["ordered_family_ids_hash"],
+        "context_fingerprint": artifact["context_fingerprint"],
+        "family_hash": artifact["family_hash"],
+    }
+    if dict(record) != expected_record:
+        raise BenchmarkAggregateError(f"context lock differs from artifact: {backbone}")
 
 
 def _current_git_commit() -> str:
@@ -412,22 +555,7 @@ def _validate_locked_root(
     if not isinstance(contexts, Mapping) or set(contexts) != required_backbones:
         raise BenchmarkAggregateError("design backbone contexts are incomplete")
     for backbone, record in contexts.items():
-        if (
-            not isinstance(record, Mapping)
-            or record.get("group_count") != 80
-            or record.get("group_count") != len(record.get("ordered_family_ids", []))
-            or record.get("ordered_family_ids_hash")
-            != sha256_payload(record.get("ordered_family_ids"))
-            or not all(
-                isinstance(record.get(field), str)
-                and len(record[field]) == 64
-                and not (set(record[field]) - _HEX)
-                for field in ("context_fingerprint", "family_hash")
-            )
-        ):
-            raise BenchmarkAggregateError(
-                f"design backbone context is invalid: {backbone}"
-            )
+        _validate_context_artifact(root, backbone, record, input_records)
     if lock.get("acceptance_rules") != ACCEPTANCE_RULES:
         raise BenchmarkAggregateError("design acceptance rules mismatch")
 
@@ -441,6 +569,8 @@ def load_evidence(root: str | Path) -> LoadedEvidence:
     benchmark_root = requested_root.resolve()
     lock_path = benchmark_root / "design_lock.json"
     registry_path = benchmark_root / "scenario_registry.tsv"
+    if lock_path.is_symlink() or registry_path.is_symlink():
+        raise BenchmarkAggregateError("design lock/registry must not be symlinks")
     lock = _strict_json(lock_path)
     if lock.get("schema") != "homoeogwas-v201-benchmark-lock-v1":
         raise BenchmarkAggregateError("design lock schema mismatch")
@@ -707,6 +837,28 @@ def _fit_rows(payload: Mapping[str, Any], registry: RegistryRow) -> tuple[str, l
 def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, list[dict[str, Any]]]:
     output = {name: [] for name in TABLE_SCHEMAS if name.startswith("omnib_")}
     common = _common(payload)
+    if payload.get("experiment") == "global_vc":
+        name = "omnib_null_replicates.tsv"
+        calibration = payload.get("calibration_p_values")
+        target = payload.get("target_p_values")
+        if not isinstance(calibration, list) or not isinstance(target, list):
+            raise BenchmarkAggregateError("global VC p-value evidence is missing")
+        formal = payload.get("stage") == "formal"
+        threshold = payload.get("threshold") if formal else None
+        decisions = payload.get("rejected") if formal else [None] * len(target)
+        for index, value in enumerate(target):
+            output[name].append(_empty(
+                name, common, method="global_hadamard_variance_component",
+                null_model=registry.parameters.get("null_model", "gaussian"),
+                stress=False, bank_role=payload.get("target_role"),
+                response_index=index, minimum_p=value, threshold=threshold,
+                rejected=decisions[index], family_size=1,
+                family_hash=payload["kernel_manifest"]["global_hadamard_sha256"],
+                score_family_size=1, tested_family_size=1,
+                tested_family_hash=payload["kernel_manifest"]["global_hadamard_sha256"],
+                response_seed_id=(payload.get("target_response_ids") or [None])[index],
+            ))
+        return output
     family_ids = payload.get("family_ids")
     if not isinstance(family_ids, list) or not all(isinstance(item, str) and item for item in family_ids):
         raise BenchmarkAggregateError("omniB shard family IDs are missing")
@@ -752,6 +904,8 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             rejected=(rejected if payload["stage"] == "formal" else None),
             family_size=len(family_ids), family_hash=family_hash,
             family_order_hash=order_hash,
+            score_family_size=len(family_ids), tested_family_size=len(family_ids),
+            tested_family_hash=family_hash,
             response_seed_id=payload.get("response_seed_id"),
             calibration_seed_id=payload.get("calibration_seed_id")))
     elif experiment == "conditional":
@@ -790,6 +944,9 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             )
         for method in METHOD_NAMES:
             matrix = matrices[method]
+            members = tested_members[method]
+            size = tested_sizes[method]
+            tested = tested_hashes[method]
             if not isinstance(matrix, list) or not matrix:
                 raise BenchmarkAggregateError("conditional score matrix is invalid")
             for index in range(len(seed_ids)):
@@ -801,10 +958,9 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                     bank_role=bank.get("canonical_role"), response_index=index,
                     minimum_p=min(finite) if finite else None,
                     family_size=len(matrix), family_hash=family_hash,
+                    score_family_size=len(matrix), tested_family_size=size,
+                    tested_family_hash=tested,
                     family_order_hash=order_hash, response_seed_id=seed_ids[index]))
-            members = tested_members[method]
-            size = tested_sizes[method]
-            tested = tested_hashes[method]
             if not isinstance(members, list) or size != len(members):
                 raise BenchmarkAggregateError(
                     "conditional tested-family manifest mismatch"
@@ -817,9 +973,42 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 requested_jobs=bank.get("requested_jobs"),
                 effective_jobs=bank.get("effective_jobs"),
                 backend=bank.get("parallel_backend"), worker_pids=bank.get("worker_pids")))
+    elif experiment == "family_size":
+        name = "omnib_null_replicates.tsv"
+        rejections = payload.get("rejections_by_method")
+        minima = payload.get("target_minima_by_method")
+        thresholds = payload.get(
+            "thresholds" if payload.get("stage") == "formal" else "qa_cutoffs"
+        )
+        tested_sizes = payload.get("tested_family_sizes")
+        tested_hashes = payload.get("tested_family_hashes")
+        if not all(isinstance(value, Mapping) and value for value in (
+            rejections, minima, thresholds, tested_sizes, tested_hashes,
+        )):
+            raise BenchmarkAggregateError("family-size FWER evidence is missing")
+        for method, decisions in sorted(rejections.items()):
+            if not isinstance(decisions, list) or not isinstance(minima.get(method), list):
+                raise BenchmarkAggregateError("family-size response evidence is invalid")
+            for index, rejected in enumerate(decisions):
+                output[name].append(_empty(
+                    name, common, method=method, null_model="gaussian", stress=True,
+                    bank_role="heldout", response_index=index,
+                    minimum_p=minima[method][index],
+                    threshold=(thresholds[method]
+                               if payload["stage"] == "formal" else None),
+                    rejected=(bool(rejected) if payload["stage"] == "formal" else None),
+                    family_size=payload.get("family_size"),
+                    score_family_size=payload.get("group_count"),
+                    tested_family_size=tested_sizes[method],
+                    tested_family_hash=tested_hashes[method],
+                    family_hash=family_hash, family_order_hash=order_hash,
+                ))
     elif experiment == "power":
         name = "omnib_power_replicates.tsv"
-        decisions = payload.get("causal_detection_by_method")
+        negative_control = registry.parameters.get("control_type") == "negative"
+        decisions = payload.get(
+            "specificity_by_method" if negative_control else "causal_detection_by_method"
+        )
         if common["failed"] and not isinstance(decisions, Mapping):
             for method in METHOD_NAMES:
                 output[name].append(_empty(name, common, method=method,
@@ -842,12 +1031,16 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             for index, detected in enumerate(method_decisions):
                 output[name].append(_empty(name, common, method=method,
                     architecture=payload.get("architecture"),
+                    control_type=payload.get("control_type", "positive"),
                     interaction_pve=payload.get("interaction_pve"),
                     causal_groups=len(payload.get("causal_group_ids", [])),
                     response_index=index,
-                    detected=detected,
-                    recall=(payload.get("recall_by_method", {}).get(method)
-                            or [None])[index],
+                    detected=(None if negative_control else detected),
+                    false_positive=(not detected if negative_control else None),
+                    specificity=(detected if negative_control else None),
+                    recall=(None if negative_control else
+                            (payload.get("recall_by_method", {}).get(method)
+                             or [None])[index]),
                     threshold=(thresholds.get(method)
                                if payload["stage"] == "formal" else None),
                     family_hash=family_hash,
@@ -981,9 +1174,13 @@ def write_tables(
     hashes: dict[str, str] = {}
     all_rows = dict(rows)
     all_rows["benchmark_acceptance.tsv"] = list(acceptance_rows)
-    for name, fields in TABLE_SCHEMAS.items():
+    for name, fields in table_schemas(evidence.stage).items():
         path = table_root / name
-        _atomic_tsv(path, fields, all_rows.get(name, []))
+        projected = [
+            {field: row.get(field) for field in fields}
+            for row in all_rows.get(name, [])
+        ]
+        _atomic_tsv(path, fields, projected)
         paths.append(path)
         hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return tuple(paths), hashes
