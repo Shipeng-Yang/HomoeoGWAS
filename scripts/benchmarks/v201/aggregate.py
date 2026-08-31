@@ -838,7 +838,10 @@ def _validate_locked_root(
         }
         for row in registry
     ]
-    expected_rows = [row.to_dict() for row in canonical]
+    # Registry JSON round-tripping turns tuples (for example scaling job lists)
+    # into lists.  Compare the canonical JSON representation so semantically
+    # identical records are not rejected solely because of that encoding.
+    expected_rows = json.loads(canonical_json([row.to_dict() for row in canonical]))
     if actual_rows != expected_rows:
         raise BenchmarkAggregateError("scenario registry differs from canonical design")
     expected_ids = [row.scenario_id for row in canonical]
@@ -987,6 +990,7 @@ def _validate_locked_root(
             root, input_records=input_records, config_hashes=config_hashes,
             contexts=contexts, target_release=target, harness=harness,
         )
+        expected_seed_design = json.loads(canonical_json(expected_seed_design))
         if lock.get("seed_design") != expected_seed_design:
             raise BenchmarkAggregateError("seed design payload mismatch")
         seed_design_hash = _sha256_hex(

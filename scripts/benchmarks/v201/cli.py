@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import concurrent.futures
 import hashlib
 import json
 import resource
@@ -864,9 +865,33 @@ def _prepare_design(staging: Path, input_spec_path: Path) -> dict[str, Any]:
 
 
 def _validate_homoeogwas_configs(root: Path, paths: Sequence[str]) -> None:
-    for relative in sorted(set(paths)):
-        if run_command(("homoeogwas", "validate", "-c", str(root / relative))) != 0:
-            raise CLIError(f"homoeogwas validate failed: {relative}")
+    """Validate every generated config with bounded, observable concurrency."""
+
+    relatives = sorted(set(paths))
+    if not relatives:
+        return
+
+    def validate_one(relative: str) -> tuple[str, int]:
+        return relative, run_command(("homoeogwas", "validate", "-c", str(root / relative)))
+
+    workers = min(8, len(relatives))
+    failures: list[str] = []
+    completed = 0
+    print(f"[init] validating {len(relatives)} generated configs with {workers} workers", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(validate_one, relative) for relative in relatives]
+        for future in concurrent.futures.as_completed(futures):
+            relative, returncode = future.result()
+            completed += 1
+            if returncode != 0:
+                failures.append(relative)
+            if completed == len(relatives) or completed % 25 == 0 or returncode != 0:
+                print(
+                    f"[init] validation progress {completed}/{len(relatives)}",
+                    flush=True,
+                )
+    if failures:
+        raise CLIError(f"homoeogwas validate failed: {', '.join(sorted(failures))}")
 
 
 def _validate_stage_bindings(
