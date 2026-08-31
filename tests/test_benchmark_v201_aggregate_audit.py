@@ -18,8 +18,10 @@ from scripts.benchmarks.v201.aggregate import (
     _validate_config_manifest,
     _validate_context_artifact,
     aggregate_benchmark,
+    table_schemas,
 )
 from scripts.benchmarks.v201.audit import (
+    AuditGate,
     BenchmarkAuditError,
     _audit_application_scenario,
     _audit_families_and_parallel,
@@ -28,10 +30,13 @@ from scripts.benchmarks.v201.audit import (
     _audit_scaling_scenario,
     _conditional_score_matrices,
     _fit_scan_gates,
+    _omnib_power_gates,
+    _pilot_and_engineering_gates,
     _validate_bank_envelope,
     audit_benchmark,
     summarize_binomial,
 )
+from scripts.benchmarks.v201.comparators import METHOD_NAMES
 from scripts.benchmarks.v201.contracts import (
     ScalingAnchor,
     Scenario,
@@ -409,7 +414,7 @@ def test_aggregation_writes_only_exact_tables_with_strict_headers(tmp_path, monk
         "scaling_runs.tsv", "cross_species_application.tsv",
         "benchmark_acceptance.tsv",
     }
-    for name, fields in TABLE_SCHEMAS.items():
+    for name, fields in table_schemas(result.evidence.stage).items():
         with (root / "tables" / name).open(encoding="utf-8", newline="") as handle:
             assert next(csv.reader(handle, delimiter="\t")) == list(fields)
     with (root / "tables" / "omnib_null_replicates.tsv").open(
@@ -522,9 +527,8 @@ def test_configs_are_manifest_complete_and_parse_as_yaml(tmp_path):
     manifest.write_text(
         f"path\tsha256\nconfigs/scientific.yaml\t{digest}\n", encoding="utf-8"
     )
-    assert _validate_config_manifest(tmp_path, manifest) == {
-        "configs/scientific.yaml": digest
-    }
+    with pytest.raises(BenchmarkAggregateError, match="canonical group-omniB"):
+        _validate_config_manifest(tmp_path, manifest)
     config.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
     digest = hashlib.sha256(config.read_bytes()).hexdigest()
     manifest.write_text(
@@ -534,7 +538,7 @@ def test_configs_are_manifest_complete_and_parse_as_yaml(tmp_path):
         _validate_config_manifest(tmp_path, manifest)
 
 
-def test_context_artifact_binds_real_manifest_sources(tmp_path):
+def test_context_artifact_rejects_self_hashed_empty_context(tmp_path):
     inputs = tmp_path / "inputs"
     inputs.mkdir()
     source = inputs / "groups.tsv"
@@ -575,10 +579,7 @@ def test_context_artifact_binds_real_manifest_sources(tmp_path):
         "context_fingerprint": sha256_payload(context),
         "family_hash": sha256_payload(family),
     }
-    _validate_context_artifact(tmp_path, "cotton", record, records)
-    artifact["source_inputs"][0]["sha256"] = "0" * 64
-    artifact_path.write_text(canonical_json(artifact) + "\n", encoding="utf-8")
-    with pytest.raises(BenchmarkAggregateError, match="source input is unbound"):
+    with pytest.raises(BenchmarkAggregateError, match="context artifact is invalid"):
         _validate_context_artifact(tmp_path, "cotton", record, records)
 
 def test_design_lock_distinguishes_target_release_from_harness(
@@ -772,6 +773,120 @@ def test_global_vc_positive_power_is_detection_only_and_recomputable():
     assert power["detection_only"] is True
     assert power["detection_power"] == np.mean(power["qa_detection_flags"])
     assert not ({"causal_group_ids", "recall_by_method"} & set(power))
+
+
+def test_negative_power_gate_uses_specificity_without_causal_detection():
+    context = build_synthetic_omnib_context(n=48, groups=2, copies=2, seed=111)
+    scenario = Scenario(
+        "B.power.cotton.mispaired.g1.pve_0p05", "omnib", "pilot", 1, 0,
+        {"experiment": "power", "backbone": "cotton", "control_type": "negative",
+         "architecture": "mispaired", "causal_groups": 1, "interaction_pve": 0.05},
+    )
+    calibration = run_conditional_bank(
+        context, bank="calibration", count=19, design_hash="3" * 64,
+        qa_only=True, scenario_id="B.conditional.cotton.gaussian.calibration",
+        n_jobs=1,
+    )
+    payload = run_power_replicate(
+        context, calibration_bank=calibration,
+        calibration_scenario_id="B.conditional.cotton.gaussian.calibration",
+        replicate=0, architecture="mispaired", interaction_pve=0.05,
+        causal_groups=1, calibration_count=19, response_count=1,
+        design_hash="3" * 64, qa_only=True, n_jobs=1,
+        scenario_id=scenario.scenario_id,
+    )
+    rows = aggregate_module._omnib_rows(payload, scenario)
+    null_gate = AuditGate(
+        "null", "omnib", "null", "core_fwer", 0, 1, 0.0, 0.0, 1.0,
+        0, 0.0, None, True, "QA_PASS", "fixture", "fixture",
+    )
+    evidence = SimpleNamespace(stage="pilot", registry=(scenario,))
+    gates = _omnib_power_gates(
+        evidence, rows,
+        {"B.core_fwer.B.conditional.cotton.gaussian.heldout." + method: null_gate
+         for method in METHOD_NAMES},
+    )
+    for method in METHOD_NAMES:
+        gate = gates[f"B.specificity.{scenario.scenario_id}.{method}"]
+        assert gate.gate_kind == "negative_control_specificity"
+        assert gate.qa_passed is True
+
+
+def test_encoding_exact_failure_creates_a_failing_pilot_gate():
+    scenario = Scenario(
+        "B.encoding.cotton", "omnib", "pilot", 1, 199,
+        {"experiment": "encoding", "backbone": "cotton", "edges_per_group": 1},
+    )
+    evidence = SimpleNamespace(
+        stage="pilot", registry=(scenario,),
+        shards=((Path("encoding.json"), {
+            "track": "omnib", "scenario_id": scenario.scenario_id,
+            "pair_edges_per_group": 1, "all_required_exact": False,
+        }),),
+    )
+    gates = _pilot_and_engineering_gates(evidence)
+    gate = gates[f"B.encoding_exact.{scenario.scenario_id}"]
+    assert gate.qa_passed is False
+    assert gate.status == "QA_FAIL"
+
+
+def test_robustness_table_is_architecture_method_stratified_from_raw_responses():
+    scenario = Scenario(
+        "B.encoding.cotton", "omnib", "pilot", 1, 199,
+        {"experiment": "encoding", "backbone": "cotton"},
+    )
+    methods = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
+    heldout_scores = {
+        method: [[0.2, 0.01], [0.8, 0.9]] for method in methods
+    }
+    power_scores = {
+        method: [[0.01, 0.2], [0.8, 0.9]] for method in methods
+    }
+    record = {
+        "status": "completed", "required": None,
+        "calibration": {"thresholds": {method: 0.05 for method in methods}},
+        "heldout": {
+            "p_by_method": heldout_scores,
+            "rejections_by_method": {method: [False, True] for method in methods},
+        },
+        "power_by_architecture": {
+            "minor_burden_aligned": {
+                "p_by_method": power_scores,
+                "detection_by_method": {method: [True, False] for method in methods},
+                "rank_correlation_by_response": [1.0, 0.5],
+                "top_k_jaccard_by_response": [1.0, 0.5],
+                "absolute_power_regret": 0.25,
+            }
+        },
+    }
+    payload = {
+        "stage": "pilot", "track": "omnib", "experiment": "encoding",
+        "scenario_id": scenario.scenario_id,
+        "replicate": 0, "design_hash": "4" * 64,
+        "request_hash": "5" * 64, "context_fingerprint": "6" * 64,
+        "inference_status": "noninferential_do_not_threshold",
+        "failure": {"failed": False}, "exact_checks": {},
+        "family_ids": ["group-0", "group-1"],
+        "family_hash": "7" * 64,
+        "family_order_hash": sha256_payload(["group-0", "group-1"]),
+        "robustness_checks": {"missingness_2pct": record},
+    }
+    rows = aggregate_module._omnib_rows(
+        payload, scenario
+    )["omnib_encoding_robustness.tsv"]
+    assert {(row["architecture"], row["method"]) for row in rows} == {
+        ("minor_burden_aligned", method) for method in methods
+    }
+    for row in rows:
+        assert row["qa_fwer_successes"] == 1
+        assert row["qa_fwer_total"] == 2
+        assert row["qa_power_successes"] == 1
+        assert row["qa_power_total"] == 2
+        assert row["fwer_successes"] is None
+        assert row["power_successes"] is None
+        assert row["rank_correlation"] == 0.75
+        assert row["top_k_jaccard"] == 0.75
+        assert row["absolute_power_regret"] == 0.25
 
 
 def test_family_size_audit_recomputes_response_level_fwer():

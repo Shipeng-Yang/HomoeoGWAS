@@ -546,6 +546,113 @@ def load_omnib_benchmark_context(
     return context
 
 
+def validate_real_omnib_context(
+    config_path: str | Path,
+    *,
+    context_artifact_path: str | Path,
+    input_manifest: Mapping[str, str],
+    stage: str,
+    backbone: str,
+    family_size: int,
+    expected_subgenomes: Sequence[str],
+    manifest_root: str | Path | None = None,
+) -> OmniBBenchmarkContext:
+    """Strict Task-9 validation entry for one sealed real omniB context."""
+
+    import yaml
+
+    config_file = Path(config_path).resolve()
+    try:
+        raw = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise ValueError("strict benchmark interaction config is unreadable") from error
+    interact = raw.get("interact") if isinstance(raw, Mapping) else None
+    calibration = interact.get("calibration") if isinstance(interact, Mapping) else None
+    expected_calibration = {
+        "method": "bootstrap",
+        "B": 199 if stage == "pilot" else 2_000,
+        "seed": 2026,
+        "qa_only": stage == "pilot",
+    }
+    if (
+        stage not in {"pilot", "formal"}
+        or not isinstance(backbone, str) or not backbone
+        or isinstance(family_size, bool) or not isinstance(family_size, int)
+        or family_size < 1
+        or not isinstance(interact, Mapping)
+        or interact.get("burden") != {
+            "cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3,
+        }
+        or calibration != expected_calibration
+        or interact.get("subgenomes") != list(expected_subgenomes)
+    ):
+        raise ValueError("strict benchmark interaction config contract is invalid")
+    context = load_omnib_benchmark_context(
+        config_file, context_artifact_path=context_artifact_path,
+        input_manifest=input_manifest,
+    )
+    artifact_file = Path(context_artifact_path).resolve()
+    try:
+        artifact = json.loads(artifact_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("strict benchmark context artifact is unreadable") from error
+    ordered_ids = list(context.family.group_ids)
+    if (
+        not isinstance(artifact, Mapping)
+        or artifact.get("backbone") != backbone
+        or artifact.get("group_count") != family_size
+        or len(ordered_ids) != family_size
+        or artifact.get("ordered_family_ids") != ordered_ids
+        or artifact.get("ordered_family_ids_hash") != sha256_payload(ordered_ids)
+        or artifact.get("context_fingerprint") != _context_fingerprint(context)
+        or artifact.get("family_hash") != _family_hash(context.family)
+    ):
+        raise ValueError("strict benchmark context identity differs from sealed design")
+    root = Path(manifest_root).resolve() if manifest_root is not None else config_file.parent
+    normalized_manifest = {
+        str(Path(path).resolve()): digest for path, digest in input_manifest.items()
+    }
+    sources = artifact.get("source_inputs")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("strict benchmark context source manifest is missing")
+    seen: set[str] = set()
+    for source in sources:
+        if not isinstance(source, Mapping) or set(source) != {"path", "sha256", "type"}:
+            raise ValueError("strict benchmark context source manifest is invalid")
+        source_path = Path(str(source["path"]))
+        resolved = (
+            source_path.resolve() if source_path.is_absolute()
+            else (root / source_path).resolve()
+        )
+        key = str(resolved)
+        if (
+            key in seen
+            or normalized_manifest.get(key) != source.get("sha256")
+            or not isinstance(source.get("type"), str) or not source["type"]
+        ):
+            raise ValueError("strict benchmark context source is not manifest-bound")
+        seen.add(key)
+    expected_sources = {
+        str(_resolved_path(interact["groups"], config_file.parent, "groups")),
+        str(_resolved_path(interact["phenotype"], config_file.parent, "phenotype")),
+    }
+    for label in expected_subgenomes:
+        prefix = _resolved_path(
+            interact["genotype"][label], config_file.parent, f"genotype.{label}"
+        )
+        expected_sources.update(
+            str(Path(str(prefix) + suffix).resolve())
+            for suffix in (".bed", ".bim", ".fam")
+        )
+        expected_sources.add(str(_resolved_path(
+            interact["snp_to_gene"][label], config_file.parent,
+            f"snp_to_gene.{label}",
+        )))
+    if seen != expected_sources:
+        raise ValueError("strict benchmark context source manifest is incomplete")
+    return context
+
+
 def _request_hash(
     *,
     design_hash: str,
@@ -1498,19 +1605,32 @@ def run_global_vc_bank(
     )
     calibration_p = np.asarray(calibration_result["p_values"], dtype=float)
     target_p = np.asarray(target_result["p_values"], dtype=float)
-    if not np.all(np.isfinite(calibration_p)) or not np.all(np.isfinite(target_p)):
-        raise RuntimeError("global VC produced a non-finite p-value")
-    threshold = float(np.quantile(calibration_p, 0.05, method="lower"))
+    calibration_failed = sorted(set(
+        int(index) for index in calibration_result.get("failed_response_indices", [])
+    ))
+    target_failed = sorted(set(
+        int(index) for index in target_result.get("failed_response_indices", [])
+    ))
+    if (
+        calibration_failed != np.flatnonzero(~np.isfinite(calibration_p)).tolist()
+        or target_failed != np.flatnonzero(~np.isfinite(target_p)).tolist()
+    ):
+        raise RuntimeError("global VC failure indices differ from non-finite p-values")
+    usable_calibration = calibration_p[np.isfinite(calibration_p)]
+    threshold = (
+        empirical_threshold(usable_calibration[None, :])
+        if usable_calibration.size else None
+    )
     evidence: dict[str, Any]
     if qa_only:
         evidence = {
             "qa_calibration_cutoff": threshold,
-            "qa_detection_flags": (target_p <= threshold).tolist(),
+            "qa_detection_flags": apply_threshold(target_p[None, :], threshold).tolist(),
         }
     else:
         evidence = {
             "threshold": threshold,
-            "rejected": (target_p <= threshold).tolist(),
+            "rejected": apply_threshold(target_p[None, :], threshold).tolist(),
         }
     payload = _base_replicate_payload(
         context, replicate=replicate, design_hash=design_hash, stage=stage,
@@ -1534,15 +1654,23 @@ def run_global_vc_bank(
         "target_response_metadata": list(target_meta),
         "calibration_response_hash": _array_hash(calibration),
         "target_response_hash": _array_hash(target),
-        "calibration_p_values": calibration_p.tolist(),
-        "target_p_values": target_p.tolist(),
-        "calibration_p_hash": sha256_payload(calibration_p.tolist()),
-        "target_p_hash": sha256_payload(target_p.tolist()),
+        "calibration_p_values": _json_safe(calibration_p),
+        "target_p_values": _json_safe(target_p),
+        "calibration_p_hash": sha256_payload(_json_safe(calibration_p)),
+        "target_p_hash": sha256_payload(_json_safe(target_p)),
+        "failed_calibration_response_indices": calibration_failed,
+        "failed_target_response_indices": target_failed,
         "calibration_lrt_evidence": calibration_result["lrt_evidence"],
         "target_lrt_evidence": target_result["lrt_evidence"],
         "kernel_manifest": target_result["kernel_manifest"],
         "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
-        "failure": {"failed": False, "status": "completed"},
+        "failure": {
+            "failed": bool(calibration_failed or target_failed),
+            "status": ("partial_failure" if calibration_failed or target_failed
+                       else "completed"),
+            "failed_calibration_response_indices": calibration_failed,
+            "failed_target_response_indices": target_failed,
+        },
         "requested_jobs": 1,
         "effective_jobs": 1,
         "parallel_backend": "serial",
@@ -1558,7 +1686,7 @@ def run_global_vc_bank(
             "interaction_pve": 0.05,
             "causal_groups": 1,
         }
-    return payload
+    return _json_safe(payload)
 
 
 def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None:
@@ -2184,10 +2312,18 @@ def run_power_replicate(
         }
     else:
         payload.update({
-            "causal_detection_by_method": causal_detection,
-            "recall_by_method": recall,
             "causal_minima_by_method": causal_minima,
             "causal_minima_hashes": causal_minima_hashes,
+            **(
+                {
+                    "qa_causal_detection_by_method": causal_detection,
+                    "qa_recall_by_method": recall,
+                }
+                if qa_only else {
+                    "causal_detection_by_method": causal_detection,
+                    "recall_by_method": recall,
+                }
+            ),
         })
     result = _json_safe(payload)
     if shard_path is not None:
@@ -2450,10 +2586,11 @@ def _ranking_metrics(
 
 
 def _basic_robustness_contexts(
-    context: OmniBBenchmarkContext, seed: int
-) -> dict[str, OmniBBenchmarkContext]:
+    context: OmniBBenchmarkContext, seed: int, *, with_metadata: bool = False,
+) -> Any:
     rng = np.random.default_rng(seed)
     outputs: dict[str, OmniBBenchmarkContext] = {}
+    marker_designs: dict[str, Mapping[str, Any] | None] = {}
     for fraction in (0.02, 0.05):
         matrices = {
             label: np.array(data.X, dtype=float, copy=True)
@@ -2511,17 +2648,94 @@ def _basic_robustness_contexts(
             )
         return _copy_context(context, subdata=generated)
 
+    def maf_context(
+        challenge_name: str, *, lower: float, upper: float,
+        lower_inclusive: bool, upper_inclusive: bool,
+    ) -> OmniBBenchmarkContext:
+        generated: dict[str, SubgenomeData] = {}
+        selected_ids: list[str] = []
+        selected_maf: list[float] = []
+        by_gene: dict[str, Any] = {}
+        for copy_index, label in enumerate(context.family.subgenomes):
+            source = np.asarray(context.subdata[label].X, dtype=float)
+            blocks: list[np.ndarray] = []
+            mapping: dict[str, np.ndarray] = {}
+            offset = 0
+            for gene in (row[copy_index] for row in context.family.genes):
+                native = np.asarray(context.subdata[label].gene_snp[gene], dtype=int)
+                with np.errstate(invalid="ignore"):
+                    dosage_frequency = np.nanmean(
+                        source[np.ix_(context.sample_idx, native)], axis=0
+                    ) / 2.0
+                minor_maf = np.minimum(dosage_frequency, 1.0 - dosage_frequency)
+                in_band = np.isfinite(minor_maf) & (
+                    minor_maf >= lower if lower_inclusive else minor_maf > lower
+                )
+                in_band &= minor_maf <= upper if upper_inclusive else minor_maf < upper
+                eligible = np.unique(native[np.flatnonzero(in_band)])
+                if eligible.size < 5:
+                    raise ValueError(
+                        f"{challenge_name} has fewer than five native markers in band "
+                        f"for {label}:{gene}"
+                    )
+                chosen = np.sort(eligible, kind="stable")[:5]
+                chosen_maf = np.asarray([
+                    minor_maf[int(np.flatnonzero(native == marker)[0])]
+                    for marker in chosen
+                ], dtype=float)
+                blocks.append(source[:, chosen])
+                mapping[gene] = np.arange(offset, offset + chosen.size)
+                offset += chosen.size
+                ids = [f"{label}:{int(marker)}" for marker in chosen]
+                selected_ids.extend(ids)
+                selected_maf.extend(chosen_maf.tolist())
+                by_gene[f"{label}:{gene}"] = {
+                    "source_marker_ids": ids,
+                    "source_marker_indices": chosen.astype(int).tolist(),
+                    "count": int(chosen.size),
+                    "realized_maf_min": float(chosen_maf.min()),
+                    "realized_maf_max": float(chosen_maf.max()),
+                }
+            generated[label] = SubgenomeData(
+                X=np.column_stack(blocks), gene_snp=mapping,
+                samples=list(context.subdata[label].samples), chunk=None,
+            )
+        marker_designs[challenge_name] = {
+            "band": {
+                "lower": lower, "lower_inclusive": lower_inclusive,
+                "upper": upper, "upper_inclusive": upper_inclusive,
+            },
+            "selected_marker_ids": selected_ids,
+            "selected_marker_ids_hash": sha256_payload(selected_ids),
+            "selected_marker_count": len(selected_ids),
+            "realized_maf_min": float(min(selected_maf)),
+            "realized_maf_max": float(max(selected_maf)),
+            "by_gene": by_gene,
+        }
+        return _copy_context(context, subdata=generated)
+
     copies = len(context.family.subgenomes)
     for count in (3, 10, 30):
         outputs[f"markers_per_gene_{count}"] = marker_context(
             [count] * copies, 0.25, seed + count
         )
-    outputs["maf_0p01_0p05"] = marker_context([5] * copies, 0.03, seed + 101)
-    outputs["maf_0p05_0p20"] = marker_context([5] * copies, 0.12, seed + 102)
-    outputs["maf_above_0p20"] = marker_context([5] * copies, 0.30, seed + 103)
+    maf_specs = {
+        "maf_0p01_0p05": (0.01, True, 0.05, False),
+        "maf_0p05_0p20": (0.05, True, 0.20, True),
+        "maf_above_0p20": (0.20, False, 0.50, True),
+    }
+    for name, (lower, lower_inclusive, upper, upper_inclusive) in maf_specs.items():
+        try:
+            outputs[name] = maf_context(
+                name, lower=lower, lower_inclusive=lower_inclusive, upper=upper,
+                upper_inclusive=upper_inclusive,
+            )
+        except ValueError as error:
+            outputs[name] = error  # type: ignore[assignment]
+            marker_designs[name] = None
     imbalanced = tuple((3, 10, 30, 5)[:copies])
     outputs["unbalanced_marker_counts"] = marker_context(imbalanced, 0.25, seed + 104)
-    return outputs
+    return (outputs, marker_designs) if with_metadata else outputs
 
 
 def run_encoding_check(
@@ -2674,8 +2888,13 @@ def run_encoding_check(
             or any(set(calibration_ids) & set(item[2]) for item in power_banks.values())
         ):
             raise RuntimeError("robustness response banks overlap")
-        for name, transformed in _basic_robustness_contexts(context, seed).items():
+        robustness_contexts, marker_designs = _basic_robustness_contexts(
+            context, seed, with_metadata=True
+        )
+        for name, transformed in robustness_contexts.items():
             try:
+                if isinstance(transformed, Exception):
+                    raise transformed
                 challenge_prepared = _prepare_scenario(
                     transformed, design_hash=design_hash, stage=stage,
                     scenario_id=f"{scenario_id}.robustness.{name}", n_jobs=n_jobs,
@@ -2768,6 +2987,7 @@ def run_encoding_check(
                         ~np.isfinite(heldout_scores["omnib"])
                     )),
                     "absolute_power_regret": None,
+                    "realized_marker_design": marker_designs.get(name),
                     "note": "response-level challenge evidence; metrics stratified by architecture",
                     "design_ruling": {
                         "interaction_pve": 0.05, "causal_groups": 1,
@@ -2824,6 +3044,7 @@ def run_encoding_check(
                     "top_k_jaccard": None,
                     "non_estimable_rate": None,
                     "absolute_power_regret": None,
+                    "realized_marker_design": marker_designs.get(name),
                     "note": "robustness scoring failed; no metric was inferred",
                     "design_ruling": None,
                     "calibration": None,
@@ -3104,4 +3325,5 @@ __all__ = [
     "run_end_to_end_null",
     "run_omnib_replicate",
     "run_power_replicate",
+    "validate_real_omnib_context",
 ]

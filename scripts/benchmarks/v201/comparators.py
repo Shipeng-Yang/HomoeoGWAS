@@ -95,36 +95,64 @@ def score_global_hadamard_vc(
     statistics: list[float] = []
     convergence: list[bool] = []
     lrt_evidence: list[dict[str, object]] = []
+    failed_response_indices: list[int] = []
     for column in range(Y.shape[1]):
-        comparison = compare_nested_reml(
-            Y[:, column], X, kernels, model_specs=model_specs,
-            fit_kwargs=dict(fit_kwargs or {}),
-        )
-        test = boundary_lrt(comparison, null_name, alt_name)
-        if not test.both_converged or test.clipped:
-            raise RuntimeError("global Hadamard VC nested REML did not converge cleanly")
-        p_values.append(float(test.p_mixture))
-        statistics.append(float(test.statistic))
-        convergence.append(bool(test.both_converged))
-        lrt_evidence.append({
-            "null_model": test.null_model,
-            "alt_model": test.alt_model,
-            "ll_null": float(test.ll_null),
-            "ll_alt": float(test.ll_alt),
-            "statistic": float(test.statistic),
-            "statistic_raw": float(test.statistic_raw),
-            "df_added": int(test.df_added),
-            "p_naive": float(test.p_naive),
-            "p_mixture": float(test.p_mixture),
-            "mixture_weights": dict(test.mixture_weights),
-            "added_components": list(test.added_components),
-            "null_boundary_components": list(test.null_boundary_components),
-            "is_nested": bool(test.is_nested),
-            "clipped": bool(test.clipped),
-            "both_converged": bool(test.both_converged),
-            "boundary_method": test.boundary_method,
-            "bootstrap_p": test.bootstrap_p,
-        })
+        try:
+            comparison = compare_nested_reml(
+                Y[:, column], X, kernels, model_specs=model_specs,
+                fit_kwargs=dict(fit_kwargs or {}),
+            )
+            test = boundary_lrt(comparison, null_name, alt_name)
+            record: dict[str, object] = {
+                "status": "completed",
+                "error_type": None,
+                "message": None,
+                "null_model": test.null_model,
+                "alt_model": test.alt_model,
+                "ll_null": float(test.ll_null),
+                "ll_alt": float(test.ll_alt),
+                "statistic": float(test.statistic),
+                "statistic_raw": float(test.statistic_raw),
+                "df_added": int(test.df_added),
+                "p_naive": float(test.p_naive),
+                "p_mixture": float(test.p_mixture),
+                "mixture_weights": dict(test.mixture_weights),
+                "added_components": list(test.added_components),
+                "null_boundary_components": list(test.null_boundary_components),
+                "is_nested": bool(test.is_nested),
+                "clipped": bool(test.clipped),
+                "both_converged": bool(test.both_converged),
+                "boundary_method": test.boundary_method,
+                "bootstrap_p": test.bootstrap_p,
+            }
+            if not test.both_converged or test.clipped:
+                record.update(
+                    status="failed",
+                    error_type=("ClippedBoundaryLRT" if test.clipped
+                                else "NonConvergedNestedREML"),
+                    message="global Hadamard VC nested REML was not cleanly estimable",
+                )
+                raise RuntimeError(str(record["message"]))
+            p_values.append(float(test.p_mixture))
+            statistics.append(float(test.statistic))
+            convergence.append(True)
+            lrt_evidence.append(record)
+        except Exception as error:
+            failed_response_indices.append(column)
+            p_values.append(float("nan"))
+            statistics.append(float("nan"))
+            convergence.append(False)
+            if "record" not in locals() or record.get("status") != "failed":
+                record = {
+                    "status": "failed", "error_type": type(error).__name__,
+                    "message": str(error), "null_model": null_name,
+                    "alt_model": alt_name, "both_converged": False,
+                    "clipped": False,
+                }
+            lrt_evidence.append(record)
+        finally:
+            if "record" in locals():
+                del record
     return {
         "method": GLOBAL_VC_METHOD,
         "hypothesis_unit": "global",
@@ -132,6 +160,7 @@ def score_global_hadamard_vc(
         "p_values": p_values,
         "lrt_statistics": statistics,
         "both_converged": convergence,
+        "failed_response_indices": failed_response_indices,
         "lrt_evidence": lrt_evidence,
         "kernel_manifest": {
             "construction": "hadamard_product",

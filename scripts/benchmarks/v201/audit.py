@@ -83,6 +83,7 @@ _ENCODING_ROBUSTNESS_SCHEMA = {
     "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
     "absolute_power_regret", "note",
     "design_ruling", "calibration", "heldout", "power_by_architecture",
+    "realized_marker_design",
 }
 _ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
 _CANONICAL_NULL_KIND = {
@@ -1301,6 +1302,20 @@ def _validate_snpxsnp_calibration_artifact(
 
 def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     negative_control = scenario.parameters.get("control_type") == "negative"
+    if payload.get("stage") == "pilot" and any(
+        field in payload for field in (
+            "thresholds", "rejections_by_method", "causal_detection_by_method",
+            "recall_by_method", "adjusted_decisions", "formal_rejections",
+        )
+    ):
+        raise BenchmarkAuditError("pilot power payload contains formal decision fields")
+    if payload.get("stage") == "formal" and any(
+        field in payload for field in (
+            "qa_cutoffs_by_method", "qa_rejections_by_method",
+            "qa_causal_detection_by_method", "qa_recall_by_method",
+        )
+    ):
+        raise BenchmarkAuditError("formal power payload contains QA decision fields")
     calibration_count = scenario.parameters.get("calibration_count")
     if isinstance(calibration_count, bool) or not isinstance(calibration_count, int):
         raise BenchmarkAuditError("power calibration count is invalid")
@@ -1342,11 +1357,19 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         if payload.get("stage") == "formal" else "qa_rejections_by_method"
     )
     names += [cutoff_name, rejection_name]
+    causal_detection_name = (
+        "causal_detection_by_method"
+        if payload.get("stage") == "formal" else "qa_causal_detection_by_method"
+    )
+    recall_name = (
+        "recall_by_method"
+        if payload.get("stage") == "formal" else "qa_recall_by_method"
+    )
     names += (
         ["false_positive_by_method", "specificity_by_method"]
         if negative_control else [
             "causal_minima_by_method", "causal_minima_hashes",
-            "causal_detection_by_method", "recall_by_method",
+            causal_detection_name, recall_name,
         ]
     )
     maps = {name: payload.get(name) for name in names}
@@ -1514,14 +1537,14 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
                 not value for value in rejected
             ]
         else:
-            decisions_ok = decisions_ok and maps["causal_detection_by_method"][method] == detected
-            decisions_ok = decisions_ok and maps["recall_by_method"][method] == recall
+            decisions_ok = decisions_ok and maps[causal_detection_name][method] == detected
+            decisions_ok = decisions_ok and maps[recall_name][method] == recall
         if not decisions_ok:
             raise BenchmarkAuditError("power decisions differ from compact minima")
 
 
 def _audit_robustness_record(
-    record: Mapping[str, Any], payload: Mapping[str, Any],
+    perturbation: str, record: Mapping[str, Any], payload: Mapping[str, Any],
 ) -> None:
     ruling = record.get("design_ruling")
     calibration = record.get("calibration")
@@ -1551,6 +1574,35 @@ def _audit_robustness_record(
         or not isinstance(strata, Mapping) or list(strata) != architectures
     ):
         raise BenchmarkAuditError("robustness frozen design ruling is invalid")
+    marker_design = record.get("realized_marker_design")
+    maf_bands = {
+        "maf_0p01_0p05": (0.01, True, 0.05, False),
+        "maf_0p05_0p20": (0.05, True, 0.20, True),
+        "maf_above_0p20": (0.20, False, 0.50, True),
+    }
+    if perturbation in maf_bands:
+        if not isinstance(marker_design, Mapping):
+            raise BenchmarkAuditError("MAF robustness realized marker design is missing")
+        lower, lower_inclusive, upper, upper_inclusive = maf_bands[perturbation]
+        ids = marker_design.get("selected_marker_ids")
+        observed_min = marker_design.get("realized_maf_min")
+        observed_max = marker_design.get("realized_maf_max")
+        if (
+            marker_design.get("band") != {
+                "lower": lower, "lower_inclusive": lower_inclusive,
+                "upper": upper, "upper_inclusive": upper_inclusive,
+            }
+            or not isinstance(ids, list) or not ids or len(ids) != len(set(ids))
+            or marker_design.get("selected_marker_count") != len(ids)
+            or marker_design.get("selected_marker_ids_hash") != sha256_payload(ids)
+            or not isinstance(observed_min, (int, float))
+            or not isinstance(observed_max, (int, float))
+            or (observed_min < lower if lower_inclusive else observed_min <= lower)
+            or (observed_max > upper if upper_inclusive else observed_max >= upper)
+        ):
+            raise BenchmarkAuditError("MAF robustness realized band is invalid")
+    elif marker_design is not None:
+        raise BenchmarkAuditError("non-MAF robustness has an unexpected MAF design")
 
     def score_matrices(bank: Mapping[str, Any], count: int) -> dict[str, np.ndarray]:
         ids, seeds = bank.get("response_ids"), bank.get("seeds")
@@ -1735,12 +1787,35 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     raise BenchmarkAuditError("global VC detection-only contract is invalid")
                 calibration = payload.get("calibration_p_values")
                 target = payload.get("target_p_values")
+                calibration_failed = _index_set(
+                    payload.get("failed_calibration_response_indices"),
+                    len(calibration) if isinstance(calibration, list) else 0,
+                    "global VC calibration",
+                )
+                target_failed = _index_set(
+                    payload.get("failed_target_response_indices"),
+                    len(target) if isinstance(target, list) else 0,
+                    "global VC target",
+                )
                 if (
                     not isinstance(calibration, list) or not calibration
                     or not isinstance(target, list) or not target
-                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
-                           or not math.isfinite(value) or not 0 <= value <= 1
-                           for value in calibration + target)
+                    or any(
+                        (value is None) is not (index in calibration_failed)
+                        or (value is not None and (
+                            isinstance(value, bool) or not isinstance(value, (int, float))
+                            or not math.isfinite(value) or not 0 <= value <= 1
+                        ))
+                        for index, value in enumerate(calibration)
+                    )
+                    or any(
+                        (value is None) is not (index in target_failed)
+                        or (value is not None and (
+                            isinstance(value, bool) or not isinstance(value, (int, float))
+                            or not math.isfinite(value) or not 0 <= value <= 1
+                        ))
+                        for index, value in enumerate(target)
+                    )
                     or payload.get("calibration_p_hash") != sha256_payload(calibration)
                     or payload.get("target_p_hash") != sha256_payload(target)
                 ):
@@ -1755,9 +1830,29 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 ):
                     raise BenchmarkAuditError("global VC LRT evidence is incomplete")
                 for rows, reported in ((calibration_lrt, calibration), (target_lrt, target)):
-                    for row, reported_p in zip(rows, reported, strict=True):
+                    failed_indices = calibration_failed if rows is calibration_lrt else target_failed
+                    for index, (row, reported_p) in enumerate(zip(rows, reported, strict=True)):
                         if not isinstance(row, Mapping):
                             raise BenchmarkAuditError("global VC LRT evidence is invalid")
+                        if index in failed_indices:
+                            if (
+                                reported_p is not None
+                                or row.get("status") != "failed"
+                                or not isinstance(row.get("error_type"), str)
+                                or not isinstance(row.get("message"), str)
+                            ):
+                                raise BenchmarkAuditError(
+                                    "global VC failed-response evidence is invalid"
+                                )
+                            continue
+                        if (
+                            row.get("status") != "completed"
+                            or row.get("error_type") is not None
+                            or row.get("message") is not None
+                        ):
+                            raise BenchmarkAuditError(
+                                "global VC successful-response status is invalid"
+                            )
                         null_name, alt_name = row.get("null_model"), row.get("alt_model")
                         if not isinstance(null_name, str) or not isinstance(alt_name, str):
                             raise BenchmarkAuditError("global VC LRT model identity is invalid")
@@ -1863,17 +1958,41 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                             raise BenchmarkAuditError(
                                 "global VC detection-only power evidence is invalid"
                             )
-                expected = float(np.quantile(np.asarray(calibration), 0.05, method="lower"))
+                usable_calibration = [
+                    float(value) for value in calibration if value is not None
+                ]
+                expected = _empirical_threshold([usable_calibration])
+                expected_decisions = [
+                    False if value is None or expected is None else value < expected
+                    for value in target
+                ]
                 if payload.get("stage") == "formal":
-                    if payload.get("threshold") != expected or payload.get("rejected") != [
-                        value <= expected for value in target
-                    ]:
+                    if (
+                        payload.get("threshold") != expected
+                        or payload.get("rejected") != expected_decisions
+                    ):
                         raise BenchmarkAuditError("global VC formal decisions do not recompute")
                 elif (
                     payload.get("inference_status") != "noninferential_do_not_threshold"
                     or any(field in payload for field in ("threshold", "rejected", "passed"))
+                    or payload.get("qa_calibration_cutoff") != expected
+                    or payload.get("qa_detection_flags") != expected_decisions
                 ):
                     raise BenchmarkAuditError("global VC pilot contains formal inference fields")
+                failure = payload.get("failure")
+                any_failure = bool(calibration_failed or target_failed)
+                if (
+                    not isinstance(failure, Mapping)
+                    or failure.get("failed") is not any_failure
+                    or failure.get("status") != (
+                        "partial_failure" if any_failure else "completed"
+                    )
+                    or failure.get("failed_calibration_response_indices")
+                    != sorted(calibration_failed)
+                    or failure.get("failed_target_response_indices")
+                    != sorted(target_failed)
+                ):
+                    raise BenchmarkAuditError("global VC failure envelope is invalid")
                 manifest = payload.get("kernel_manifest")
                 family_manifest = payload.get("family_manifest")
                 family_ids = payload.get("family_ids")
@@ -2268,7 +2387,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     )
             if payload.get("all_required_exact") is not recomputed_all_required:
                 raise BenchmarkAuditError("encoding aggregate decision differs from checks")
-            for record in robustness.values():
+            for perturbation, record in robustness.items():
                 if (
                     not isinstance(record, Mapping)
                     or set(record) != _ENCODING_ROBUSTNESS_SCHEMA
@@ -2279,7 +2398,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 if record["status"] == "completed":
                     if record.get("error_type") is not None or record.get("message") is not None:
                         raise BenchmarkAuditError("completed robustness record has an error")
-                    _audit_robustness_record(record, payload)
+                    _audit_robustness_record(perturbation, record, payload)
                 elif (
                     not isinstance(record.get("error_type"), str)
                     or not isinstance(record.get("message"), str)
@@ -2531,17 +2650,29 @@ def _omnib_power_gates(
         if observed != set(METHOD_NAMES):
             raise BenchmarkAuditError("power canonical method rows are incomplete")
         backbone = str(scenario.parameters["backbone"])
+        negative_control = scenario.parameters.get("control_type") == "negative"
         for method in METHOD_NAMES:
             method_rows = grouped[(scenario.scenario_id, method)]
             if len(method_rows) != scenario.replicates:
                 raise BenchmarkAuditError("power method denominator differs from registry")
             failures = sum(row.get("failed") is True for row in method_rows)
+            outcome_field = "specificity" if negative_control else "detected"
             if any(
-                not isinstance(row.get("detected"), bool)
+                not isinstance(row.get(outcome_field), bool)
                 for row in method_rows if row.get("failed") is not True
             ):
-                raise BenchmarkAuditError("power detection evidence is missing")
-            successes = sum(row.get("detected") is True for row in method_rows)
+                raise BenchmarkAuditError(
+                    "negative-control specificity evidence is missing"
+                    if negative_control else "power detection evidence is missing"
+                )
+            if negative_control and any(
+                row.get("detected") is not None
+                or not isinstance(row.get("false_positive"), bool)
+                or row.get("specificity") is row.get("false_positive")
+                for row in method_rows if row.get("failed") is not True
+            ):
+                raise BenchmarkAuditError("negative-control evidence has causal semantics")
+            successes = sum(row.get(outcome_field) is True for row in method_rows)
             summary = summarize_binomial(successes, scenario.replicates)
             failure_rate = failures / scenario.replicates
             null_id = (
@@ -2554,10 +2685,14 @@ def _omnib_power_gates(
                      else null_gate.qa_passed is True)
             )
             ok = failure_rate <= 0.01 and null_ok
-            gate_id = f"B.power.{scenario.scenario_id}.{method}"
+            gate_id = (
+                f"B.specificity.{scenario.scenario_id}.{method}"
+                if negative_control else f"B.power.{scenario.scenario_id}.{method}"
+            )
             gates[gate_id] = AuditGate(
                 gate_id, "omnib", scenario.scenario_id,
-                "power_descriptive", successes, scenario.replicates,
+                ("negative_control_specificity" if negative_control
+                 else "power_descriptive"), successes, scenario.replicates,
                 float(summary["estimate"]), float(summary["ci_low"]),
                 float(summary["ci_high"]), failures, failure_rate,
                 ok if evidence.stage == "formal" else None,
@@ -2565,7 +2700,9 @@ def _omnib_power_gates(
                 ("PASS" if ok else "FAIL") if evidence.stage == "formal"
                 else ("QA_PASS" if ok else "QA_FAIL"),
                 "tables/omnib_power_replicates.tsv",
-                "power is descriptive; frozen Gaussian null gate passes and failures <= 1%",
+                ("negative-control specificity uses fixed denominator, frozen Gaussian "
+                 "null calibration and failures <= 1%" if negative_control else
+                 "power is descriptive; frozen Gaussian null gate passes and failures <= 1%"),
             )
     return gates
 
@@ -2576,16 +2713,42 @@ def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
         if payload.get("experiment") != "global_vc":
             continue
         role = payload.get("target_role")
-        if role not in {"heldout", "power"}:
+        if role not in {"calibration", "heldout", "power"}:
             continue
         flags = payload.get(
             "rejected" if evidence.stage == "formal" else "qa_detection_flags"
         )
         if not isinstance(flags, list) or any(not isinstance(value, bool) for value in flags):
             raise BenchmarkAuditError("global VC gate decisions are missing")
-        failures = int(payload.get("failure", {}).get("failed") is True)
+        target_failures = payload.get("failed_target_response_indices")
+        calibration_failures = payload.get("failed_calibration_response_indices")
+        if not isinstance(target_failures, list) or not isinstance(
+            calibration_failures, list
+        ):
+            raise BenchmarkAuditError("global VC failure indices are missing")
+        failures = len(target_failures)
         successes = sum(flags)
         scenario_id = str(payload["scenario_id"])
+        calibration_failure_rate = len(calibration_failures) / len(
+            payload["calibration_response_ids"]
+        )
+        if role == "calibration":
+            ok = failures / len(flags) <= 0.01
+            summary = summarize_binomial(len(flags) - failures, len(flags))
+            gate = AuditGate(
+                f"B.global_vc_calibration.{scenario_id}", "omnib", scenario_id,
+                "global_vc_calibration_failure", int(summary["successes"]),
+                len(flags), float(summary["estimate"]), float(summary["ci_low"]),
+                float(summary["ci_high"]), failures, failures / len(flags),
+                ok if evidence.stage == "formal" else None,
+                ok if evidence.stage == "pilot" else None,
+                ("PASS" if ok else "FAIL") if evidence.stage == "formal"
+                else ("QA_PASS" if ok else "QA_FAIL"),
+                "tables/omnib_null_replicates.tsv",
+                "global VC calibration retains the fixed response denominator and <=1% failures",
+            )
+            gates[gate.gate_id] = gate
+            continue
         if role == "heldout":
             gate = core_fwer_gate(
                 scenario_id, successes, len(flags), failures,
@@ -2595,11 +2758,22 @@ def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
             gate = replace(
                 gate, gate_id=f"B.global_vc_fwer.{scenario_id}",
                 gate_kind="global_vc_fwer",
-                reason="standalone global VC heldout FWER uses its frozen calibration bank",
+                passed=(gate.passed and calibration_failure_rate <= 0.01
+                        if evidence.stage == "formal" else None),
+                qa_passed=(gate.qa_passed and calibration_failure_rate <= 0.01
+                           if evidence.stage == "pilot" else None),
+                status=(
+                    ("PASS" if gate.passed and calibration_failure_rate <= 0.01 else "FAIL")
+                    if evidence.stage == "formal" else
+                    ("QA_PASS" if gate.qa_passed and calibration_failure_rate <= 0.01
+                     else "QA_FAIL")
+                ),
+                reason="standalone global VC heldout FWER uses a frozen calibration bank; "
+                "both failure rates are <=1%",
             )
         else:
             summary = summarize_binomial(successes, len(flags))
-            ok = failures == 0
+            ok = failures / len(flags) <= 0.01 and calibration_failure_rate <= 0.01
             gate = AuditGate(
                 f"B.global_vc_power.{scenario_id}", "omnib", scenario_id,
                 "global_vc_detection_power", successes, len(flags),
@@ -2610,7 +2784,8 @@ def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
                 ("PASS" if ok else "FAIL") if evidence.stage == "formal"
                 else ("QA_PASS" if ok else "QA_FAIL"),
                 "tables/omnib_null_replicates.tsv",
-                "global VC detection-only power is descriptive and separately gated",
+                "global VC detection-only power is descriptive; calibration and target "
+                "failure rates are <= 1%",
             )
         gates[gate.gate_id] = gate
     return gates
@@ -2650,6 +2825,7 @@ def _pilot_and_engineering_gates(
     edge_checks: list[bool] = []
     scaling_payloads: list[tuple[Mapping[str, Any], Any, Mapping[str, Any]]] = []
     application_acceptance: dict[str, bool] = {}
+    encoding_exact: dict[str, bool] = {}
     registry = {row.scenario_id: row for row in evidence.registry}
     for _path, payload in evidence.shards:
         scenario = registry[str(payload["scenario_id"])]
@@ -2682,6 +2858,11 @@ def _pilot_and_engineering_gates(
                         pve_checks.append(abs(
                             float(pve["realized_pve"]) - float(pve["target_pve"])
                         ) <= 0.01)
+            if scenario.parameters.get("experiment") == "encoding":
+                encoding_exact[scenario.scenario_id] = (
+                    payload.get("all_required_exact") is True
+                    and payload.get("failure", {}).get("failed") is False
+                )
         elif payload["track"] == "scaling":
             scaling_payloads.append((
                 payload, scenario, _audit_scaling_scenario(payload, scenario),
@@ -2703,6 +2884,15 @@ def _pilot_and_engineering_gates(
             kind="realized_pve", ok=all(pve_checks), stage=evidence.stage,
             evidence_path="tables/fit_pve_recovery.tsv;tables/omnib_power_replicates.tsv",
             reason="realized signal PVE differs from target by at most 0.01",
+        )
+    for scenario_id, ok in sorted(encoding_exact.items()):
+        gate_id = f"B.encoding_exact.{scenario_id}"
+        gates[gate_id] = _boolean_gate(
+            gate_id=gate_id, track="omnib", scenario_id=scenario_id,
+            kind="released_encoding_exact_invariance", ok=ok,
+            stage=evidence.stage,
+            evidence_path="tables/omnib_encoding_robustness.tsv",
+            reason="all six required released-scorer exact checks pass",
         )
     for payload, _scenario, summary in scaling_payloads:
         anchor = summary.get("anchor", {}).get("anchor_id", payload["scenario_id"])

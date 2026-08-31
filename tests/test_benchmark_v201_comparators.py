@@ -12,6 +12,7 @@ from homoeogwas.group_family import (
     expand_pair_edges,
 )
 from homoeogwas.interact import SubgenomeData
+from scripts.benchmarks.v201 import comparators as comparator_module
 from scripts.benchmarks.v201.comparators import (
     GLOBAL_VC_METHOD,
     MethodScoreBank,
@@ -53,6 +54,39 @@ def test_global_hadamard_vc_is_real_detection_only_and_not_local_method():
     assert "group_ids" not in result
     assert "causal_recall" not in result
     assert result["kernel_manifest"]["construction"] == "hadamard_product"
+
+
+def test_global_hadamard_vc_retains_single_response_failure(monkeypatch):
+    calls = 0
+
+    def compare(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("optimizer failed")
+        return object()
+
+    test = type("Boundary", (), {
+        "null_model": "A+B+e", "alt_model": "A+B+hom+e",
+        "ll_null": -10.0, "ll_alt": -9.0, "statistic": 2.0,
+        "statistic_raw": 2.0, "df_added": 1, "p_naive": 0.1,
+        "p_mixture": 0.05, "mixture_weights": {"point_mass_0": 0.5,
+                                                  "chi2_df_1": 0.5},
+        "added_components": ["hom"], "null_boundary_components": [],
+        "is_nested": True, "clipped": False, "both_converged": True,
+        "boundary_method": "self_liang_50_50", "bootstrap_p": None,
+    })()
+    monkeypatch.setattr(comparator_module, "compare_nested_reml", compare)
+    monkeypatch.setattr(comparator_module, "boundary_lrt", lambda *args: test)
+    identity = np.eye(8)
+    result = score_global_hadamard_vc(
+        np.ones((8, 2)), np.ones((8, 1)), {"A": identity, "B": identity}
+    )
+    assert result["p_values"][0] == 0.05
+    assert np.isnan(result["p_values"][1])
+    assert result["failed_response_indices"] == [1]
+    assert result["lrt_evidence"][0]["status"] == "completed"
+    assert result["lrt_evidence"][1]["status"] == "failed"
 
 
 def _edge(

@@ -8,11 +8,13 @@ import numpy as np
 import pytest
 
 from homoeogwas.interact import SubgenomeData
+from scripts.benchmarks.v201 import track_omnib as track_omnib_module
 from scripts.benchmarks.v201.comparators import METHOD_NAMES
 from scripts.benchmarks.v201.contracts import Scenario, sha256_payload
 from scripts.benchmarks.v201.shards import ShardConflict
 from scripts.benchmarks.v201.track_omnib import (
     OmniBBenchmarkContext,
+    _basic_robustness_contexts,
     apply_threshold,
     build_synthetic_omnib_context,
     empirical_threshold,
@@ -24,6 +26,7 @@ from scripts.benchmarks.v201.track_omnib import (
     run_global_vc_bank,
     run_omnib_replicate,
     run_power_replicate,
+    validate_real_omnib_context,
 )
 
 
@@ -79,8 +82,9 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
         f"  genotype: {{A: {genotype['A']}, B: {genotype['B']}}}\n"
         f"  snp_to_gene: {{A: {mapping['A']}, B: {mapping['B']}}}\n"
         f"  phenotype: {phenotype}\n  sample_col: sample\n  trait: trait\n"
+        "  burden: {cap: 150, min_snp: 3, maf_min: 0.01, n_pc: 3}\n"
         "  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}\n"
-        "  calibration: {method: bootstrap, B: 199, seed: 2026}\n"
+        "  calibration: {method: bootstrap, B: 199, seed: 2026, qa_only: true}\n"
     )
     family = load_master_group_family(groups, ["A", "B"], require_group_id=True)
     phenotype_values = np.asarray([
@@ -91,20 +95,29 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
         subdata, family, phenotype_values, np.arange(72)
     )
     context_manifest = _context_manifest(expected)
+    source_paths = [groups, phenotype]
+    for label in ("A", "B"):
+        source_paths.extend([
+            Path(genotype[label] + suffix) for suffix in (".bed", ".bim", ".fam")
+        ])
+        source_paths.append(Path(mapping[label]))
     artifact = tmp_path / "context.json"
     artifact.write_text(json.dumps({
         "schema": "homoeogwas-v201-omnib-context-v1",
+        "backbone": "fixture", "group_count": 2,
+        "ordered_family_ids": list(family.group_ids),
+        "ordered_family_ids_hash": sha256_payload(list(family.group_ids)),
         "context_manifest": context_manifest,
         "context_fingerprint": sha256_payload(context_manifest),
         "family_manifest": _family_manifest(family),
         "family_hash": _family_hash(family),
+        "source_inputs": [{
+            "path": str(path.resolve()),
+            "sha256": __import__("hashlib").sha256(path.read_bytes()).hexdigest(),
+            "type": "real_fixture_input",
+        } for path in source_paths],
     }, sort_keys=True) + "\n")
-    required = [config, groups, phenotype, artifact]
-    for label in ("A", "B"):
-        required.extend([
-            Path(genotype[label] + suffix) for suffix in (".bed", ".bim", ".fam")
-        ])
-        required.append(Path(mapping[label]))
+    required = [config, artifact, *source_paths]
     manifest = {
         str(path.resolve()): __import__("hashlib").sha256(path.read_bytes()).hexdigest()
         for path in required
@@ -112,6 +125,12 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
     loaded = load_omnib_benchmark_context(
         config, context_artifact_path=artifact, input_manifest=manifest,
     )
+    strict = validate_real_omnib_context(
+        config, context_artifact_path=artifact, input_manifest=manifest,
+        stage="pilot", backbone="fixture", family_size=2,
+        expected_subgenomes=("A", "B"),
+    )
+    assert strict.family.group_ids == loaded.family.group_ids
     calibration = run_conditional_bank(
         loaded, bank="calibration", count=2, design_hash="6" * 64, n_jobs=1,
         scenario_id="B.conditional.real.gaussian.calibration",
@@ -127,6 +146,27 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
         design_hash="6" * 64, qa_only=True, n_jobs=1,
     )
     assert power["target_bank"]["p_by_method"]
+
+
+def test_strict_real_context_validator_rejects_partial_scientific_yaml(tmp_path):
+    config = tmp_path / "interact.yaml"
+    config.write_text(
+        "interact:\n  mode: group\n  statistic: omniB\n"
+        "  hypothesis_unit: group\n  subset_order: 2\n"
+        "  family_scope: primary_only\n  primary_transform: INT\n"
+        "  primary_multiplicity: bootstrap_minp\n  subgenomes: [A, B]\n"
+        "  groups: missing.tsv\n  genotype: {A: missing-a, B: missing-b}\n"
+        "  snp_to_gene: {A: missing-a.npz, B: missing-b.npz}\n"
+        "  phenotype: missing.tsv\n  sample_col: sample\n  trait: trait\n"
+        "  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}\n"
+        "  calibration: {method: bootstrap, B: 7, seed: 2026}\n"
+    )
+    with pytest.raises(ValueError, match="strict benchmark interaction config"):
+        validate_real_omnib_context(
+            config, context_artifact_path=tmp_path / "missing.json",
+            input_manifest={}, stage="pilot", backbone="cotton", family_size=80,
+            expected_subgenomes=("A", "B"),
+        )
 
 
 def test_global_vc_producer_is_detection_only_and_pilot_has_no_formal_fields(tiny_context):
@@ -145,6 +185,74 @@ def test_global_vc_producer_is_detection_only_and_pilot_has_no_formal_fields(tin
         "ll_null", "ll_alt", "statistic", "statistic_raw", "df_added",
         "p_mixture", "both_converged", "clipped", "null_model", "alt_model",
     } <= set(evidence)
+
+
+def test_global_vc_uses_strict_empirical_tie_rule(tiny_context, monkeypatch):
+    def tied_scores(responses, _fixed_effects, grms, *, fit_kwargs=None):
+        count = np.asarray(responses).shape[1]
+        return {
+            "p_values": [1.0] * count,
+            "lrt_evidence": [{"status": "completed"}] * count,
+            "kernel_manifest": {
+                "construction": "hadamard_product", "normalization": "trace",
+                "subgenomes": list(grms), "additive_kernel_sha256": {},
+                "global_hadamard_sha256": "0" * 64,
+            },
+        }
+
+    monkeypatch.setattr(
+        track_omnib_module, "score_global_hadamard_vc", tied_scores
+    )
+    result = run_global_vc_bank(
+        tiny_context, bank="heldout", count=1, calibration_count=20,
+        design_hash="d" * 64, qa_only=True,
+        scenario_id="B.global_vc.synthetic.gaussian.heldout",
+    )
+    assert result["qa_calibration_cutoff"] == 1.0
+    assert result["qa_detection_flags"] == [False]
+
+
+def test_global_vc_runner_retains_partial_failure_denominators(tiny_context, monkeypatch):
+    calls = 0
+
+    def partial_scores(responses, _fixed_effects, grms, *, fit_kwargs=None):
+        nonlocal calls
+        calls += 1
+        count = np.asarray(responses).shape[1]
+        failed = [0] if calls == 1 else []
+        values = [None if index in failed else 0.5 for index in range(count)]
+        evidence = [
+            ({"status": "failed", "error_type": "RuntimeError", "message": "fit"}
+             if index in failed else {"status": "completed"})
+            for index in range(count)
+        ]
+        return {
+            "p_values": [np.nan if value is None else value for value in values],
+            "failed_response_indices": failed,
+            "lrt_evidence": evidence,
+            "kernel_manifest": {
+                "construction": "hadamard_product", "normalization": "trace",
+                "subgenomes": list(grms), "additive_kernel_sha256": {},
+                "global_hadamard_sha256": "0" * 64,
+            },
+        }
+
+    monkeypatch.setattr(
+        track_omnib_module, "score_global_hadamard_vc", partial_scores
+    )
+    result = run_global_vc_bank(
+        tiny_context, bank="heldout", count=2, calibration_count=20,
+        design_hash="e" * 64, qa_only=True,
+        scenario_id="B.global_vc.synthetic.gaussian.heldout",
+    )
+    assert result["failed_calibration_response_indices"] == [0]
+    assert result["failed_target_response_indices"] == []
+    assert len(result["qa_detection_flags"]) == 2
+    assert result["failure"] == {
+        "failed": True, "status": "partial_failure",
+        "failed_calibration_response_indices": [0],
+        "failed_target_response_indices": [],
+    }
 
 
 def test_family_size_stress_serializes_response_level_evidence():
@@ -412,10 +520,10 @@ def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
         assert result["qa_rejections_by_method"][method] == [
             value < threshold for value in target_minima
         ]
-        assert result["causal_detection_by_method"][method] == [
+        assert result["qa_causal_detection_by_method"][method] == [
             value < threshold for value in causal[0]
         ]
-        assert result["recall_by_method"][method] == [
+        assert result["qa_recall_by_method"][method] == [
             float(value < threshold) for value in causal[0]
         ]
         assert result["calibration_minima_hashes"][method] == sha256_payload(
@@ -534,6 +642,46 @@ def test_robustness_checks_are_not_mislabeled_as_exact():
             "non_estimable_rate",
             "absolute_power_regret",
         } <= set(metrics)
+
+
+def test_maf_robustness_selects_unique_native_markers_inside_locked_bands():
+    base = build_synthetic_omnib_context(n=100, groups=2, copies=2, seed=313)
+    subdata = {}
+    for copy_index, label in enumerate(base.family.subgenomes):
+        blocks = []
+        gene_snp = {}
+        offset = 0
+        for gene in (row[copy_index] for row in base.family.genes):
+            columns = []
+            for heterozygotes in (4, 20, 60):
+                column = np.zeros(100, dtype=float)
+                column[:heterozygotes] = 1.0
+                columns.extend([np.roll(column, shift) for shift in range(5)])
+            block = np.column_stack(columns)
+            blocks.append(block)
+            gene_snp[gene] = np.arange(offset, offset + block.shape[1])
+            offset += block.shape[1]
+        subdata[label] = SubgenomeData(
+            X=np.column_stack(blocks), gene_snp=gene_snp,
+            samples=list(base.subdata[label].samples), chunk=None,
+        )
+    context = OmniBBenchmarkContext(
+        subdata, base.family, base.phenotype, base.sample_idx
+    )
+    challenges = _basic_robustness_contexts(context, seed=17)
+    bands = {
+        "maf_0p01_0p05": lambda maf: 0.01 <= maf < 0.05,
+        "maf_0p05_0p20": lambda maf: 0.05 <= maf <= 0.20,
+        "maf_above_0p20": lambda maf: 0.20 < maf <= 0.50,
+    }
+    for challenge_name, in_band in bands.items():
+        challenge = challenges[challenge_name]
+        for _label, data in challenge.subdata.items():
+            for indices in data.gene_snp.values():
+                assert len(indices) == len(set(np.asarray(indices, dtype=int).tolist()))
+                dosage_frequency = np.mean(data.X[:, indices], axis=0) / 2.0
+                maf = np.minimum(dosage_frequency, 1.0 - dosage_frequency)
+                assert all(in_band(float(value)) for value in maf)
 
 
 def test_replicate_orchestration_writes_one_immutable_canonical_shard(
@@ -738,8 +886,9 @@ def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
     robustness_schema = {
         "status", "error_type", "message", "fwer", "power",
         "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
-        "absolute_power_regret", "note",
-        "design_ruling", "calibration", "heldout", "power_by_architecture",
+            "absolute_power_regret", "note",
+            "design_ruling", "calibration", "heldout", "power_by_architecture",
+            "realized_marker_design",
     }
     assert all(
         set(record) == robustness_schema

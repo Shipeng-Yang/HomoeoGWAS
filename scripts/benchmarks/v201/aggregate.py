@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from .comparators import METHOD_NAMES
@@ -106,10 +107,18 @@ TABLE_SCHEMAS: dict[str, tuple[str, ...]] = {
         "estimate", "ci_low", "ci_high", "failures",
     ),
     "omnib_encoding_robustness.tsv": _COMMON + (
-        "perturbation", "check_kind", "required", "status",
+        "perturbation", "check_kind", "required", "status", "architecture", "method",
         "observed_arrays_identical", "adjusted_decisions_identical",
         "ranking_hash_identical", "rejection_sets_identical", "rank_correlation",
         "top_k_jaccard", "non_estimable_rate", "absolute_power_regret",
+        "fwer_successes", "fwer_total", "fwer_estimate", "fwer_ci_low",
+        "fwer_ci_high", "fwer_failures", "power_successes", "power_total",
+        "power_estimate", "power_ci_low", "power_ci_high", "power_failures",
+        "qa_fwer_successes", "qa_fwer_total", "qa_fwer_estimate",
+        "qa_fwer_ci_low", "qa_fwer_ci_high", "qa_fwer_failures",
+        "qa_power_successes", "qa_power_total", "qa_power_estimate",
+        "qa_power_ci_low", "qa_power_ci_high", "qa_power_failures",
+        "non_estimable_count", "non_estimable_total", "realized_marker_design",
     ),
     "omnib_family_manifest.tsv": _COMMON + (
         "method", "hypothesis_unit", "family_scope", "family_size",
@@ -150,6 +159,20 @@ _PILOT_FORMAL_FIELDS = {
         "null_calibration_gate", "eligible_for_power_summary",
     },
     "benchmark_acceptance.tsv": {"passed"},
+    "omnib_encoding_robustness.tsv": {
+        "fwer_successes", "fwer_total", "fwer_estimate", "fwer_ci_low",
+        "fwer_ci_high", "fwer_failures", "power_successes", "power_total",
+        "power_estimate", "power_ci_low", "power_ci_high", "power_failures",
+    },
+}
+
+_FORMAL_QA_FIELDS = {
+    "omnib_encoding_robustness.tsv": {
+        "qa_fwer_successes", "qa_fwer_total", "qa_fwer_estimate",
+        "qa_fwer_ci_low", "qa_fwer_ci_high", "qa_fwer_failures",
+        "qa_power_successes", "qa_power_total", "qa_power_estimate",
+        "qa_power_ci_low", "qa_power_ci_high", "qa_power_failures",
+    },
 }
 
 
@@ -159,7 +182,13 @@ def table_schemas(stage: str) -> dict[str, tuple[str, ...]]:
     if stage not in {"pilot", "formal"}:
         raise ValueError("table stage must be pilot or formal")
     if stage == "formal":
-        return dict(TABLE_SCHEMAS)
+        return {
+            name: tuple(
+                field for field in fields
+                if field not in _FORMAL_QA_FIELDS.get(name, set())
+            )
+            for name, fields in TABLE_SCHEMAS.items()
+        }
     return {
         name: tuple(
             field for field in fields
@@ -326,6 +355,7 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
             }
             subgenomes = interact.get("subgenomes") if isinstance(interact, Mapping) else None
             calibration = interact.get("calibration") if isinstance(interact, Mapping) else None
+            burden = interact.get("burden") if isinstance(interact, Mapping) else None
             path_fields = ("groups", "phenotype", "sample_col", "trait")
             if (
                 not isinstance(interact, Mapping)
@@ -345,13 +375,18 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
                     "method": "grm_from_X", "maf_min": 0.01,
                     "scope": "all_subgenomes",
                 }
+                or burden != {
+                    "cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3,
+                }
                 or not isinstance(calibration, Mapping)
                 or calibration.get("method") != "bootstrap"
                 or isinstance(calibration.get("B"), bool)
                 or not isinstance(calibration.get("B"), int)
-                or calibration["B"] < 1
+                or calibration["B"] not in {199, 2_000}
                 or isinstance(calibration.get("seed"), bool)
                 or not isinstance(calibration.get("seed"), int)
+                or not isinstance(calibration.get("qa_only"), bool)
+                or calibration["qa_only"] is not (calibration["B"] == 199)
             ):
                 raise BenchmarkAggregateError(
                     "declared interaction config is not canonical group-omniB"
@@ -455,6 +490,9 @@ def _validate_context_artifact(
     family = artifact.get("family_manifest")
     context = artifact.get("context_manifest")
     source_inputs = artifact.get("source_inputs")
+    context_subgenomes = context.get("subgenomes") if isinstance(context, Mapping) else None
+    sample_idx = context.get("sample_idx") if isinstance(context, Mapping) else None
+    phenotype = context.get("phenotype") if isinstance(context, Mapping) else None
     if (
         set(artifact) != expected_artifact_fields
         or artifact.get("schema") != "homoeogwas-v201-omnib-context-v1"
@@ -462,6 +500,22 @@ def _validate_context_artifact(
         or not isinstance(family, Mapping)
         or not isinstance(context, Mapping)
         or context.get("family") != family
+        or not isinstance(context_subgenomes, list)
+        or len(context_subgenomes) != len(family.get("subgenomes", []))
+        or any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("label"), str)
+            or not isinstance(item.get("X"), Mapping)
+            or not isinstance(item.get("gene_snp"), list)
+            or not isinstance(item.get("samples"), list)
+            or not item.get("samples")
+            for item in context_subgenomes
+        )
+        or not isinstance(sample_idx, Mapping)
+        or not isinstance(sample_idx.get("values"), list)
+        or not sample_idx.get("values")
+        or not isinstance(phenotype, Mapping)
+        or not isinstance(phenotype.get("shape"), list)
         or artifact.get("family_hash") != sha256_payload(family)
         or artifact.get("context_fingerprint") != sha256_payload(context)
         or family.get("group_ids") != artifact.get("ordered_family_ids")
@@ -603,6 +657,60 @@ def _validate_locked_root(
         raise BenchmarkAggregateError("design backbone contexts are incomplete")
     for context_key, record in contexts.items():
         _validate_context_artifact(root, context_key, record, input_records)
+        backbone, _, family_label = context_key.partition(":g")
+        bound_scenarios = [
+            row for row in canonical
+            if row.track == "omnib"
+            and row.parameters.get("backbone") == backbone
+            and (
+                (family_label and row.parameters.get("experiment") == "family_size"
+                 and row.parameters.get("family_size") == int(family_label))
+                or (not family_label and row.parameters.get("experiment") != "family_size")
+            )
+        ]
+        config_paths = {
+            str(scenario_configs[row.scenario_id]) for row in bound_scenarios
+        }
+        if not bound_scenarios or not config_paths:
+            raise BenchmarkAggregateError(
+                f"context has no scenario-bound config: {context_key}"
+            )
+        artifact = _strict_json(root / str(record["artifact_path"]))
+        artifact_family = artifact.get("family_manifest")
+        expected_subgenomes = (
+            artifact_family.get("subgenomes")
+            if isinstance(artifact_family, Mapping) else None
+        )
+        if not isinstance(expected_subgenomes, list):
+            raise BenchmarkAggregateError(
+                f"context subgenomes are invalid: {context_key}"
+            )
+        manifest_hashes = {
+            str((root / relative).resolve()): str(item["sha256"])
+            for relative, item in input_records.items()
+        }
+        manifest_hashes.update({
+            str((root / relative).resolve()): digest
+            for relative, digest in config_hashes.items()
+        })
+        from .track_omnib import validate_real_omnib_context
+
+        for relative in sorted(config_paths):
+            try:
+                validate_real_omnib_context(
+                    root / relative,
+                    context_artifact_path=root / str(record["artifact_path"]),
+                    input_manifest=manifest_hashes,
+                    stage=stage,
+                    backbone=backbone,
+                    family_size=int(family_label) if family_label else 80,
+                    expected_subgenomes=expected_subgenomes,
+                    manifest_root=root,
+                )
+            except (OSError, ValueError) as error:
+                raise BenchmarkAggregateError(
+                    f"strict real context validation failed: {context_key}"
+                ) from error
     loco_ids = {
         row.scenario_id for row in canonical
         if row.track == "fit" and row.parameters.get("experiment") == "loco"
@@ -809,6 +917,27 @@ def _common(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _binomial_cells(prefix: str, decisions: Sequence[bool], failures: int) -> dict[str, Any]:
+    total = len(decisions)
+    if total < 1 or failures < 0 or failures > total:
+        raise BenchmarkAggregateError("robustness binomial denominator is invalid")
+    successes = sum(value is True for value in decisions)
+    estimate = successes / total
+    z = 1.959963984540054
+    denominator = 1.0 + z * z / total
+    center = (estimate + z * z / (2.0 * total)) / denominator
+    half = z * math.sqrt(
+        estimate * (1.0 - estimate) / total + z * z / (4.0 * total * total)
+    ) / denominator
+    return {
+        f"{prefix}_successes": successes, f"{prefix}_total": total,
+        f"{prefix}_estimate": estimate,
+        f"{prefix}_ci_low": max(0.0, center - half),
+        f"{prefix}_ci_high": min(1.0, center + half),
+        f"{prefix}_failures": failures,
+    }
+
+
 def _empty(name: str, common: Mapping[str, Any], **values: Any) -> dict[str, Any]:
     row = {field: None for field in TABLE_SCHEMAS[name]}
     row.update(common)
@@ -931,7 +1060,15 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
         formal = payload.get("stage") == "formal"
         threshold = payload.get("threshold") if formal else None
         decisions = payload.get("rejected") if formal else [None] * len(target)
+        failed_indices = set(payload.get("failed_target_response_indices", []))
+        lrt_evidence = payload.get("target_lrt_evidence", [])
         for index, value in enumerate(target):
+            failed = index in failed_indices
+            failure_type = (
+                lrt_evidence[index].get("error_type")
+                if failed and index < len(lrt_evidence)
+                and isinstance(lrt_evidence[index], Mapping) else None
+            )
             output[name].append(_empty(
                 name, common, method="global_hadamard_variance_component",
                 null_model=registry.parameters.get("null_model", "gaussian"),
@@ -942,6 +1079,7 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 score_family_size=1, tested_family_size=1,
                 tested_family_hash=payload["kernel_manifest"]["global_hadamard_sha256"],
                 response_seed_id=(payload.get("target_response_ids") or [None])[index],
+                failed=failed, failure_type=failure_type,
             ))
         return output
     family_ids = payload.get("family_ids")
@@ -1099,7 +1237,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
         name = "omnib_power_replicates.tsv"
         negative_control = registry.parameters.get("control_type") == "negative"
         decisions = payload.get(
-            "specificity_by_method" if negative_control else "causal_detection_by_method"
+            "specificity_by_method" if negative_control else (
+                "causal_detection_by_method" if payload.get("stage") == "formal"
+                else "qa_causal_detection_by_method"
+            )
         )
         if common["failed"] and not isinstance(decisions, Mapping):
             for method in METHOD_NAMES:
@@ -1134,7 +1275,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                     false_positive=(not detected if negative_control else None),
                     specificity=(detected if negative_control else None),
                     recall=(None if negative_control else
-                            (payload.get("recall_by_method", {}).get(method)
+                            (payload.get(
+                                "recall_by_method" if payload.get("stage") == "formal"
+                                else "qa_recall_by_method", {}
+                            ).get(method)
                              or [None])[index]),
                     threshold=(thresholds.get(method)
                                if payload["stage"] == "formal" else None),
@@ -1143,21 +1287,103 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                     target_response_hash=payload.get("target_response_hash")))
     elif experiment == "encoding":
         name = "omnib_encoding_robustness.tsv"
-        for kind, checks in (("exact", payload.get("exact_checks", {})),
-                             ("robustness", payload.get("robustness_checks", {}))):
-            for perturbation in sorted(checks):
-                record = checks[perturbation]
+        for perturbation, record in sorted(payload.get("exact_checks", {}).items()):
+            output[name].append(_empty(name, common, perturbation=perturbation,
+                check_kind="exact", required=record.get("required"),
+                status=record.get("status"),
+                observed_arrays_identical=record.get("observed_arrays_identical"),
+                adjusted_decisions_identical=record.get("adjusted_decisions_identical"),
+                ranking_hash_identical=record.get("ranking_hash_identical"),
+                rejection_sets_identical=record.get("rejection_sets_identical")))
+        for perturbation, record in sorted(payload.get("robustness_checks", {}).items()):
+            strata = record.get("power_by_architecture")
+            heldout = record.get("heldout")
+            if record.get("status") != "completed":
                 output[name].append(_empty(name, common, perturbation=perturbation,
-                    check_kind=kind, required=record.get("required"),
+                    check_kind="robustness", required=record.get("required"),
                     status=record.get("status"),
-                    observed_arrays_identical=record.get("observed_arrays_identical"),
-                    adjusted_decisions_identical=record.get("adjusted_decisions_identical"),
-                    ranking_hash_identical=record.get("ranking_hash_identical"),
-                    rejection_sets_identical=record.get("rejection_sets_identical"),
-                    rank_correlation=record.get("rank_correlation"),
-                    top_k_jaccard=record.get("top_k_jaccard"),
-                    non_estimable_rate=record.get("non_estimable_rate"),
-                    absolute_power_regret=record.get("absolute_power_regret")))
+                    realized_marker_design=record.get("realized_marker_design")))
+                continue
+            if not isinstance(strata, Mapping) or not isinstance(heldout, Mapping):
+                raise BenchmarkAggregateError("robustness raw response evidence is missing")
+            heldout_decisions = heldout.get("rejections_by_method")
+            heldout_scores = heldout.get("p_by_method")
+            if not isinstance(heldout_decisions, Mapping) or not isinstance(
+                heldout_scores, Mapping
+            ):
+                raise BenchmarkAggregateError("robustness heldout evidence is invalid")
+            for architecture, stratum in sorted(strata.items()):
+                if not isinstance(stratum, Mapping):
+                    raise BenchmarkAggregateError("robustness architecture evidence is invalid")
+                power_decisions = stratum.get("detection_by_method")
+                power_scores = stratum.get("p_by_method")
+                if not isinstance(power_decisions, Mapping) or not isinstance(
+                    power_scores, Mapping
+                ):
+                    raise BenchmarkAggregateError("robustness power evidence is invalid")
+                correlations = [
+                    float(value) for value in stratum.get("rank_correlation_by_response", [])
+                    if value is not None
+                ]
+                overlaps = [
+                    float(value) for value in stratum.get("top_k_jaccard_by_response", [])
+                    if value is not None
+                ]
+                for method in sorted(power_decisions):
+                    fwer_flags = heldout_decisions.get(method)
+                    power_flags = power_decisions.get(method)
+                    if (
+                        not isinstance(fwer_flags, list)
+                        or any(not isinstance(value, bool) for value in fwer_flags)
+                        or not isinstance(power_flags, list)
+                        or any(not isinstance(value, bool) for value in power_flags)
+                    ):
+                        raise BenchmarkAggregateError(
+                            "robustness response decisions are invalid"
+                        )
+                    non_estimable = 0
+                    non_estimable_total = 0
+                    failure_by_bank: list[int] = []
+                    for score_bank in (heldout_scores.get(method), power_scores.get(method)):
+                        if not isinstance(score_bank, list) or not score_bank:
+                            raise BenchmarkAggregateError(
+                                "robustness score matrix is invalid"
+                            )
+                        values = np.asarray([
+                            [np.nan if value is None else value for value in row]
+                            for row in score_bank
+                        ], dtype=float)
+                        if values.ndim != 2:
+                            raise BenchmarkAggregateError(
+                                "robustness score matrix is invalid"
+                            )
+                        failures = int((~np.isfinite(values).any(axis=0)).sum())
+                        failure_by_bank.append(failures)
+                        non_estimable += failures
+                        non_estimable_total += values.shape[1]
+                    output[name].append(_empty(
+                        name, common, perturbation=perturbation,
+                        check_kind="robustness", required=record.get("required"),
+                        status=record.get("status"), architecture=architecture,
+                        method=method,
+                        rank_correlation=(sum(correlations) / len(correlations)
+                                          if correlations else None),
+                        top_k_jaccard=(sum(overlaps) / len(overlaps)
+                                       if overlaps else None),
+                        non_estimable_rate=(non_estimable / non_estimable_total),
+                        non_estimable_count=non_estimable,
+                        non_estimable_total=non_estimable_total,
+                        absolute_power_regret=stratum.get("absolute_power_regret"),
+                        realized_marker_design=record.get("realized_marker_design"),
+                        **_binomial_cells(
+                            "fwer" if payload.get("stage") == "formal" else "qa_fwer",
+                            fwer_flags, failure_by_bank[0],
+                        ),
+                        **_binomial_cells(
+                            "power" if payload.get("stage") == "formal" else "qa_power",
+                            power_flags, failure_by_bank[1],
+                        ),
+                    ))
     return output
 
 
