@@ -440,7 +440,7 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
             if candidate.is_symlink():
                 raise BenchmarkAggregateError("declared input is not a regular file")
             resolved = candidate.resolve()
-            if str(candidate) != str(resolved):
+            if declared != str(resolved):
                 raise BenchmarkAggregateError(
                     "external input path must be a normalized absolute path"
                 )

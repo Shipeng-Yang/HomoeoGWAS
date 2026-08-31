@@ -437,6 +437,27 @@ def test_input_manifest_accepts_only_normalized_external_regular_files(tmp_path)
         _validate_input_manifest(root, manifest)
 
 
+@pytest.mark.parametrize("separator", ["/./", "//"])
+def test_input_manifest_rejects_noncanonical_absolute_spelling(
+    tmp_path, separator,
+):
+    root = tmp_path / "benchmark"
+    inputs = root / "inputs"
+    inputs.mkdir(parents=True)
+    external = tmp_path / "real-input.bed"
+    external.write_bytes(b"real-plink-bed")
+    digest = hashlib.sha256(external.read_bytes()).hexdigest()
+    declared = f"{external.parent}{separator}{external.name}"
+    (inputs / "manifest.tsv").write_text(
+        "path\tsize\tsha256\ttype\n"
+        f"{declared}\t{external.stat().st_size}\t{digest}\tbed\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BenchmarkAggregateError, match="normalized absolute"):
+        _validate_input_manifest(root, inputs / "manifest.tsv")
+
+
 def test_audit_document_self_hash_is_verified_on_replay(tmp_path, monkeypatch):
     root = _write_null_shards(tmp_path, monkeypatch, rejections=0, total=20)
     audit_benchmark(root)
