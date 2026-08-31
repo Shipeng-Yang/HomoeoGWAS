@@ -146,7 +146,7 @@ def test_registry_has_global_vc_and_locked_family_size_stress_matrix():
     assert {(row.parameters["backbone"], row.parameters["bank"]) for row in global_rows} == {
         (backbone, bank)
         for backbone in ("cotton", "wheat", "quartet")
-        for bank in ("calibration", "heldout")
+        for bank in ("calibration", "heldout", "power")
     }
     assert all(row.parameters["hypothesis_unit"] == "global" for row in global_rows)
     assert all(row.parameters["detection_only"] is True for row in global_rows)

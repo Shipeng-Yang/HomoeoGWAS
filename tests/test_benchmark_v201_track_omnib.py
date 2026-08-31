@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from scripts.benchmarks.v201.track_omnib import (
     apply_threshold,
     build_synthetic_omnib_context,
     empirical_threshold,
+    load_omnib_benchmark_context,
     run_conditional_bank,
     run_encoding_check,
     run_end_to_end_null,
@@ -23,6 +25,108 @@ from scripts.benchmarks.v201.track_omnib import (
     run_omnib_replicate,
     run_power_replicate,
 )
+
+
+def test_real_plink_context_calibration_restart_and_power(tmp_path):
+    from bed_reader import to_bed
+
+    from homoeogwas.group_family import load_master_group_family
+    from homoeogwas.interact import _load_subgenome
+    from homoeogwas.io import plink_bim_sha256
+    from scripts.benchmarks.v201.track_omnib import (
+        _context_manifest,
+        _family_hash,
+        _family_manifest,
+    )
+
+    rng = np.random.default_rng(902)
+    samples = [f"sample-{index:03d}" for index in range(72)]
+    genotype: dict[str, str] = {}
+    mapping: dict[str, str] = {}
+    subdata = {}
+    for label in ("A", "B"):
+        prefix = tmp_path / f"geno-{label}"
+        values = rng.integers(0, 3, size=(72, 10)).astype(np.float32)
+        to_bed(str(prefix) + ".bed", values, properties={
+            "fid": ["0"] * 72, "iid": samples,
+            "sid": [f"{label}-{index}" for index in range(10)],
+            "chromosome": [label] * 10, "bp_position": list(range(1, 11)),
+            "allele_1": ["A"] * 10, "allele_2": ["C"] * 10,
+        }, count_A1=True)
+        npz = tmp_path / f"map-{label}.npz"
+        np.savez(
+            npz, gene_ids=np.asarray(["g0", "g1"], dtype=object),
+            snp_idx=np.asarray([np.arange(5), np.arange(5, 10)], dtype=object),
+            bim_sha256=np.asarray(plink_bim_sha256(prefix)),
+            n_variants=np.asarray(10), subgenome=np.asarray(label),
+        )
+        genotype[label], mapping[label] = str(prefix), str(npz)
+        subdata[label] = _load_subgenome(str(prefix), str(npz))
+    groups = tmp_path / "groups.tsv"
+    groups.write_text("group_id\tgene_A\tgene_B\ngroup_0\tg0\tg0\ngroup_1\tg1\tg1\n")
+    phenotype = tmp_path / "phenotype.tsv"
+    phenotype.write_text(
+        "sample\ttrait\n" + "".join(
+            f"{sample}\t{rng.normal():.12g}\n" for sample in samples
+        )
+    )
+    config = tmp_path / "interact.yaml"
+    config.write_text(
+        "interact:\n  mode: group\n  subgenomes: [A, B]\n"
+        f"  groups: {groups}\n  statistic: omniB\n  hypothesis_unit: group\n"
+        "  subset_order: 2\n  family_scope: primary_only\n  primary_transform: INT\n"
+        "  primary_multiplicity: bootstrap_minp\n"
+        f"  genotype: {{A: {genotype['A']}, B: {genotype['B']}}}\n"
+        f"  snp_to_gene: {{A: {mapping['A']}, B: {mapping['B']}}}\n"
+        f"  phenotype: {phenotype}\n  sample_col: sample\n  trait: trait\n"
+        "  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}\n"
+        "  calibration: {method: bootstrap, B: 199, seed: 2026}\n"
+    )
+    family = load_master_group_family(groups, ["A", "B"], require_group_id=True)
+    phenotype_values = np.asarray([
+        float(line.split("\t")[1])
+        for line in phenotype.read_text().splitlines()[1:]
+    ])
+    expected = OmniBBenchmarkContext(
+        subdata, family, phenotype_values, np.arange(72)
+    )
+    context_manifest = _context_manifest(expected)
+    artifact = tmp_path / "context.json"
+    artifact.write_text(json.dumps({
+        "schema": "homoeogwas-v201-omnib-context-v1",
+        "context_manifest": context_manifest,
+        "context_fingerprint": sha256_payload(context_manifest),
+        "family_manifest": _family_manifest(family),
+        "family_hash": _family_hash(family),
+    }, sort_keys=True) + "\n")
+    required = [config, groups, phenotype, artifact]
+    for label in ("A", "B"):
+        required.extend([
+            Path(genotype[label] + suffix) for suffix in (".bed", ".bim", ".fam")
+        ])
+        required.append(Path(mapping[label]))
+    manifest = {
+        str(path.resolve()): __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+        for path in required
+    }
+    loaded = load_omnib_benchmark_context(
+        config, context_artifact_path=artifact, input_manifest=manifest,
+    )
+    calibration = run_conditional_bank(
+        loaded, bank="calibration", count=2, design_hash="6" * 64, n_jobs=1,
+        scenario_id="B.conditional.real.gaussian.calibration",
+    )
+    shard = tmp_path / "calibration-shard.json"
+    shard.write_text(json.dumps({"bank": calibration.to_payload()}, sort_keys=True))
+    restarted = type(calibration).from_shard(shard)
+    power = run_power_replicate(
+        loaded, calibration_bank=restarted,
+        calibration_scenario_id="B.conditional.real.gaussian.calibration",
+        replicate=0, architecture="minor_burden_aligned",
+        interaction_pve=0.05, causal_groups=1, calibration_count=2,
+        design_hash="6" * 64, qa_only=True, n_jobs=1,
+    )
+    assert power["target_bank"]["p_by_method"]
 
 
 def test_global_vc_producer_is_detection_only_and_pilot_has_no_formal_fields(tiny_context):
@@ -35,6 +139,12 @@ def test_global_vc_producer_is_detection_only_and_pilot_has_no_formal_fields(tin
     assert payload["response_count"] == 1
     assert payload["inference_status"] == "noninferential_do_not_threshold"
     assert not ({"threshold", "rejected", "causal_recall", "group_ids"} & set(payload))
+    assert len(payload["target_lrt_evidence"]) == 1
+    evidence = payload["target_lrt_evidence"][0]
+    assert {
+        "ll_null", "ll_alt", "statistic", "statistic_raw", "df_added",
+        "p_mixture", "both_converged", "clipped", "null_model", "alt_model",
+    } <= set(evidence)
 
 
 def test_family_size_stress_serializes_response_level_evidence():
@@ -44,11 +154,12 @@ def test_family_size_stress_serializes_response_level_evidence():
         design_hash="f" * 64, qa_only=True, n_jobs=1,
         scenario_id="B.family_size.synthetic.g80",
     )
-    assert set(payload["rejections_by_method"]) == set(METHOD_NAMES)
-    assert all(len(values) == 2 for values in payload["rejections_by_method"].values())
+    assert not ({"thresholds", "rejections_by_method"} & set(payload))
+    assert set(payload["qa_rejections_by_method"]) == set(METHOD_NAMES)
+    assert all(len(values) == 2 for values in payload["qa_rejections_by_method"].values())
     assert payload["fwer"] == {
         method: np.mean(values)
-        for method, values in payload["rejections_by_method"].items()
+        for method, values in payload["qa_rejections_by_method"].items()
     }
     assert payload["calibration_minima_hashes"] == {
         method: sha256_payload(values)
@@ -149,6 +260,40 @@ def test_conditional_bank_rejects_duplicate_seeds_and_method_provenance_tamperin
         replace(bank, score_matrix_hashes={})
 
 
+def test_conditional_bank_roundtrips_from_shard_without_rescoring(
+    tiny_context, tmp_path,
+):
+    bank = run_conditional_bank(
+        tiny_context, bank="calibration", count=2,
+        design_hash="7" * 64, n_jobs=1,
+    )
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps({"bank": bank.to_payload()}, sort_keys=True) + "\n")
+    restored = type(bank).from_shard(path)
+    assert restored.statistical_artifact() == bank.statistical_artifact()
+    np.testing.assert_array_equal(restored.responses, bank.responses)
+    for method in METHOD_NAMES:
+        np.testing.assert_array_equal(
+            restored.p_by_method[method], bank.p_by_method[method]
+        )
+
+
+def test_omitted_kernel_bank_excludes_declared_kernel_from_fitted_covariance(
+    tiny_context,
+):
+    bank = run_conditional_bank(
+        tiny_context, bank="calibration", count=2,
+        design_hash="5" * 64, n_jobs=1, null_model="omitted_kernel",
+        scenario_id="B.conditional.synthetic.omitted_kernel.calibration",
+    )
+    omitted = tiny_context.family.subgenomes[-1]
+    assert omitted not in bank.null_covariance["components"]
+    for metadata in bank.response_metadata:
+        assert metadata["omitted_subgenome"] == omitted
+        assert omitted not in metadata["fitted_null_components"]
+        assert metadata["fitted_null_covariance_sha256"] == bank.null_covariance["sha256"]
+
+
 def test_end_to_end_rejection_uses_group_minp_only(tiny_context):
     result = run_end_to_end_null(
         tiny_context,
@@ -161,7 +306,8 @@ def test_end_to_end_rejection_uses_group_minp_only(tiny_context):
     assert result["family_scope"] == "primary_only"
     assert result["qa_only"] is True
     assert result["stage"] == "pilot"
-    assert result["formal_rejections"] == []
+    assert not ({"formal_rejections", "adjusted_decisions"} & set(result))
+    assert "qa_adjusted_diagnostic_decisions" in result
     assert result["inference_status"] == "noninferential_do_not_threshold"
     assert result["pair_edges_per_group"] == 3
     assert result["direct_higher_order_term"] is False
@@ -234,7 +380,13 @@ def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
     assert result["family_scope"] == "primary_only"
     assert result["direct_higher_order_term"] is False
     assert result["causal_group_ids"] == ["group_0"]
-    assert set(result["thresholds"]) == set(result["rejections_by_method"])
+    assert not ({"thresholds", "rejections_by_method"} & set(result))
+    assert set(result["qa_cutoffs_by_method"]) == set(result["qa_rejections_by_method"])
+    assert set(result["target_bank"]["p_by_method"]) == set(METHOD_NAMES)
+    assert result["target_bank"]["score_matrix_hashes"] == {
+        method: sha256_payload(values)
+        for method, values in result["target_bank"]["p_by_method"].items()
+    }
 
     assert result["calibration_response_ids"] == result["calibration_seed_ids"]
     assert result["target_response_ids"] == result["target_seed_ids"]
@@ -256,8 +408,8 @@ def test_power_freezes_calibration_thresholds_before_causal_bank(tiny_context):
         assert len(target_minima) == 1
         assert causal.shape == (1, 1)
         threshold = empirical_threshold(np.asarray(calibration_minima)[None, :])
-        assert result["thresholds"][method] == pytest.approx(threshold)
-        assert result["rejections_by_method"][method] == [
+        assert result["qa_cutoffs_by_method"][method] == pytest.approx(threshold)
+        assert result["qa_rejections_by_method"][method] == [
             value < threshold for value in target_minima
         ]
         assert result["causal_detection_by_method"][method] == [
@@ -318,12 +470,35 @@ def test_exact_encoding_check_restores_primary_family(tiny_context):
     assert result["request_hash"]
     assert result["context_fingerprint"]
     assert result["null_covariance"]["sha256"]
-    for name in (
-        "allele_flip_25pct", "allele_flip_50pct", "allele_flip_100pct",
-        "within_gene_snp_column_permutation",
-    ):
-        assert result["exact_checks"][name]["observed_arrays_identical"] is True
-        assert result["exact_checks"][name]["ranking_hash_identical"] is True
+    # The released v2.0.1 scorer is challenged directly.  Genuine failures are
+    # retained as benchmark evidence instead of being canonicalized away.
+    assert any(
+        not result["exact_checks"][name]["observed_arrays_identical"]
+        for name in ("allele_flip_25pct", "allele_flip_50pct", "allele_flip_100pct")
+    )
+    assert result["all_required_exact"] is False
+
+
+def test_negative_control_emits_response_level_false_positives(tiny_context):
+    calibration = run_conditional_bank(
+        tiny_context, bank="calibration", count=19,
+        design_hash="8" * 64, qa_only=True, null_model="gaussian",
+        scenario_id="B.conditional.synthetic.gaussian.calibration", n_jobs=1,
+    )
+    result = run_power_replicate(
+        tiny_context, calibration_bank=calibration,
+        calibration_scenario_id="B.conditional.synthetic.gaussian.calibration",
+        replicate=0, architecture="additive_only", interaction_pve=0.05,
+        causal_groups=1, calibration_count=19, response_count=1,
+        design_hash="8" * 64, qa_only=True, n_jobs=1,
+    )
+    assert result["causal_group_ids"] == []
+    assert "causal_detection_by_method" not in result
+    assert all(len(values) == 1 for values in result["false_positive_by_method"].values())
+    assert result["specificity_by_method"] == {
+        method: [not value for value in values]
+        for method, values in result["false_positive_by_method"].items()
+    }
 
 
 def test_robustness_checks_are_not_mislabeled_as_exact():
@@ -564,6 +739,7 @@ def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
         "status", "error_type", "message", "fwer", "power",
         "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
         "absolute_power_regret", "note",
+        "design_ruling", "calibration", "heldout", "power_by_architecture",
     }
     assert all(
         set(record) == robustness_schema

@@ -1409,6 +1409,7 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     truth = {
         "scan_pve": scan_pve, "distance_unit": "bp",
         "causal_variants": causal_variants,
+        "source": "deterministic_pre_fit_simulation", "seed": 2026,
         "analysis_context": {
             "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
             "joined_phenotype": binding["joined_phenotype"],
@@ -1420,10 +1421,25 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
         },
     }
     truth["truth_hash"] = sha256_payload(truth)
+    design_root = tmp_path / f"design-{scan_pve}"
+    (design_root / "inputs").mkdir(parents=True)
+    truth_path = design_root / "inputs" / "loco-truth.json"
+    truth_path.write_text(json.dumps(truth, sort_keys=True) + "\n")
+    truth_sha = hashlib.sha256(truth_path.read_bytes()).hexdigest()
+    (design_root / "design_lock.json").write_text(json.dumps({
+        "design_hash": "9" * 64,
+        "loco_truth_artifacts": {scenario.scenario_id: {
+            "path": "inputs/loco-truth.json", "sha256": truth_sha,
+            "truth_hash": truth["truth_hash"], "source": truth["source"],
+            "seed": truth["seed"],
+            "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
+            "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
+        }},
+    }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="9" * 64,
         sample_ids=np.asarray(sample_ids), fit_output_dir=output,
-        released_scan_truth=truth,
+        loco_design_root=design_root,
     )
     assert result["failure"]["failed"] is False
     assert result["released_scan_truth_binding"]["distance_unit"] == "bp"
@@ -1443,12 +1459,44 @@ def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
         "A.loco.cotton.pve_0", "fit", "formal", 1, 0,
         {"experiment": "loco", "scan_pve": 0.0, "panel": "cotton"},
     )
-    truth = {"scan_pve": 0.0, "distance_unit": "bp", "causal_variants": []}
+    binding = _released_fit_inputs(
+        _released_config_context(output), sample_ids,
+        expected_phenotype=None, expected_kernels=kernels,
+        expected_truth_hash=None,
+    )
+    truth = {
+        "scan_pve": 0.0, "distance_unit": "bp", "causal_variants": [],
+        "source": "deterministic_pre_fit_simulation", "seed": 2026,
+        "analysis_context": {
+            "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
+            "joined_phenotype": binding["joined_phenotype"],
+            "kernel_order": binding["kernel_order"],
+            "kernel_fingerprints": binding["kernel_fingerprints"],
+            "generated_config_sha256": hashlib.sha256(
+                (output / "configs" / "fit.generated.yaml").read_bytes()
+            ).hexdigest(),
+        },
+    }
     truth["truth_hash"] = sha256_payload(truth)
+    design_root = tmp_path / "design-no-comparator"
+    (design_root / "inputs").mkdir(parents=True)
+    truth_path = design_root / "inputs" / "loco-truth.json"
+    truth_path.write_text(json.dumps(truth, sort_keys=True) + "\n")
+    truth_sha = hashlib.sha256(truth_path.read_bytes()).hexdigest()
+    (design_root / "design_lock.json").write_text(json.dumps({
+        "design_hash": "8" * 64,
+        "loco_truth_artifacts": {scenario.scenario_id: {
+            "path": "inputs/loco-truth.json", "sha256": truth_sha,
+            "truth_hash": truth["truth_hash"], "source": truth["source"],
+            "seed": truth["seed"],
+            "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
+            "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
+        }},
+    }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="8" * 64,
         sample_ids=np.asarray(sample_ids), fit_output_dir=output,
-        released_scan_truth=truth, scan_comparators={},
+        loco_design_root=design_root, scan_comparators={},
     )
     assert result["failure"]["failed"] is True
 

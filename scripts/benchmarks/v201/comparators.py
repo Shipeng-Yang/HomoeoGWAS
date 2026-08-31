@@ -94,6 +94,7 @@ def score_global_hadamard_vc(
     p_values: list[float] = []
     statistics: list[float] = []
     convergence: list[bool] = []
+    lrt_evidence: list[dict[str, object]] = []
     for column in range(Y.shape[1]):
         comparison = compare_nested_reml(
             Y[:, column], X, kernels, model_specs=model_specs,
@@ -105,6 +106,25 @@ def score_global_hadamard_vc(
         p_values.append(float(test.p_mixture))
         statistics.append(float(test.statistic))
         convergence.append(bool(test.both_converged))
+        lrt_evidence.append({
+            "null_model": test.null_model,
+            "alt_model": test.alt_model,
+            "ll_null": float(test.ll_null),
+            "ll_alt": float(test.ll_alt),
+            "statistic": float(test.statistic),
+            "statistic_raw": float(test.statistic_raw),
+            "df_added": int(test.df_added),
+            "p_naive": float(test.p_naive),
+            "p_mixture": float(test.p_mixture),
+            "mixture_weights": dict(test.mixture_weights),
+            "added_components": list(test.added_components),
+            "null_boundary_components": list(test.null_boundary_components),
+            "is_nested": bool(test.is_nested),
+            "clipped": bool(test.clipped),
+            "both_converged": bool(test.both_converged),
+            "boundary_method": test.boundary_method,
+            "bootstrap_p": test.bootstrap_p,
+        })
     return {
         "method": GLOBAL_VC_METHOD,
         "hypothesis_unit": "global",
@@ -112,6 +132,7 @@ def score_global_hadamard_vc(
         "p_values": p_values,
         "lrt_statistics": statistics,
         "both_converged": convergence,
+        "lrt_evidence": lrt_evidence,
         "kernel_manifest": {
             "construction": "hadamard_product",
             "normalization": "trace",
@@ -243,6 +264,7 @@ class SNPxSNPCalibrationArtifact:
     def reference_payload(self) -> dict[str, object]:
         return {
             "schema": "snpxsnp_calibration_v1",
+            "hypothesis_unit": "snp_pair_within_group",
             "member_ids": list(self.member_ids),
             "member_ids_sha256": _payload_hash(list(self.member_ids)),
             "group_memberships": [list(value) for value in self.group_memberships],
@@ -255,6 +277,36 @@ class SNPxSNPCalibrationArtifact:
         payload["calibration_p"] = self.calibration_p.tolist()
         payload["artifact_sha256"] = _payload_hash(payload)
         return payload
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> SNPxSNPCalibrationArtifact:
+        """Rehydrate a frozen calibration without rescoring any responses."""
+
+        if not isinstance(payload, Mapping):
+            raise ValueError("SNPxSNP calibration payload must be a mapping")
+        expected = {
+            "schema", "hypothesis_unit", "member_ids", "member_ids_sha256",
+            "group_memberships", "calibration_shape", "calibration_p_sha256",
+            "calibration_p", "artifact_sha256",
+        }
+        if set(payload) != expected or payload.get("schema") != "snpxsnp_calibration_v1":
+            raise ValueError("invalid frozen SNPxSNP calibration payload schema")
+        body = {key: value for key, value in payload.items() if key != "artifact_sha256"}
+        if payload.get("artifact_sha256") != _payload_hash(body):
+            raise ValueError("frozen SNPxSNP calibration payload hash mismatch")
+        artifact = cls(
+            member_ids=tuple(str(value) for value in payload["member_ids"]),
+            group_memberships=tuple(
+                tuple(int(index) for index in value)
+                for value in payload["group_memberships"]
+            ),
+            calibration_p=np.asarray(payload["calibration_p"], dtype=float),
+        )
+        if artifact.reference_payload() != {
+            key: payload[key] for key in artifact.reference_payload()
+        }:
+            raise ValueError("frozen SNPxSNP calibration payload commitment mismatch")
+        return artifact
 
 
 def _validate_expanded_structure(

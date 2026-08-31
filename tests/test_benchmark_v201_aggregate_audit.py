@@ -2,6 +2,7 @@ import copy
 import csv
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -249,7 +250,6 @@ def _write_null_shards(
             ),
             "observed_group_p": [observed],
             "adjusted_p": [adjusted],
-            "adjusted_decisions": [rejected],
             "bootstrap_minp": {
                 "alpha": 0.05,
                 "method": "parametric_bootstrap_minp_plus_one",
@@ -262,10 +262,18 @@ def _write_null_shards(
                 "threshold_comparator": "strict_less_than",
             },
             "null_minima": null_minima,
-            "formal_rejections": family_ids if rejected and stage == "formal" else [],
             "qa_diagnostic_rejections": family_ids if rejected else [],
             "runtime_seconds": 0.1,
             "failure": {"failed": False, "error_type": None, "message": None},
+            **(
+                {
+                    "adjusted_decisions": [rejected],
+                    "formal_rejections": family_ids if rejected else [],
+                }
+                if stage == "formal" else {
+                    "qa_adjusted_diagnostic_decisions": [rejected],
+                }
+            ),
         }
         write_shard_exclusive(
             root / stage / "omnib" / "core" / f"replicate-{index:06d}.json",
@@ -351,6 +359,30 @@ def test_audit_rejects_symlink_lock_and_stages_before_publish(tmp_path, monkeypa
         for path in (root / "tables").glob("*.tsv")
     }
     assert after == before
+
+
+def test_publish_replace_failure_rolls_back_tables_and_audit_bytes(tmp_path, monkeypatch):
+    root = _write_null_shards(tmp_path, monkeypatch, rejections=0, total=20)
+    audit_benchmark(root)
+    live = [*(sorted((root / "tables").glob("*.tsv"))),
+            root / "audit" / "benchmark_audit.json"]
+    before = {path: path.read_bytes() for path in live}
+    original_replace = os.replace
+    live_replaces = 0
+
+    def fail_third_live_replace(source, destination):
+        nonlocal live_replaces
+        destination = Path(destination)
+        if destination.parent in {root / "tables", root / "audit"}:
+            live_replaces += 1
+            if live_replaces == 3:
+                raise OSError("injected publication failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_third_live_replace)
+    with pytest.raises(OSError, match="injected publication failure"):
+        audit_benchmark(root)
+    assert {path: path.read_bytes() for path in live} == before
 
 
 def test_decision_disagreement_and_seed_overlap_fail_closed(tmp_path, monkeypatch):
@@ -473,7 +505,18 @@ def test_configs_are_manifest_complete_and_parse_as_yaml(tmp_path):
     configs = tmp_path / "configs"
     configs.mkdir()
     config = configs / "scientific.yaml"
-    config.write_text("interact:\n  mode: group\n  statistic: omniB\n", encoding="utf-8")
+    config.write_text(
+        "interact:\n  mode: group\n  statistic: omniB\n  hypothesis_unit: group\n"
+        "  subset_order: 2\n  family_scope: primary_only\n"
+        "  primary_transform: INT\n  primary_multiplicity: bootstrap_minp\n"
+        "  subgenomes: [A, B]\n  groups: inputs/groups.tsv\n"
+        "  genotype: {A: inputs/a, B: inputs/b}\n"
+        "  snp_to_gene: {A: inputs/a.npz, B: inputs/b.npz}\n"
+        "  phenotype: inputs/p.tsv\n  sample_col: sample\n  trait: trait\n"
+        "  grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}\n"
+        "  calibration: {method: bootstrap, B: 199, seed: 2026}\n",
+        encoding="utf-8",
+    )
     digest = hashlib.sha256(config.read_bytes()).hexdigest()
     manifest = configs / "manifest.tsv"
     manifest.write_text(
@@ -705,8 +748,30 @@ def test_global_vc_heldout_is_bound_to_registered_calibration_bank():
         (heldout["calibration_p_values"][0] + 0.25) % 1.0
     ]
     heldout["calibration_p_hash"] = sha256_payload(heldout["calibration_p_values"])
-    with pytest.raises(BenchmarkAuditError, match="global VC calibration"):
+    with pytest.raises(BenchmarkAuditError, match="global VC (calibration|LRT)"):
         _audit_families_and_parallel(evidence)
+
+
+def test_global_vc_positive_power_is_detection_only_and_recomputable():
+    context = build_synthetic_omnib_context(n=32, groups=2, copies=2, seed=10)
+    calibration_id = "B.global_vc.synthetic.gaussian.calibration"
+    power_id = "B.global_vc.synthetic.gaussian.power"
+    calibration = run_global_vc_bank(
+        context, bank="calibration", count=1, design_hash="2" * 64,
+        qa_only=True, scenario_id=calibration_id,
+    )
+    power = run_global_vc_bank(
+        context, bank="power", count=2, calibration_count=1,
+        design_hash="2" * 64, qa_only=True, scenario_id=power_id,
+    )
+    evidence = SimpleNamespace(
+        shards=((Path("cal.json"), calibration), (Path("power.json"), power)),
+        registry=(), design_lock={},
+    )
+    _audit_families_and_parallel(evidence)
+    assert power["detection_only"] is True
+    assert power["detection_power"] == np.mean(power["qa_detection_flags"])
+    assert not ({"causal_group_ids", "recall_by_method"} & set(power))
 
 
 def test_family_size_audit_recomputes_response_level_fwer():
@@ -853,6 +918,12 @@ def test_power_registry_metadata_and_single_response_are_fail_closed():
         "calibration_p_sha256"
     ] = "0" * 64
     with pytest.raises(BenchmarkAuditError, match="frozen calibration"):
+        _audit_power_evidence(detached, scenario)
+    detached = copy.deepcopy(payload)
+    detached["target_minima_by_method"]["omnib"] = [0.0]
+    detached["target_minima_hashes"]["omnib"] = sha256_payload([0.0])
+    detached["qa_rejections_by_method"]["omnib"] = [False]
+    with pytest.raises(BenchmarkAuditError, match="score matrix"):
         _audit_power_evidence(detached, scenario)
     payload["architecture"] = "mixed_sign"
     with pytest.raises(BenchmarkAuditError, match="registry"):

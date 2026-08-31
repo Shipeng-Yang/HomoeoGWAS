@@ -316,6 +316,46 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
             raise BenchmarkAggregateError(
                 "declared config YAML must be a nonempty mapping"
             )
+        interact = parsed.get("interact")
+        if interact is not None:
+            exact = {
+                "mode": "group", "statistic": "omniB",
+                "hypothesis_unit": "group", "subset_order": 2,
+                "family_scope": "primary_only", "primary_transform": "INT",
+                "primary_multiplicity": "bootstrap_minp",
+            }
+            subgenomes = interact.get("subgenomes") if isinstance(interact, Mapping) else None
+            calibration = interact.get("calibration") if isinstance(interact, Mapping) else None
+            path_fields = ("groups", "phenotype", "sample_col", "trait")
+            if (
+                not isinstance(interact, Mapping)
+                or any(interact.get(field) != value for field, value in exact.items())
+                or not isinstance(subgenomes, list) or len(subgenomes) not in {2, 3, 4}
+                or len(set(subgenomes)) != len(subgenomes)
+                or any(not isinstance(interact.get(field), str) or not interact[field]
+                       for field in path_fields)
+                or any(
+                    not isinstance(interact.get(field), Mapping)
+                    or set(interact[field]) != set(subgenomes)
+                    or any(not isinstance(value, str) or not value
+                           for value in interact[field].values())
+                    for field in ("genotype", "snp_to_gene")
+                )
+                or interact.get("grm") != {
+                    "method": "grm_from_X", "maf_min": 0.01,
+                    "scope": "all_subgenomes",
+                }
+                or not isinstance(calibration, Mapping)
+                or calibration.get("method") != "bootstrap"
+                or isinstance(calibration.get("B"), bool)
+                or not isinstance(calibration.get("B"), int)
+                or calibration["B"] < 1
+                or isinstance(calibration.get("seed"), bool)
+                or not isinstance(calibration.get("seed"), int)
+            ):
+                raise BenchmarkAggregateError(
+                    "declared interaction config is not canonical group-omniB"
+                )
         hashes[relative] = digest
     actual_configs = {
         item.relative_to(root).as_posix()
@@ -380,10 +420,12 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
 
 def _validate_context_artifact(
     root: Path,
-    backbone: str,
+    context_key: str,
     record: Mapping[str, Any],
     input_records: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    backbone, _, family_label = context_key.partition(":g")
+    expected_group_count = int(family_label) if family_label else 80
     required_record = {
         "artifact_path", "artifact_sha256", "group_count",
         "ordered_family_ids", "ordered_family_ids_hash",
@@ -391,7 +433,7 @@ def _validate_context_artifact(
     }
     if not isinstance(record, Mapping) or set(record) != required_record:
         raise BenchmarkAggregateError(
-            f"design backbone context is invalid: {backbone}"
+            f"design backbone context is invalid: {context_key}"
         )
     artifact_path = record.get("artifact_path")
     input_record = input_records.get(str(artifact_path))
@@ -402,7 +444,7 @@ def _validate_context_artifact(
         or input_record.get("sha256") != record.get("artifact_sha256")
     ):
         raise BenchmarkAggregateError(
-            f"context artifact is not bound to the input manifest: {backbone}"
+            f"context artifact is not bound to the input manifest: {context_key}"
         )
     artifact = _strict_json(root / artifact_path)
     expected_artifact_fields = {
@@ -424,17 +466,17 @@ def _validate_context_artifact(
         or artifact.get("context_fingerprint") != sha256_payload(context)
         or family.get("group_ids") != artifact.get("ordered_family_ids")
         or artifact.get("group_count") != len(artifact.get("ordered_family_ids", []))
-        or artifact.get("group_count") != 80
+        or artifact.get("group_count") != expected_group_count
         or artifact.get("ordered_family_ids_hash")
         != sha256_payload(artifact.get("ordered_family_ids"))
         or not isinstance(source_inputs, list)
         or not source_inputs
     ):
-        raise BenchmarkAggregateError(f"context artifact is invalid: {backbone}")
+        raise BenchmarkAggregateError(f"context artifact is invalid: {context_key}")
     seen: set[str] = set()
     for source in source_inputs:
         if not isinstance(source, Mapping) or set(source) != {"path", "sha256", "type"}:
-            raise BenchmarkAggregateError(f"context source input is invalid: {backbone}")
+            raise BenchmarkAggregateError(f"context source input is invalid: {context_key}")
         source_path = source.get("path")
         manifest_source = input_records.get(str(source_path))
         if (
@@ -448,7 +490,7 @@ def _validate_context_artifact(
                 "type": manifest_source.get("type"),
             }
         ):
-            raise BenchmarkAggregateError(f"context source input is unbound: {backbone}")
+            raise BenchmarkAggregateError(f"context source input is unbound: {context_key}")
         seen.add(source_path)
     expected_record = {
         "artifact_path": artifact_path,
@@ -460,7 +502,7 @@ def _validate_context_artifact(
         "family_hash": artifact["family_hash"],
     }
     if dict(record) != expected_record:
-        raise BenchmarkAggregateError(f"context lock differs from artifact: {backbone}")
+        raise BenchmarkAggregateError(f"context lock differs from artifact: {context_key}")
 
 
 def _current_git_commit() -> str:
@@ -552,10 +594,49 @@ def _validate_locked_root(
         for row in canonical
         if row.track == "omnib" and "backbone" in row.parameters
     }
-    if not isinstance(contexts, Mapping) or set(contexts) != required_backbones:
+    required_contexts = required_backbones | {
+        f"{row.parameters['backbone']}:g{row.parameters['family_size']}"
+        for row in canonical
+        if row.track == "omnib" and row.parameters.get("experiment") == "family_size"
+    }
+    if not isinstance(contexts, Mapping) or set(contexts) != required_contexts:
         raise BenchmarkAggregateError("design backbone contexts are incomplete")
-    for backbone, record in contexts.items():
-        _validate_context_artifact(root, backbone, record, input_records)
+    for context_key, record in contexts.items():
+        _validate_context_artifact(root, context_key, record, input_records)
+    loco_ids = {
+        row.scenario_id for row in canonical
+        if row.track == "fit" and row.parameters.get("experiment") == "loco"
+    }
+    loco_artifacts = lock.get("loco_truth_artifacts")
+    if loco_ids and (
+        not isinstance(loco_artifacts, Mapping) or set(loco_artifacts) != loco_ids
+    ):
+        raise BenchmarkAggregateError("design LOCO truth artifacts are incomplete")
+    required_loco = {
+        "path", "sha256", "truth_hash", "source", "seed",
+        "generated_config_sha256", "phenotype_sha256",
+    }
+    for scenario_id, record in (loco_artifacts or {}).items():
+        if (
+            not isinstance(record, Mapping) or set(record) != required_loco
+            or record.get("path") not in input_records
+            or input_records[str(record["path"])].get("sha256") != record.get("sha256")
+            or input_records[str(record["path"])].get("type") != "loco_truth"
+            or any(
+                not isinstance(record.get(field), str)
+                or len(record[field]) != 64
+                or any(character not in _HEX for character in record[field])
+                for field in (
+                    "sha256", "truth_hash", "generated_config_sha256",
+                    "phenotype_sha256",
+                )
+            )
+            or not isinstance(record.get("source"), str) or not record["source"]
+            or isinstance(record.get("seed"), bool) or not isinstance(record["seed"], int)
+        ):
+            raise BenchmarkAggregateError(
+                f"design LOCO truth artifact is invalid: {scenario_id}"
+            )
     if lock.get("acceptance_rules") != ACCEPTANCE_RULES:
         raise BenchmarkAggregateError("design acceptance rules mismatch")
 
@@ -649,7 +730,11 @@ def load_evidence(root: str | Path) -> LoadedEvidence:
             raise BenchmarkAggregateError(f"shard experiment mismatch: {path}")
         backbone = row.parameters.get("backbone")
         if row.track == "omnib" and isinstance(backbone, str):
-            locked_context = lock["benchmark_contexts"].get(backbone)
+            context_key = (
+                f"{backbone}:g{row.parameters['family_size']}"
+                if row.parameters.get("experiment") == "family_size" else backbone
+            )
+            locked_context = lock["benchmark_contexts"].get(context_key)
             if (
                 not isinstance(locked_context, Mapping)
                 or payload.get("context_fingerprint")
@@ -880,7 +965,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
         name = "omnib_null_replicates.tsv"
         values = payload.get("observed_group_p")
         adjusted = payload.get("adjusted_p")
-        decisions = payload.get("adjusted_decisions")
+        decisions = payload.get(
+            "adjusted_decisions" if payload.get("stage") == "formal"
+            else "qa_adjusted_diagnostic_decisions"
+        )
         if common["failed"]:
             output[name].append(_empty(name, common, method="group_omniB",
                 null_model=registry.parameters.get("null_model"), stress=False,
@@ -934,10 +1022,11 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
         tested_members = bank.get("tested_family_members")
         tested_sizes = bank.get("tested_family_sizes")
         tested_hashes = bank.get("tested_family_hashes")
+        hypothesis_units = bank.get("score_hypothesis_units")
         if not all(
             isinstance(value, Mapping)
             and set(value) == set(METHOD_NAMES)
-            for value in (tested_members, tested_sizes, tested_hashes)
+            for value in (tested_members, tested_sizes, tested_hashes, hypothesis_units)
         ):
             raise BenchmarkAggregateError(
                 "conditional tested-family evidence is incomplete"
@@ -966,7 +1055,7 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                     "conditional tested-family manifest mismatch"
                 )
             output[manifest].append(_empty(manifest, common, method=method,
-                hypothesis_unit="group", family_scope="primary_only",
+                hypothesis_unit=hypothesis_units[method], family_scope="primary_only",
                 family_size=size, ordered_ids=members,
                 family_hash=family_hash, family_order_hash=order_hash,
                 tested_family_hash=tested, callable=not common["failed"],
@@ -975,7 +1064,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 backend=bank.get("parallel_backend"), worker_pids=bank.get("worker_pids")))
     elif experiment == "family_size":
         name = "omnib_null_replicates.tsv"
-        rejections = payload.get("rejections_by_method")
+        rejections = payload.get(
+            "rejections_by_method" if payload.get("stage") == "formal"
+            else "qa_rejections_by_method"
+        )
         minima = payload.get("target_minima_by_method")
         thresholds = payload.get(
             "thresholds" if payload.get("stage") == "formal" else "qa_cutoffs"
@@ -1023,7 +1115,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             raise BenchmarkAggregateError("power decision evidence is missing")
         if set(decisions) != set(METHOD_NAMES):
             raise BenchmarkAggregateError("power method set differs from locked comparators")
-        thresholds = payload.get("thresholds", {})
+        thresholds = payload.get(
+            "thresholds" if payload.get("stage") == "formal"
+            else "qa_cutoffs_by_method", {}
+        )
         for method in METHOD_NAMES:
             method_decisions = decisions[method]
             if not isinstance(method_decisions, list):

@@ -128,10 +128,27 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                 ))
 
     for backbone in ("cotton", "wheat", "quartet"):
+        robustness_architectures = [
+            "minor_burden_aligned", "pc1_distributed",
+            "kernel_multidimensional", "single_snp_pair", "mixed_sign",
+        ]
+        if backbone != "cotton":
+            robustness_architectures.append("multi_edge_group")
         rows.append(omnib_row(
-            f"B.encoding.{backbone}", 1, 199,
+            f"B.encoding.{backbone}", 1, 199 if stage == "pilot" else 2_000,
             backbone=backbone, experiment="encoding",
             include_robustness=True,
+            robustness_design={
+                "interaction_pve": 0.05, "causal_groups": 1,
+                "architectures": robustness_architectures,
+                "calibration_count": 20 if stage == "pilot" else 2_000,
+                "heldout_count": 20 if stage == "pilot" else 500,
+                "power_count_per_architecture": 20 if stage == "pilot" else 500,
+                "stratify_by_architecture": True,
+                "component_regret_reference": [
+                    "minor_burden", "pc1", "kernel_hadamard",
+                ],
+            },
         ))
 
     # A standalone, non-localizing variance-component comparator.  It is not
@@ -151,6 +168,18 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                 hypothesis_unit="global", detection_only=True,
                 copies=copies, edges_per_group=edges, direct_four_way=False,
             ))
+        rows.append(_scenario(
+            f"B.global_vc.{backbone}.gaussian.power", "omnib", stage,
+            20 if stage == "pilot" else 500,
+            199 if stage == "pilot" else 0,
+            backbone=backbone, experiment="global_vc", bank="power",
+            null_model="gaussian", method="global_hadamard_variance_component",
+            hypothesis_unit="global", detection_only=True,
+            interaction_pve=0.05, causal_groups=1,
+            calibration_count=20 if stage == "pilot" else 2_000,
+            report_metric="detection_power", copies=copies,
+            edges_per_group=edges, direct_four_way=False,
+        ))
 
     # Statistical family-size stress is separate from machine-scaling Track C.
     for backbone in ("cotton", "wheat", "quartet"):

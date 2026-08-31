@@ -13,10 +13,13 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 from scipy.stats import spearmanr
+
+from homoeogwas.diagnostics import NestedREMLComparison, boundary_lrt
 
 from .aggregate import (
     TABLE_SCHEMAS,
@@ -79,7 +82,9 @@ _ENCODING_ROBUSTNESS_SCHEMA = {
     "status", "error_type", "message", "fwer", "power",
     "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
     "absolute_power_regret", "note",
+    "design_ruling", "calibration", "heldout", "power_by_architecture",
 }
+_ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
 _CANONICAL_NULL_KIND = {
     "gaussian": "gaussian", "student_t5": "t5", "t5": "t5",
     "heteroscedastic_pc1": "heteroscedastic_pc1",
@@ -642,7 +647,10 @@ def _audit_end2end_decisions(payload: Mapping[str, Any]) -> bool:
     family_ids = payload.get("family_ids")
     observed = payload.get("observed_group_p")
     adjusted = payload.get("adjusted_p")
-    adjusted_decisions = payload.get("adjusted_decisions")
+    adjusted_decisions = payload.get(
+        "adjusted_decisions" if payload.get("stage") == "formal"
+        else "qa_adjusted_diagnostic_decisions"
+    )
     calibration = payload.get("bootstrap_minp")
     null_minima = payload.get("null_minima")
     if (
@@ -715,7 +723,9 @@ def _audit_end2end_decisions(payload: Mapping[str, Any]) -> bool:
     )
     if not isinstance(serialized_ids, list) or set(serialized_ids) != expected_ids:
         raise BenchmarkAuditError("decision disagreement: serialized rejection IDs differ")
-    if payload["stage"] == "pilot" and payload.get("formal_rejections"):
+    if payload["stage"] == "pilot" and any(
+        field in payload for field in ("formal_rejections", "adjusted_decisions")
+    ):
         raise BenchmarkAuditError("pilot contains formal rejection claims")
     if not (
         threshold_indices == adjusted_indices == serialized_indices == bootstrap_indices
@@ -1211,7 +1221,7 @@ def _validate_snpxsnp_calibration_reference(
     value: Any, *, calibration_count: int,
 ) -> Mapping[str, Any]:
     expected_fields = {
-        "schema", "member_ids", "member_ids_sha256", "group_memberships",
+        "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
         "calibration_shape", "calibration_p_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != expected_fields:
@@ -1221,6 +1231,7 @@ def _validate_snpxsnp_calibration_reference(
     shape = value.get("calibration_shape")
     if (
         value.get("schema") != "snpxsnp_calibration_v1"
+        or value.get("hypothesis_unit") != "snp_pair_within_group"
         or not isinstance(members, list) or not members
         or any(not isinstance(item, str) or not item for item in members)
         or len(set(members)) != len(members)
@@ -1255,14 +1266,14 @@ def _validate_snpxsnp_calibration_artifact(
     value: Any, *, calibration_count: int,
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
-        "schema", "member_ids", "member_ids_sha256", "group_memberships",
+        "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
         "calibration_shape", "calibration_p_sha256", "calibration_p",
         "artifact_sha256",
     }:
         raise BenchmarkAuditError("SNPxSNP frozen calibration artifact is invalid")
     reference = {
         key: value[key] for key in (
-            "schema", "member_ids", "member_ids_sha256", "group_memberships",
+            "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
             "calibration_shape", "calibration_p_sha256",
         )
     }
@@ -1323,9 +1334,14 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     )
     names = [
         "calibration_minima_by_method", "target_minima_by_method",
-        "calibration_minima_hashes", "target_minima_hashes", "thresholds",
-        "rejections_by_method",
+        "calibration_minima_hashes", "target_minima_hashes",
     ]
+    cutoff_name = "thresholds" if payload.get("stage") == "formal" else "qa_cutoffs_by_method"
+    rejection_name = (
+        "rejections_by_method"
+        if payload.get("stage") == "formal" else "qa_rejections_by_method"
+    )
+    names += [cutoff_name, rejection_name]
     names += (
         ["false_positive_by_method", "specificity_by_method"]
         if negative_control else [
@@ -1336,7 +1352,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     maps = {name: payload.get(name) for name in names}
     if not all(isinstance(value, Mapping) for value in maps.values()):
         raise BenchmarkAuditError("power compact score evidence is incomplete")
-    methods = set(maps["thresholds"])
+    methods = set(maps[cutoff_name])
     if methods != set(METHOD_NAMES) or any(
         set(value) != methods for value in maps.values()
     ):
@@ -1379,6 +1395,31 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         or target_bank.get("response_shape", [None, None])[1] != 1
     ):
         raise BenchmarkAuditError("power frozen calibration binding is invalid")
+    target_scores = target_bank.get("p_by_method")
+    target_score_hashes = target_bank.get("score_matrix_hashes")
+    family_ids = target_bank.get("family_ids")
+    if (
+        not isinstance(target_scores, Mapping)
+        or set(target_scores) != set(METHOD_NAMES)
+        or not isinstance(target_score_hashes, Mapping)
+        or set(target_score_hashes) != set(METHOD_NAMES)
+        or not isinstance(family_ids, list)
+        or bool(causal_ids and not set(causal_ids) <= set(family_ids))
+    ):
+        raise BenchmarkAuditError("power target score evidence is incomplete")
+    target_arrays: dict[str, np.ndarray] = {}
+    for method in METHOD_NAMES:
+        raw = target_scores[method]
+        if (
+            not isinstance(raw, list) or len(raw) != len(family_ids)
+            or any(not isinstance(row, list) or len(row) != response_count for row in raw)
+            or target_score_hashes[method] != sha256_payload(raw)
+        ):
+            raise BenchmarkAuditError("power target score hash/shape is invalid")
+        values = np.asarray(raw, dtype=float)
+        if np.any(np.isinf(values)) or np.any((values < 0.0) | (values > 1.0)):
+            raise BenchmarkAuditError("power target score values are invalid")
+        target_arrays[method] = values
     artifact_reference = _validate_snpxsnp_calibration_reference(
         artifact.get("snpxsnp_calibration_reference"),
         calibration_count=calibration_count,
@@ -1413,6 +1454,13 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
             maps["target_minima_by_method"][method], response_count,
             target_failed, "power target minimum",
         )
+        recomputed_target = np.where(
+            np.isfinite(target_arrays[method]).any(axis=0),
+            np.where(np.isfinite(target_arrays[method]), target_arrays[method], np.inf).min(axis=0),
+            np.nan,
+        ).tolist()
+        if target != recomputed_target:
+            raise BenchmarkAuditError("power target minima detach from score matrix")
         causal: list[list[float | None]] = []
         if not negative_control:
             causal_raw = maps["causal_minima_by_method"][method]
@@ -1422,6 +1470,10 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
                 _compact_vector(row, response_count, target_failed, "power causal minimum")
                 for row in causal_raw
             ]
+            causal_indices = [family_ids.index(group_id) for group_id in causal_ids]
+            recomputed_causal = target_arrays[method][causal_indices].tolist()
+            if causal != recomputed_causal:
+                raise BenchmarkAuditError("power causal minima detach from score matrix")
         compact_values = [("calibration", calibration), ("target", target)]
         if not negative_control:
             compact_values.append(("causal", causal))
@@ -1435,7 +1487,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         ]
         k = int(math.floor(0.05 * (len(usable_calibration) + 1)))
         threshold = None if k < 1 else sorted(usable_calibration)[k - 1]
-        if maps["thresholds"][method] != threshold:
+        if maps[cutoff_name][method] != threshold:
             raise BenchmarkAuditError("power threshold differs from calibration minima")
         rejected = [
             False if index in target_failed or threshold is None else bool(
@@ -1455,7 +1507,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
             ) / len(causal)
             for index in range(response_count)
         ]
-        decisions_ok = maps["rejections_by_method"][method] == rejected
+        decisions_ok = maps[rejection_name][method] == rejected
         if negative_control:
             decisions_ok = decisions_ok and maps["false_positive_by_method"][method] == rejected
             decisions_ok = decisions_ok and maps["specificity_by_method"][method] == [
@@ -1466,6 +1518,158 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
             decisions_ok = decisions_ok and maps["recall_by_method"][method] == recall
         if not decisions_ok:
             raise BenchmarkAuditError("power decisions differ from compact minima")
+
+
+def _audit_robustness_record(
+    record: Mapping[str, Any], payload: Mapping[str, Any],
+) -> None:
+    ruling = record.get("design_ruling")
+    calibration = record.get("calibration")
+    heldout = record.get("heldout")
+    strata = record.get("power_by_architecture")
+    architectures = [
+        "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
+        "single_snp_pair", "mixed_sign",
+    ]
+    if payload.get("pair_edges_per_group") != 1:
+        architectures.append("multi_edge_group")
+    response_count = 20 if payload.get("stage") == "pilot" else 500
+    calibration_count = 20 if payload.get("stage") == "pilot" else 2_000
+    if (
+        ruling != {
+            "interaction_pve": 0.05, "causal_groups": 1,
+            "architectures": architectures, "calibration_count": calibration_count,
+            "heldout_count": response_count,
+            "power_count_per_architecture": response_count,
+            "stratify_by_architecture": True,
+            "component_regret_reference": [
+                "minor_burden", "pc1", "kernel_hadamard",
+            ],
+        }
+        or not isinstance(calibration, Mapping)
+        or not isinstance(heldout, Mapping)
+        or not isinstance(strata, Mapping) or list(strata) != architectures
+    ):
+        raise BenchmarkAuditError("robustness frozen design ruling is invalid")
+
+    def score_matrices(bank: Mapping[str, Any], count: int) -> dict[str, np.ndarray]:
+        ids, seeds = bank.get("response_ids"), bank.get("seeds")
+        matrices, hashes = bank.get("p_by_method"), bank.get("p_hashes")
+        if (
+            not isinstance(ids, list) or len(ids) != count or len(set(ids)) != count
+            or not isinstance(seeds, list) or len(seeds) != count
+            or len(set(seeds)) != count
+            or not isinstance(matrices, Mapping) or set(matrices) != set(_ROBUSTNESS_METHODS)
+            or not isinstance(hashes, Mapping) or set(hashes) != set(_ROBUSTNESS_METHODS)
+        ):
+            raise BenchmarkAuditError("robustness response bank is incomplete")
+        output: dict[str, np.ndarray] = {}
+        family_count = len(payload.get("family_ids", []))
+        for method in _ROBUSTNESS_METHODS:
+            raw = matrices[method]
+            if (
+                not isinstance(raw, list) or len(raw) != family_count
+                or any(not isinstance(row, list) or len(row) != count for row in raw)
+                or hashes[method] != sha256_payload(raw)
+            ):
+                raise BenchmarkAuditError("robustness score commitment is invalid")
+            output[method] = np.asarray(raw, dtype=float)
+        return output
+
+    calibration_scores = score_matrices(calibration, calibration_count)
+    heldout_scores = score_matrices(heldout, response_count)
+    if set(calibration["response_ids"]) & set(heldout["response_ids"]):
+        raise BenchmarkAuditError("robustness null banks overlap")
+    thresholds = {
+        method: (
+            lambda minima: sorted(minima)[int(math.floor(0.05 * (len(minima) + 1))) - 1]
+        )(_finite_minima(calibration_scores[method]))
+        for method in _ROBUSTNESS_METHODS
+    }
+    if calibration.get("thresholds") != thresholds:
+        raise BenchmarkAuditError("robustness threshold differs from calibration")
+    heldout_decisions = {
+        method: (_finite_minimum_array(values) < thresholds[method]).tolist()
+        for method, values in heldout_scores.items()
+    }
+    if heldout.get("rejections_by_method") != heldout_decisions:
+        raise BenchmarkAuditError("robustness heldout decisions do not recompute")
+    if record.get("fwer") != float(np.mean(heldout_decisions["omnib"])):
+        raise BenchmarkAuditError("robustness FWER does not recompute")
+    family_ids = payload["family_ids"]
+    all_correlations: list[float] = []
+    all_top: list[float] = []
+    for architecture in architectures:
+        arm = strata[architecture]
+        if not isinstance(arm, Mapping):
+            raise BenchmarkAuditError("robustness power stratum is invalid")
+        scores = score_matrices(arm, response_count)
+        if set(calibration["response_ids"]) & set(arm["response_ids"]):
+            raise BenchmarkAuditError("robustness power/calibration banks overlap")
+        causal = arm.get("causal_group_ids")
+        if not isinstance(causal, list) or len(causal) != 1 or causal[0] not in family_ids:
+            raise BenchmarkAuditError("robustness causal truth is invalid")
+        index = family_ids.index(causal[0])
+        detection = {
+            method: (values[index] < thresholds[method]).tolist()
+            for method, values in scores.items()
+        }
+        powers = {method: float(np.mean(values)) for method, values in detection.items()}
+        if arm.get("detection_by_method") != detection or arm.get("power_by_method") != powers:
+            raise BenchmarkAuditError("robustness power decisions do not recompute")
+        if arm.get("absolute_power_regret") != abs(
+            powers["omnib"] - max(
+                powers["minor_burden"], powers["pc1"], powers["kernel_hadamard"]
+            )
+        ):
+            raise BenchmarkAuditError("robustness component regret does not recompute")
+        baseline_raw = arm.get("baseline_omnib_p")
+        if arm.get("baseline_omnib_hash") != sha256_payload(baseline_raw):
+            raise BenchmarkAuditError("robustness baseline rank commitment is invalid")
+        baseline = np.asarray(baseline_raw, dtype=float)
+        correlations: list[float | None] = []
+        overlaps: list[float] = []
+        k = min(10, len(family_ids))
+        for column in range(response_count):
+            left, right = baseline[:, column], scores["omnib"][:, column]
+            finite = np.isfinite(left) & np.isfinite(right)
+            correlation = None
+            if finite.sum() >= 2:
+                lrank = np.argsort(np.argsort(left[finite], kind="stable"), kind="stable")
+                rrank = np.argsort(np.argsort(right[finite], kind="stable"), kind="stable")
+                value = np.corrcoef(lrank, rrank)[0, 1]
+                correlation = float(value) if np.isfinite(value) else None
+            correlations.append(correlation)
+            ltop = set(np.argsort(np.where(np.isfinite(left), left, np.inf))[:k])
+            rtop = set(np.argsort(np.where(np.isfinite(right), right, np.inf))[:k])
+            overlaps.append(len(ltop & rtop) / len(ltop | rtop) if ltop | rtop else 1.0)
+        if (
+            arm.get("rank_correlation_by_response") != correlations
+            or arm.get("top_k_jaccard_by_response") != overlaps
+        ):
+            raise BenchmarkAuditError("robustness ranking metrics do not recompute")
+        all_correlations.extend(value for value in correlations if value is not None)
+        all_top.extend(overlaps)
+    if (
+        record.get("rank_correlation")
+        != (float(np.mean(all_correlations)) if all_correlations else None)
+        or record.get("top_k_jaccard") != float(np.mean(all_top))
+        or record.get("non_estimable_rate")
+        != float(np.mean(~np.isfinite(heldout_scores["omnib"])))
+    ):
+        raise BenchmarkAuditError("robustness aggregate metrics do not recompute")
+
+
+def _finite_minimum_array(values: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(values)
+    return np.where(finite.any(axis=0), np.where(finite, values, np.inf).min(axis=0), np.nan)
+
+
+def _finite_minima(values: np.ndarray) -> list[float]:
+    minima = _finite_minimum_array(values)
+    if not np.all(np.isfinite(minima)):
+        raise BenchmarkAuditError("robustness calibration has non-estimable responses")
+    return minima.tolist()
 
 
 def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
@@ -1494,6 +1698,30 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 raise BenchmarkAuditError("conditional calibration bank identity is invalid")
             conditional_calibration_banks[scenario_id] = candidate["bank"]
     for _path, payload in evidence.shards:
+        if payload.get("track") == "fit" and payload.get("experiment") == "loco":
+            artifacts = evidence.design_lock.get("loco_truth_artifacts")
+            record = (
+                artifacts.get(str(payload.get("scenario_id")))
+                if isinstance(artifacts, Mapping) else None
+            )
+            binding = payload.get("released_scan_truth_binding")
+            truth_manifest = payload.get("truth_manifest")
+            if (
+                not isinstance(record, Mapping)
+                or not isinstance(binding, Mapping)
+                or binding.get("truth_artifact_path") != record.get("path")
+                or binding.get("truth_artifact_sha256") != record.get("sha256")
+                or binding.get("truth_hash") != record.get("truth_hash")
+                or binding.get("source") != record.get("source")
+                or binding.get("seed") != record.get("seed")
+                or binding.get("generated_config_sha256")
+                != record.get("generated_config_sha256")
+                or binding.get("phenotype_sha256") != record.get("phenotype_sha256")
+                or not isinstance(truth_manifest, Mapping)
+                or truth_manifest.get("source") != record.get("source")
+                or truth_manifest.get("seed") != record.get("seed")
+            ):
+                raise BenchmarkAuditError("LOCO truth is not presealed in design lock")
         if payload["track"] == "omnib":
             if payload.get("experiment") == "global_vc":
                 if (
@@ -1501,7 +1729,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     or payload.get("hypothesis_unit") != "global"
                     or payload.get("detection_only") is not True
                     or any(field in payload for field in (
-                        "family_ids", "causal_group_ids", "causal_recall", "recall_by_method",
+                        "causal_group_ids", "causal_recall", "recall_by_method",
                     ))
                 ):
                     raise BenchmarkAuditError("global VC detection-only contract is invalid")
@@ -1517,11 +1745,72 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     or payload.get("target_p_hash") != sha256_payload(target)
                 ):
                     raise BenchmarkAuditError("global VC p-value evidence is invalid")
+                calibration_lrt = payload.get("calibration_lrt_evidence")
+                target_lrt = payload.get("target_lrt_evidence")
+                if (
+                    not isinstance(calibration_lrt, list)
+                    or len(calibration_lrt) != len(calibration)
+                    or not isinstance(target_lrt, list)
+                    or len(target_lrt) != len(target)
+                ):
+                    raise BenchmarkAuditError("global VC LRT evidence is incomplete")
+                for rows, reported in ((calibration_lrt, calibration), (target_lrt, target)):
+                    for row, reported_p in zip(rows, reported, strict=True):
+                        if not isinstance(row, Mapping):
+                            raise BenchmarkAuditError("global VC LRT evidence is invalid")
+                        null_name, alt_name = row.get("null_model"), row.get("alt_model")
+                        if not isinstance(null_name, str) or not isinstance(alt_name, str):
+                            raise BenchmarkAuditError("global VC LRT model identity is invalid")
+                        null_components = [
+                            item for item in null_name.split("+") if item != "e"
+                        ]
+                        comparison = NestedREMLComparison(
+                            fits={
+                                null_name: SimpleNamespace(
+                                    log_lik=row.get("ll_null"),
+                                    optimizer_status=row.get("both_converged"),
+                                    boundary_components=list(
+                                        row.get("null_boundary_components", [])
+                                    ),
+                                ),
+                                alt_name: SimpleNamespace(
+                                    log_lik=row.get("ll_alt"),
+                                    optimizer_status=row.get("both_converged"),
+                                ),
+                            },
+                            model_specs={
+                                null_name: null_components,
+                                alt_name: [*null_components, "hom"],
+                            },
+                            likelihood_table=None,
+                            kernels_used=[*null_components, "hom"],
+                        )
+                        try:
+                            recomputed = boundary_lrt(comparison, null_name, alt_name)
+                        except (TypeError, ValueError) as error:
+                            raise BenchmarkAuditError(
+                                "global VC LRT evidence is invalid"
+                            ) from error
+                        expected_lrt = {
+                            "statistic": recomputed.statistic,
+                            "statistic_raw": recomputed.statistic_raw,
+                            "df_added": recomputed.df_added,
+                            "p_mixture": recomputed.p_mixture,
+                            "clipped": recomputed.clipped,
+                            "both_converged": recomputed.both_converged,
+                        }
+                        if (
+                            any(row.get(key) != value for key, value in expected_lrt.items())
+                            or reported_p != recomputed.p_mixture
+                            or recomputed.clipped
+                            or not recomputed.both_converged
+                        ):
+                            raise BenchmarkAuditError("global VC LRT does not recompute")
                 calibration_ids = payload.get("calibration_response_ids")
                 target_ids = payload.get("target_response_ids")
                 role = payload.get("target_role")
                 if (
-                    role not in {"calibration", "heldout"}
+                    role not in {"calibration", "heldout", "power"}
                     or not isinstance(calibration_ids, list)
                     or not isinstance(target_ids, list)
                     or len(calibration_ids) != len(calibration)
@@ -1536,6 +1825,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         or calibration_ids != target_ids
                         or calibration != target
                         or payload.get("calibration_p_hash") != payload.get("target_p_hash")
+                        or calibration_lrt != target_lrt
                     ):
                         raise BenchmarkAuditError("global VC calibration bank is inconsistent")
                 else:
@@ -1548,10 +1838,31 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         or calibration_ids != frozen.get("target_response_ids")
                         or calibration != frozen.get("target_p_values")
                         or payload.get("calibration_p_hash") != frozen.get("target_p_hash")
+                        or calibration_lrt != frozen.get("target_lrt_evidence")
                     ):
                         raise BenchmarkAuditError(
                             "global VC calibration bank is detached from heldout evidence"
                         )
+                    if role == "power":
+                        positive = payload.get("positive_signal")
+                        flags = payload.get(
+                            "rejected" if payload.get("stage") == "formal"
+                            else "qa_detection_flags"
+                        )
+                        if (
+                            positive != {
+                                "architecture": "kernel_multidimensional",
+                                "interaction_pve": 0.05,
+                                "causal_groups": 1,
+                            }
+                            or not isinstance(flags, list)
+                            or len(flags) != len(target)
+                            or payload.get("detection_power")
+                            != float(np.mean(np.asarray(flags, dtype=bool)))
+                        ):
+                            raise BenchmarkAuditError(
+                                "global VC detection-only power evidence is invalid"
+                            )
                 expected = float(np.quantile(np.asarray(calibration), 0.05, method="lower"))
                 if payload.get("stage") == "formal":
                     if payload.get("threshold") != expected or payload.get("rejected") != [
@@ -1564,12 +1875,18 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 ):
                     raise BenchmarkAuditError("global VC pilot contains formal inference fields")
                 manifest = payload.get("kernel_manifest")
+                family_manifest = payload.get("family_manifest")
+                family_ids = payload.get("family_ids")
                 if (
                     not isinstance(manifest, Mapping)
                     or manifest.get("construction") != "hadamard_product"
                     or manifest.get("normalization") != "trace"
                     or not isinstance(manifest.get("global_hadamard_sha256"), str)
                     or len(manifest["global_hadamard_sha256"]) != 64
+                    or not isinstance(family_manifest, Mapping)
+                    or not isinstance(family_ids, list)
+                    or family_manifest.get("group_ids") != family_ids
+                    or payload.get("family_hash") != sha256_payload(family_manifest)
                 ):
                     raise BenchmarkAuditError("global VC kernel commitment is invalid")
                 continue
@@ -1635,13 +1952,20 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 target_minima = payload.get("target_minima_by_method")
                 calibration_hashes = payload.get("calibration_minima_hashes")
                 target_hashes = payload.get("target_minima_hashes")
-                rejections = payload.get("rejections_by_method")
+                rejections = payload.get(
+                    "rejections_by_method"
+                    if payload.get("stage") == "formal"
+                    else "qa_rejections_by_method"
+                )
                 tested_sizes = payload.get("tested_family_sizes")
                 tested_members = payload.get("tested_family_members")
                 tested_family_hashes = payload.get("tested_family_hashes")
+                hypothesis_units = payload.get("score_hypothesis_units")
                 thresholds = payload.get(
                     "thresholds" if payload.get("stage") == "formal" else "qa_cutoffs"
                 )
+                calibration_ids = payload.get("calibration_response_ids")
+                target_ids = payload.get("target_response_ids")
                 if (
                     payload.get("family_size") != declared
                     or payload.get("group_count") != declared
@@ -1661,16 +1985,36 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     or not all(isinstance(value, Mapping) for value in (
                         calibration_minima, target_minima, calibration_hashes,
                         target_hashes, rejections, thresholds, tested_sizes,
-                        tested_members, tested_family_hashes,
+                        tested_members, tested_family_hashes, hypothesis_units,
                     ))
                     or any(set(value) != expected_methods for value in (
                         calibration_minima, target_minima, calibration_hashes,
                         target_hashes, rejections, thresholds, tested_sizes,
-                        tested_members, tested_family_hashes,
+                        tested_members, tested_family_hashes, hypothesis_units,
                     ))
+                    or not isinstance(calibration_ids, list)
+                    or len(calibration_ids) != calibration_count
+                    or len(set(calibration_ids)) != calibration_count
+                    or not isinstance(target_ids, list)
+                    or len(target_ids) != response_count
+                    or len(set(target_ids)) != response_count
+                    or bool(set(calibration_ids) & set(target_ids))
+                    or len(payload.get("calibration_seeds", [])) != calibration_count
+                    or len(payload.get("target_seeds", [])) != response_count
+                    or not isinstance(payload.get("calibration_response_hash"), str)
+                    or not isinstance(payload.get("target_response_hash"), str)
+                    or payload.get("calibration_response_hash")
+                    == payload.get("target_response_hash")
                 ):
                     raise BenchmarkAuditError("family-size statistical stress evidence is invalid")
                 for method in sorted(expected_methods):
+                    if hypothesis_units[method] != (
+                        "snp_pair_within_group"
+                        if method == "snpxsnp" else "group_score"
+                    ):
+                        raise BenchmarkAuditError(
+                            "family-size hypothesis unit is invalid"
+                        )
                     ordered_members = tested_members[method]
                     if (
                         not isinstance(ordered_members, list) or not ordered_members
@@ -1743,11 +2087,14 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 hashes = bank.get("tested_family_hashes")
                 members = bank.get("tested_family_members")
                 score_hashes = bank.get("score_matrix_hashes")
-                if not all(isinstance(value, Mapping) for value in (sizes, hashes, members, score_hashes)):
+                units = bank.get("score_hypothesis_units")
+                if not all(isinstance(value, Mapping) for value in (
+                    sizes, hashes, members, score_hashes, units,
+                )):
                     raise BenchmarkAuditError("tested family provenance is incomplete")
                 if not (
                     set(sizes) == set(hashes) == set(members)
-                    == set(score_hashes) == set(METHOD_NAMES)
+                    == set(score_hashes) == set(units) == set(METHOD_NAMES)
                 ):
                     raise BenchmarkAuditError("tested family size/hash methods differ")
                 for method in sizes:
@@ -1768,6 +2115,10 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         or not isinstance(score_hashes[method], str)
                         or len(score_hashes[method]) != 64
                         or any(c not in "0123456789abcdef" for c in score_hashes[method])
+                        or units[method] != (
+                            "snp_pair_within_group"
+                            if method == "snpxsnp" else "group_score"
+                        )
                     ):
                         raise BenchmarkAuditError("invalid tested family provenance")
                     key = (str(payload["context_fingerprint"]), str(method))
@@ -1908,11 +2259,6 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     or not isinstance(check.get("worker_pids"), list)
                 ):
                     raise BenchmarkAuditError("encoding check is invalid")
-                if check.get("required") and not all(check.get(field) is True for field in (
-                    "observed_arrays_identical", "adjusted_decisions_identical",
-                    "ranking_hash_identical", "rejection_sets_identical",
-                )):
-                    raise BenchmarkAuditError("required encoding identity check failed")
                 if check.get("required"):
                     recomputed_all_required = recomputed_all_required and all(
                         check.get(field) is True for field in (
@@ -1933,6 +2279,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 if record["status"] == "completed":
                     if record.get("error_type") is not None or record.get("message") is not None:
                         raise BenchmarkAuditError("completed robustness record has an error")
+                    _audit_robustness_record(record, payload)
                 elif (
                     not isinstance(record.get("error_type"), str)
                     or not isinstance(record.get("message"), str)
@@ -2220,6 +2567,52 @@ def _omnib_power_gates(
                 "tables/omnib_power_replicates.tsv",
                 "power is descriptive; frozen Gaussian null gate passes and failures <= 1%",
             )
+    return gates
+
+
+def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
+    gates: dict[str, AuditGate] = {}
+    for _path, payload in evidence.shards:
+        if payload.get("experiment") != "global_vc":
+            continue
+        role = payload.get("target_role")
+        if role not in {"heldout", "power"}:
+            continue
+        flags = payload.get(
+            "rejected" if evidence.stage == "formal" else "qa_detection_flags"
+        )
+        if not isinstance(flags, list) or any(not isinstance(value, bool) for value in flags):
+            raise BenchmarkAuditError("global VC gate decisions are missing")
+        failures = int(payload.get("failure", {}).get("failed") is True)
+        successes = sum(flags)
+        scenario_id = str(payload["scenario_id"])
+        if role == "heldout":
+            gate = core_fwer_gate(
+                scenario_id, successes, len(flags), failures,
+                stage=evidence.stage,
+                evidence_path="tables/omnib_null_replicates.tsv",
+            )
+            gate = replace(
+                gate, gate_id=f"B.global_vc_fwer.{scenario_id}",
+                gate_kind="global_vc_fwer",
+                reason="standalone global VC heldout FWER uses its frozen calibration bank",
+            )
+        else:
+            summary = summarize_binomial(successes, len(flags))
+            ok = failures == 0
+            gate = AuditGate(
+                f"B.global_vc_power.{scenario_id}", "omnib", scenario_id,
+                "global_vc_detection_power", successes, len(flags),
+                float(summary["estimate"]), float(summary["ci_low"]),
+                float(summary["ci_high"]), failures, failures / len(flags),
+                ok if evidence.stage == "formal" else None,
+                ok if evidence.stage == "pilot" else None,
+                ("PASS" if ok else "FAIL") if evidence.stage == "formal"
+                else ("QA_PASS" if ok else "QA_FAIL"),
+                "tables/omnib_null_replicates.tsv",
+                "global VC detection-only power is descriptive and separately gated",
+            )
+        gates[gate.gate_id] = gate
     return gates
 
 
@@ -2533,6 +2926,38 @@ def _verify_written_tables(
             raise BenchmarkAuditError(f"aggregate table hash mismatch: {path.name}")
 
 
+def _restore_publication(snapshots: Mapping[Path, bytes | None]) -> None:
+    """Restore every live artifact after a failed locked publication."""
+
+    errors: list[str] = []
+    for path, previous in snapshots.items():
+        try:
+            if previous is None:
+                if path.exists() and not path.is_symlink():
+                    path.unlink()
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.rollback-", dir=path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(previous)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        except OSError as error:
+            errors.append(f"{path}: {error}")
+    if errors:
+        raise BenchmarkAuditError(
+            "benchmark publication rollback failed: " + "; ".join(errors)
+        )
+
+
 def _audit_benchmark_locked(root: str | Path) -> AuditReport:
     """Recompute all acceptance evidence and seal the first successful audit.
 
@@ -2634,6 +3059,7 @@ def _audit_benchmark_locked(root: str | Path) -> AuditReport:
             )
         gates[gate.gate_id] = gate
     gates.update(_conditional_gates(evidence, rows))
+    gates.update(_global_vc_gates(evidence))
     gates.update(_omnib_power_gates(evidence, rows, gates))
     expected_minimum = {
         "fit_pve_recovery.tsv": sum(
@@ -2690,6 +3116,7 @@ def _audit_benchmark_locked(root: str | Path) -> AuditReport:
     _annotate_binomial_rows(rows)
 
     acceptance_rows = _acceptance_rows(evidence.stage, gates)
+    publication_snapshots: dict[Path, bytes | None] = {}
     with tempfile.TemporaryDirectory(
         prefix=".audit-staging-", dir=benchmark_root,
     ) as staging_directory:
@@ -2704,12 +3131,19 @@ def _audit_benchmark_locked(root: str | Path) -> AuditReport:
         live_table_root = benchmark_root / "tables"
         live_table_root.mkdir(parents=True, exist_ok=True)
         paths_list: list[Path] = []
-        for staged_path in staged_paths:
-            live_path = live_table_root / staged_path.name
-            if live_path.is_symlink():
-                raise BenchmarkAuditError("aggregate table path must not be a symlink")
-            os.replace(staged_path, live_path)
-            paths_list.append(live_path)
+        try:
+            for staged_path in staged_paths:
+                live_path = live_table_root / staged_path.name
+                if live_path.is_symlink():
+                    raise BenchmarkAuditError("aggregate table path must not be a symlink")
+                publication_snapshots[live_path] = (
+                    live_path.read_bytes() if live_path.exists() else None
+                )
+                os.replace(staged_path, live_path)
+                paths_list.append(live_path)
+        except Exception:
+            _restore_publication(publication_snapshots)
+            raise
         paths = tuple(paths_list)
 
     required = [
@@ -2753,7 +3187,14 @@ def _audit_benchmark_locked(root: str | Path) -> AuditReport:
     else:
         document["qa_overall_passed"] = qa_overall
     document["audit_sha256"] = sha256_payload(document)
-    _atomic_json(audit_path, document)
+    publication_snapshots[audit_path] = (
+        audit_path.read_bytes() if audit_path.exists() else None
+    )
+    try:
+        _atomic_json(audit_path, document)
+    except Exception:
+        _restore_publication(publication_snapshots)
+        raise
     return AuditReport(
         evidence.stage, inference, formal_overall, qa_overall, gates,
         tuple(manifest), paths, table_hashes, evidence,

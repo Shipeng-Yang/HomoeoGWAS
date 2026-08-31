@@ -7,19 +7,21 @@ from the response bank on which it is evaluated.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import json
 import math
 import os
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from homoeogwas.group_family import ExpandedEdgeFamily, MasterGroupFamily
-from homoeogwas.interact import SubgenomeData
+from homoeogwas.group_family import ExpandedEdgeFamily, MasterGroupFamily, load_master_group_family
+from homoeogwas.interact import SubgenomeData, _load_subgenome
 from homoeogwas.omnib_family import (
     OmniBFamilyScores,
     bootstrap_minp_calibration,
@@ -159,6 +161,7 @@ class ConditionalBank:
             "seeds": list(self.seeds),
             "response_hash": self.response_hash,
             "response_shape": list(self.responses.shape),
+            "responses": _json_safe(self.responses),
             "response_metadata": list(self.response_metadata),
             "family_ids": list(self.family_ids),
             "family_hash": self.family_hash,
@@ -169,6 +172,12 @@ class ConditionalBank:
                 for method, members in self.tested_family_members.items()
             },
             "tested_family_hashes": dict(self.tested_family_hashes),
+            "score_hypothesis_units": {
+                method: (
+                    "snp_pair_within_group" if method == "snpxsnp" else "group_score"
+                )
+                for method in METHOD_NAMES
+            },
             "score_matrix_hashes": dict(self.score_matrix_hashes),
             "snpxsnp_calibration_reference": (
                 self.snpxsnp_calibration.reference_payload()
@@ -193,6 +202,80 @@ class ConditionalBank:
                 self.snpxsnp_calibration.to_payload()
             )
         return payload
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> ConditionalBank:
+        """Load a restart-stable bank and verify every serialized commitment."""
+
+        if not isinstance(payload, Mapping):
+            raise ValueError("conditional bank payload must be a mapping")
+        responses = np.asarray(payload.get("responses"), dtype=float)
+        p_by_method = payload.get("p_by_method")
+        sizes = payload.get("tested_family_sizes")
+        artifact_payload = payload.get("snpxsnp_calibration_artifact")
+        if (
+            responses.ndim != 2
+            or list(responses.shape) != payload.get("response_shape")
+            or _array_hash(responses) != payload.get("response_hash")
+            or not isinstance(p_by_method, Mapping)
+            or not isinstance(sizes, Mapping)
+            or not isinstance(artifact_payload, Mapping)
+        ):
+            raise ValueError("conditional bank payload evidence is incomplete")
+        score_bank = MethodScoreBank(
+            family_ids=tuple(payload.get("family_ids", [])),
+            p_by_method={
+                method: np.asarray(p_by_method[method], dtype=float)
+                for method in METHOD_NAMES
+            },
+            tested_family_sizes={method: int(sizes[method]) for method in METHOD_NAMES},
+        )
+        score_hashes = payload.get("score_matrix_hashes")
+        if not isinstance(score_hashes, Mapping) or any(
+            score_hashes.get(method)
+            != sha256_payload(_json_safe(score_bank.p_by_method[method]))
+            for method in METHOD_NAMES
+        ):
+            raise ValueError("conditional bank score hash mismatch")
+        bank = cls(
+            requested_role=str(payload.get("requested_role")),
+            canonical_role=str(payload.get("canonical_role")),
+            stage=str(payload.get("stage")),
+            seed_ids=tuple(payload.get("seed_ids", [])),
+            seeds=tuple(int(value) for value in payload.get("seeds", [])),
+            responses=responses,
+            response_hash=str(payload.get("response_hash")),
+            response_metadata=tuple(dict(value) for value in payload.get("response_metadata", [])),
+            family_ids=tuple(payload.get("family_ids", [])),
+            family_hash=str(payload.get("family_hash")),
+            design_hash=str(payload.get("design_hash")),
+            score_bank=score_bank,
+            tested_family_members={
+                method: tuple(payload["tested_family_members"][method])
+                for method in METHOD_NAMES
+            },
+            tested_family_hashes=dict(payload.get("tested_family_hashes", {})),
+            score_matrix_hashes=dict(score_hashes),
+            snpxsnp_calibration=SNPxSNPCalibrationArtifact.from_payload(
+                artifact_payload
+            ),
+            calibration_reference=dict(payload.get("calibration_reference", {})),
+            execution=dict(payload.get("execution", {})),
+            runtime_seconds=float(payload.get("runtime_seconds", 0.0)),
+            null_covariance=dict(payload.get("null_covariance", {})),
+            failure=dict(payload.get("failure", {})),
+        )
+        if bank.to_payload() != dict(payload):
+            raise ValueError("conditional bank payload is not canonical")
+        return bank
+
+    @classmethod
+    def from_shard(cls, path: str | Path) -> ConditionalBank:
+        """Load either a bare bank artifact or a conditional shard after restart."""
+
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        payload = document.get("bank", document) if isinstance(document, Mapping) else document
+        return cls.from_payload(payload)
 
     def statistical_artifact(self) -> dict[str, Any]:
         """Restart-stable inferential commitment (no PID/runtime fields)."""
@@ -327,6 +410,140 @@ def _context_manifest(context: OmniBBenchmarkContext) -> dict[str, Any]:
 
 def _context_fingerprint(context: OmniBBenchmarkContext) -> str:
     return sha256_payload(_context_manifest(context))
+
+
+def _resolved_path(value: Any, base: Path, field: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"validated config {field} must be a non-empty path")
+    path = Path(value)
+    return (base / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def load_omnib_benchmark_context(
+    config_path: str | Path,
+    *,
+    context_artifact_path: str | Path,
+    input_manifest: Mapping[str, str],
+) -> OmniBBenchmarkContext:
+    """Build a real benchmark context from the released interaction inputs.
+
+    The caller supplies the already validated input-manifest identities.  The
+    loader nevertheless re-reads BED/FAM/BIM, verified mapping NPZs, groups and
+    phenotype, then requires the resulting manifest to equal the presealed
+    context artifact.
+    """
+
+    import yaml
+
+    config_file = Path(config_path).resolve()
+    raw = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("interact"), Mapping):
+        raise ValueError("validated config must contain an interact mapping")
+    ic = raw["interact"]
+    exact = {
+        "mode": "group", "statistic": "omniB", "hypothesis_unit": "group",
+        "subset_order": 2, "family_scope": "primary_only",
+        "primary_transform": "INT", "primary_multiplicity": "bootstrap_minp",
+    }
+    if any(ic.get(field) != value for field, value in exact.items()):
+        raise ValueError("validated config differs from canonical group-omniB science")
+    calibration = ic.get("calibration")
+    grm = ic.get("grm")
+    if (
+        not isinstance(calibration, Mapping)
+        or calibration.get("method") != "bootstrap"
+        or isinstance(calibration.get("B"), bool)
+        or not isinstance(calibration.get("B"), int)
+        or calibration["B"] < 1
+        or isinstance(calibration.get("seed"), bool)
+        or not isinstance(calibration.get("seed"), int)
+        or grm != {"method": "grm_from_X", "maf_min": 0.01,
+                   "scope": "all_subgenomes"}
+    ):
+        raise ValueError("validated config calibration/GRM contract is invalid")
+    subgenomes = ic.get("subgenomes")
+    genotype, mappings = ic.get("genotype"), ic.get("snp_to_gene")
+    if (
+        not isinstance(subgenomes, list) or len(subgenomes) not in {2, 3, 4}
+        or len(set(subgenomes)) != len(subgenomes)
+        or not isinstance(genotype, Mapping) or set(genotype) != set(subgenomes)
+        or not isinstance(mappings, Mapping) or set(mappings) != set(subgenomes)
+    ):
+        raise ValueError("validated config subgenome input maps are invalid")
+    base = config_file.parent
+    resolved_required: list[Path] = [config_file]
+    subdata: dict[str, SubgenomeData] = {}
+    for label in subgenomes:
+        prefix = _resolved_path(genotype[label], base, f"genotype.{label}")
+        mapping = _resolved_path(mappings[label], base, f"snp_to_gene.{label}")
+        resolved_required.extend(
+            [Path(str(prefix) + suffix) for suffix in (".bed", ".bim", ".fam")]
+        )
+        resolved_required.append(mapping)
+        subdata[label] = _load_subgenome(
+            str(prefix), str(mapping), verify_mapping=True
+        )
+    groups_path = _resolved_path(ic.get("groups"), base, "groups")
+    phenotype_path = _resolved_path(ic.get("phenotype"), base, "phenotype")
+    resolved_required.extend([groups_path, phenotype_path])
+    normalized_manifest = {
+        str(Path(path).resolve()): digest for path, digest in input_manifest.items()
+    }
+    for path in resolved_required:
+        expected = normalized_manifest.get(str(path.resolve()))
+        observed = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected != observed:
+            raise ValueError(f"resolved input is absent or differs from manifest: {path}")
+    family = load_master_group_family(groups_path, subgenomes, require_group_id=True)
+    sample_col, trait = ic.get("sample_col"), ic.get("trait")
+    if not isinstance(sample_col, str) or not isinstance(trait, str):
+        raise ValueError("validated config phenotype columns are invalid")
+    with phenotype_path.open(encoding="utf-8", newline="") as handle:
+        sample = handle.read(4096)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters="\t,")
+        except csv.Error:
+            dialect = csv.excel_tab
+        reader = csv.DictReader(handle, dialect=dialect)
+        if sample_col not in (reader.fieldnames or ()) or trait not in (reader.fieldnames or ()):
+            raise ValueError("phenotype columns are absent")
+        phenotype_by_id: dict[str, float] = {}
+        for row in reader:
+            sample_id = str(row[sample_col])
+            if sample_id in phenotype_by_id:
+                raise ValueError("phenotype sample IDs must be unique strings")
+            try:
+                value = float(row[trait])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                phenotype_by_id[sample_id] = value
+    reference_samples = tuple(subdata[subgenomes[0]].samples)
+    if any(tuple(subdata[label].samples) != reference_samples for label in subgenomes[1:]):
+        raise ValueError("real PLINK subgenomes do not share the same ordered sample IDs")
+    sample_idx = np.asarray(
+        [index for index, sample_id in enumerate(reference_samples)
+         if str(sample_id) in phenotype_by_id], dtype=int,
+    )
+    phenotype = np.asarray(
+        [phenotype_by_id[str(reference_samples[index])] for index in sample_idx],
+        dtype=float,
+    )
+    context = OmniBBenchmarkContext(subdata, family, phenotype, sample_idx)
+    artifact_file = Path(context_artifact_path).resolve()
+    artifact = json.loads(artifact_file.read_text(encoding="utf-8"))
+    manifest = _context_manifest(context)
+    if (
+        not isinstance(artifact, Mapping)
+        or artifact.get("schema") != "homoeogwas-v201-omnib-context-v1"
+        or artifact.get("context_manifest") != manifest
+        or artifact.get("context_fingerprint") != sha256_payload(manifest)
+        or artifact.get("family_manifest") != _family_manifest(family)
+        or artifact.get("family_hash") != _family_hash(family)
+    ):
+        raise ValueError("real context differs from the presealed context artifact")
+    return context
 
 
 def _request_hash(
@@ -522,6 +739,7 @@ def _prepare_scenario(
     stage: str,
     scenario_id: str,
     n_jobs: int,
+    null_model: str = "gaussian",
 ) -> _PreparedScenario:
     setup_seed, setup_seed_id = _seed(design_hash, scenario_id, 0, stage, "scenario_setup")
     scores, expanded = score_omnib_family(
@@ -542,6 +760,35 @@ def _prepare_scenario(
     )
     if scores.null_covariance is None:
         raise RuntimeError("production omniB preparation did not retain its null covariance")
+    omitted_label = context.family.subgenomes[-1]
+    if null_model in {"omitted_kernel", "omitted_background_kernel"}:
+        omitted_component = float(scores.covariance_components.get(omitted_label, 0.0))
+        omitted_fit_kernel = np.asarray(scores.null_kernels[omitted_label], dtype=float)
+        fitted_covariance = np.asarray(scores.null_covariance, dtype=float)
+        excluded_covariance = 0.5 * (
+            fitted_covariance - omitted_component * omitted_fit_kernel
+            + (fitted_covariance - omitted_component * omitted_fit_kernel).T
+        )
+        eigenvalues, eigenvectors = np.linalg.eigh(excluded_covariance)
+        if float(eigenvalues.min()) <= 0.0:
+            raise RuntimeError("omitted-kernel fitted covariance is not positive definite")
+        whitener = (
+            eigenvectors * (1.0 / np.sqrt(eigenvalues))
+        ) @ eigenvectors.T
+        scores = replace(
+            scores,
+            W=whitener,
+            null_covariance=excluded_covariance,
+            covariance_components={
+                key: value for key, value in scores.covariance_components.items()
+                if key != omitted_label
+            },
+            null_kernels={
+                key: value for key, value in scores.null_kernels.items()
+                if key != omitted_label
+            },
+            projection_cache={},
+        )
     blocks = _gene_blocks(context, scores)
     required = {
         (edge.sub_x, edge.gene_x) for edge in expanded.edges
@@ -558,8 +805,8 @@ def _prepare_scenario(
         root_v=_root_from_covariance(scores.null_covariance),
         pc1=_pc1(context),
         genotype_main_effect=_independent_main_effect(context),
-        omitted_kernel=_subgenome_kernel(context, context.family.subgenomes[-1]),
-        omitted_subgenome=context.family.subgenomes[-1],
+        omitted_kernel=_subgenome_kernel(context, omitted_label),
+        omitted_subgenome=omitted_label,
         gene_blocks=blocks,
         family_hash=_family_hash(context.family),
         setup_seed_id=setup_seed_id,
@@ -671,18 +918,20 @@ def run_family_size_stress(
         context, design_hash=design_hash, stage=_stage(qa_only),
         scenario_id=scenario_id, n_jobs=n_jobs,
     )
-    calibration, *_ = _draw_bank_responses(
+    calibration, calibration_seeds, calibration_ids, _ = _draw_bank_responses(
         prepared, requested_role="calibration", canonical_role="calibration",
         count=calibration_count, design_hash=design_hash, stage=_stage(qa_only),
         scenario_id=scenario_id + ".calibration", replicate_offset=0,
         null_model="gaussian",
     )
-    target, *_ = _draw_bank_responses(
+    target, target_seeds, target_ids, _ = _draw_bank_responses(
         prepared, requested_role="heldout", canonical_role="heldout",
         count=response_count, design_hash=design_hash, stage=_stage(qa_only),
         scenario_id=scenario_id + ".heldout", replicate_offset=0,
         null_model="gaussian",
     )
+    if set(calibration_ids) & set(target_ids):
+        raise RuntimeError("family-size calibration and heldout banks overlap")
     if family_size <= 80:
         calibration_scores, _, snpxsnp_calibration = _method_scores(
             prepared, calibration, n_jobs=n_jobs,
@@ -754,6 +1003,12 @@ def run_family_size_stress(
             method: list(members) for method, members in tested_members.items()
         },
         "tested_family_hashes": tested_hashes,
+        "score_hypothesis_units": {
+            method: (
+                "snp_pair_within_group" if method == "snpxsnp" else "group_score"
+            )
+            for method in calibration_map
+        },
         "calibration_minima_by_method": calibration_minima,
         "target_minima_by_method": target_minima,
         "calibration_minima_hashes": {
@@ -764,11 +1019,16 @@ def run_family_size_stress(
             method: sha256_payload(values)
             for method, values in target_minima.items()
         },
-        "rejections_by_method": rejections_by_method,
         "fwer": {method: float(np.mean(values))
                  for method, values in rejections_by_method.items()},
         "failure_rate": 0.0, "runtime_seconds": float(time.perf_counter() - started),
         "calibration_count": calibration_count, "response_count": response_count,
+        "calibration_response_ids": list(calibration_ids),
+        "target_response_ids": list(target_ids),
+        "calibration_seeds": list(calibration_seeds),
+        "target_seeds": list(target_seeds),
+        "calibration_response_hash": _array_hash(calibration),
+        "target_response_hash": _array_hash(target),
         "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
         "failure": {"failed": False, "status": "completed"},
         "requested_jobs": n_jobs,
@@ -776,6 +1036,8 @@ def run_family_size_stress(
         "parallel_backend": prepared.scores.parallel_execution.get("backend", "serial"),
         "worker_pids": list(prepared.scores.parallel_execution.get("worker_pids", [])),
         **inference,
+        **({"qa_rejections_by_method": rejections_by_method}
+           if qa_only else {"rejections_by_method": rejections_by_method}),
     }
 
 
@@ -862,6 +1124,16 @@ def _draw_bank_responses(
             )
         else:
             response, row_metadata = response_factory(rng, replicate)
+        if row_metadata.get("canonical_kind") == "omitted_kernel":
+            row_metadata = {
+                **row_metadata,
+                "fitted_null_covariance_sha256": _array_hash(
+                    prepared.scores.null_covariance
+                ),
+                "fitted_null_components": sorted(
+                    prepared.scores.covariance_components
+                ),
+            }
         response = np.array(response, dtype=float, copy=True)
         if response.ndim != 1 or response.size != prepared.context.sample_idx.size:
             raise ValueError("generated response is not aligned to the prepared samples")
@@ -1087,6 +1359,7 @@ def run_conditional_bank(
         stage=stage,
         scenario_id=scenario_id,
         n_jobs=n_jobs,
+        null_model=null_model,
     )
     calibration_responses = None
     calibration_reference = None
@@ -1143,33 +1416,70 @@ def run_global_vc_bank(
     design_hash: str,
     qa_only: bool,
     scenario_id: str,
+    replicate: int = 0,
+    calibration_count: int | None = None,
 ) -> dict[str, Any]:
     """Run the standalone global K_hom VC comparator on frozen null banks."""
 
     started = time.perf_counter()
     count = _validate_count(count)
     role = _canonical_role(bank)
-    if role not in {"calibration", "heldout"}:
-        raise ValueError("global VC bank must be calibration or heldout")
-    _require_formal_budget(count, qa_only, "global VC bank")
+    if role not in {"calibration", "heldout", "power"}:
+        raise ValueError("global VC bank must be calibration, heldout or power")
+    frozen_calibration_count = count if calibration_count is None else _validate_count(
+        calibration_count, "calibration_count"
+    )
+    if role != "power":
+        _require_formal_budget(count, qa_only, "global VC bank")
+    else:
+        _require_formal_budget(
+            frozen_calibration_count, qa_only, "global VC calibration bank"
+        )
     stage = _stage(qa_only)
     prepared = _prepare_scenario(
         context, design_hash=design_hash, stage=stage,
         scenario_id=scenario_id, n_jobs=1,
     )
+    response_factory = None
+    if role == "power":
+        signal, causal_ids, signal_metadata = _group_signal(
+            prepared, "kernel_multidimensional", 1
+        )
+
+        def response_factory(
+            rng: np.random.Generator, _replicate: int,
+        ) -> tuple[np.ndarray, dict[str, Any]]:
+            residual, residual_metadata = draw_null(
+                "gaussian", prepared.root_v, rng, prepared.pc1,
+                genotype_main_effect=prepared.genotype_main_effect,
+                omitted_kernel=prepared.omitted_kernel,
+                omitted_subgenome=prepared.omitted_subgenome,
+                omitted_variance=0.25,
+            )
+            phenotype, pve_metadata = compose_exact_pve(signal, residual, 0.05)
+            return phenotype, {
+                "null": residual_metadata, "pve": pve_metadata,
+                "architecture": "kernel_multidimensional",
+                "causal_group_count": len(causal_ids),
+                "signal_hash": _array_hash(signal),
+                "signal_metadata": signal_metadata,
+            }
+
     target, target_seeds, target_ids, target_meta = _draw_bank_responses(
         prepared, requested_role=role, canonical_role=role, count=count,
         design_hash=design_hash, stage=stage, scenario_id=scenario_id,
-        replicate_offset=0, null_model="gaussian",
+        replicate_offset=0, null_model="gaussian", response_factory=response_factory,
     )
-    calibration_scenario_id = scenario_id.replace(".heldout", ".calibration")
+    calibration_scenario_id = _calibration_scenario_id(scenario_id)
     if role == "calibration":
         calibration = target
+        calibration_seeds = target_seeds
         calibration_ids = target_ids
+        calibration_meta = target_meta
     else:
-        calibration, _seeds, calibration_ids, _meta = _draw_bank_responses(
+        calibration, calibration_seeds, calibration_ids, calibration_meta = _draw_bank_responses(
             prepared, requested_role="calibration", canonical_role="calibration",
-            count=count, design_hash=design_hash, stage=stage,
+            count=frozen_calibration_count, design_hash=design_hash, stage=stage,
             scenario_id=calibration_scenario_id, replicate_offset=0,
             null_model="gaussian",
         )
@@ -1202,7 +1512,11 @@ def run_global_vc_bank(
             "threshold": threshold,
             "rejected": (target_p <= threshold).tolist(),
         }
-    return {
+    payload = _base_replicate_payload(
+        context, replicate=replicate, design_hash=design_hash, stage=stage,
+        scenario_id=scenario_id, n_jobs=1,
+    )
+    payload.update({
         "experiment": "global_vc",
         "scenario_id": scenario_id,
         "stage": stage,
@@ -1214,12 +1528,18 @@ def run_global_vc_bank(
         "calibration_scenario_id": calibration_scenario_id,
         "calibration_response_ids": list(calibration_ids),
         "target_response_ids": list(target_ids),
+        "calibration_seeds": list(calibration_seeds),
         "target_seeds": list(target_seeds),
+        "calibration_response_metadata": list(calibration_meta),
         "target_response_metadata": list(target_meta),
+        "calibration_response_hash": _array_hash(calibration),
+        "target_response_hash": _array_hash(target),
         "calibration_p_values": calibration_p.tolist(),
         "target_p_values": target_p.tolist(),
         "calibration_p_hash": sha256_payload(calibration_p.tolist()),
         "target_p_hash": sha256_payload(target_p.tolist()),
+        "calibration_lrt_evidence": calibration_result["lrt_evidence"],
+        "target_lrt_evidence": target_result["lrt_evidence"],
         "kernel_manifest": target_result["kernel_manifest"],
         "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
         "failure": {"failed": False, "status": "completed"},
@@ -1229,7 +1549,16 @@ def run_global_vc_bank(
         "worker_pids": [os.getpid()],
         "runtime_seconds": float(time.perf_counter() - started),
         **evidence,
-    }
+    })
+    if role == "power":
+        flags = payload.get("qa_detection_flags", payload.get("rejected", []))
+        payload["detection_power"] = float(np.mean(np.asarray(flags, dtype=bool)))
+        payload["positive_signal"] = {
+            "architecture": "kernel_multidimensional",
+            "interaction_pve": 0.05,
+            "causal_groups": 1,
+        }
+    return payload
 
 
 def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None:
@@ -1377,11 +1706,15 @@ def run_end_to_end_null(
     bootstrap_seed, bootstrap_seed_id = _seed(
         design_hash, scenario_id, replicate, stage, "calibration"
     )
+    prepared = _prepare_scenario(
+        context, design_hash=design_hash, stage=stage,
+        scenario_id=scenario_id, n_jobs=n_jobs, null_model=null_model,
+    )
     phenotype, null_metadata = draw_null(
-        null_model,
-        _context_root(context),
-        np.random.default_rng(observed_seed),
-        _pc1(context),
+        null_model, prepared.root_v, np.random.default_rng(observed_seed),
+        prepared.pc1, genotype_main_effect=prepared.genotype_main_effect,
+        omitted_kernel=prepared.omitted_kernel,
+        omitted_subgenome=prepared.omitted_subgenome, omitted_variance=0.25,
     )
     payload = _base_replicate_payload(
         context,
@@ -1404,7 +1737,6 @@ def run_end_to_end_null(
             "calibration_seed_id": bootstrap_seed_id,
             "null_model": null_model,
             "null_generation": null_metadata,
-            "formal_rejections": [],
             "inference_status": (
                 "noninferential_do_not_threshold" if qa_only else "formal"
             ),
@@ -1412,22 +1744,41 @@ def run_end_to_end_null(
     )
     started = time.perf_counter()
     try:
-        scores, expanded = score_omnib_family(
-            context.subdata,
-            context.family,
-            phenotype,
-            context.sample_idx,
-            transform="INT",
-            bootstrap_B=bootstrap_B,
-            bootstrap_seed=bootstrap_seed,
-            n_jobs=n_jobs,
-            grm_method="grm_from_X",
-            maf_min=0.01,
-            burden_maf=0.01,
-            min_snp=3,
-            cap=150,
-            n_pc=3,
-        )
+        if null_model in {"omitted_kernel", "omitted_background_kernel"}:
+            calibration_rng = np.random.default_rng(bootstrap_seed)
+            bootstrap = np.column_stack([
+                draw_null(
+                    "gaussian", prepared.root_v, calibration_rng, prepared.pc1,
+                    genotype_main_effect=prepared.genotype_main_effect,
+                )[0]
+                for _ in range(bootstrap_B)
+            ])
+            edge_p, group_p, components = score_omnib_responses(
+                prepared.scores, context.family, prepared.expanded,
+                np.column_stack([phenotype, bootstrap]), n_jobs=n_jobs,
+            )
+            scores = replace(
+                prepared.scores, edge_p=edge_p, group_p=group_p,
+                edge_components_obs=components[:, :, 0], y=phenotype,
+            )
+            expanded = prepared.expanded
+        else:
+            scores, expanded = score_omnib_family(
+                context.subdata,
+                context.family,
+                phenotype,
+                context.sample_idx,
+                transform="INT",
+                bootstrap_B=bootstrap_B,
+                bootstrap_seed=bootstrap_seed,
+                n_jobs=n_jobs,
+                grm_method="grm_from_X",
+                maf_min=0.01,
+                burden_maf=0.01,
+                min_snp=3,
+                cap=150,
+                n_pc=3,
+            )
         if len(expanded.group_edge_indices) != len(context.family.group_ids):
             raise RuntimeError("production scorer changed the frozen group family")
         calibration = bootstrap_minp_calibration(
@@ -1440,15 +1791,18 @@ def run_end_to_end_null(
             context.family.group_ids[index]
             for index in calibration["rejected_local"]
         ]
-        if not qa_only:
-            payload["formal_rejections"] = qa_rejections
+        payload[
+            "qa_diagnostic_rejections" if qa_only else "formal_rejections"
+        ] = qa_rejections
         execution = dict(scores.parallel_execution)
         payload.update(
             {
                 "observed_group_p": _json_safe(scores.group_p[:, 0]),
                 "adjusted_p": _json_safe(adjusted),
-                "adjusted_decisions": (adjusted <= 0.05).tolist(),
-                "qa_diagnostic_rejections": qa_rejections,
+                (
+                    "qa_adjusted_diagnostic_decisions"
+                    if qa_only else "adjusted_decisions"
+                ): (adjusted <= 0.05).tolist(),
                 "bootstrap_minp": _json_safe(calibration),
                 "null_minima": _json_safe(
                     np.where(
@@ -1625,6 +1979,7 @@ def run_power_replicate(
         stage=stage,
         scenario_id=scenario_id,
         n_jobs=n_jobs,
+        null_model=null_model,
     )
     calibration = calibration_bank
     signal, causal_ids, signal_metadata = _group_signal(
@@ -1769,8 +2124,6 @@ def run_power_replicate(
             "calibration_artifact": calibration_artifact,
             "target_response_hash": target.response_hash,
             "threshold_source": "independent_calibration_bank",
-            "thresholds": thresholds,
-            "rejections_by_method": rejections,
             "calibration_minima_by_method": calibration_minima,
             "target_minima_by_method": target_minima,
             "calibration_minima_hashes": calibration_minima_hashes,
@@ -1778,7 +2131,7 @@ def run_power_replicate(
             "calibration_bank": calibration.to_payload(
                 include_scores=False, include_snpxsnp_artifact=False
             ),
-            "target_bank": target.to_payload(include_scores=False),
+            "target_bank": target.to_payload(include_scores=True),
             "effective_jobs": target.execution.get("effective_jobs", 1),
             "parallel_backend": target.execution.get("backend", "serial"),
             "worker_pids": list(target.execution.get("worker_pids", [])),
@@ -1808,11 +2161,21 @@ def run_power_replicate(
                 "noninferential_do_not_threshold" if qa_only else "formal"
             ),
             "runtime_seconds": float(time.perf_counter() - started),
+            **(
+                {
+                    "qa_cutoffs_by_method": thresholds,
+                    "qa_rejections_by_method": rejections,
+                }
+                if qa_only else {
+                    "thresholds": thresholds,
+                    "rejections_by_method": rejections,
+                }
+            ),
         }
     )
     if negative_control:
         payload["false_positive_by_method"] = {
-            method: np.any(np.asarray(values, dtype=bool), axis=0).tolist()
+            method: np.asarray(values, dtype=bool).tolist()
             for method, values in rejections.items()
         }
         payload["specificity_by_method"] = {
@@ -1840,7 +2203,6 @@ def _score_fixed_context(
     bootstrap_seed: int,
     n_jobs: int,
 ) -> dict[str, Any]:
-    context = _canonical_encoding_context(context)
     scores, _expanded = score_omnib_family(
         context.subdata,
         context.family,
@@ -1887,36 +2249,6 @@ def _score_fixed_context(
             "sha256": _array_hash(scores.null_covariance),
         },
     }
-
-
-def _canonical_encoding_context(
-    context: OmniBBenchmarkContext,
-) -> OmniBBenchmarkContext:
-    """Canonicalize stable column IDs and empirical minor-allele orientation.
-
-    Synthetic benchmark column indices are the frozen variant IDs.  Sorting
-    each gene mapping by that ID removes input-column traversal effects, while
-    orienting every dosage column to empirical AF <= 0.5 makes 2-X allele
-    recoding an exact array identity before any numerical scoring occurs.
-    """
-
-    matrices: dict[str, np.ndarray] = {}
-    mappings: dict[str, dict[str, np.ndarray]] = {}
-    for label, data in context.subdata.items():
-        values = np.array(data.X, dtype=float, copy=True)
-        with np.errstate(invalid="ignore"):
-            af = np.nanmean(values[context.sample_idx], axis=0) / 2.0
-        flip = np.isfinite(af) & (af > 0.5)
-        finite = np.isfinite(values[:, flip])
-        oriented = values[:, flip]
-        oriented[finite] = 2.0 - oriented[finite]
-        values[:, flip] = oriented
-        matrices[label] = values
-        mappings[label] = {
-            gene: np.sort(np.asarray(indices, dtype=int))
-            for gene, indices in data.gene_snp.items()
-        }
-    return _replace_subdata(context, matrices, mappings)
 
 
 def _copy_context(
@@ -2081,6 +2413,42 @@ def _robustness_metrics(
     }
 
 
+_ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
+
+
+def _robustness_score_bank(
+    prepared: _PreparedScenario, responses: np.ndarray, *, n_jobs: int,
+) -> dict[str, np.ndarray]:
+    scores = _local_five_scores(prepared, responses, n_jobs=n_jobs)
+    return {method: np.asarray(scores[method], dtype=float) for method in _ROBUSTNESS_METHODS}
+
+
+def _response_minima(values: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(values)
+    return np.where(
+        finite.any(axis=0), np.where(finite, values, np.inf).min(axis=0), np.nan
+    )
+
+
+def _ranking_metrics(
+    baseline: np.ndarray, candidate: np.ndarray, group_ids: Sequence[str],
+) -> tuple[list[float | None], list[float]]:
+    correlations: list[float | None] = []
+    overlaps: list[float] = []
+    k = min(10, len(group_ids))
+    for column in range(baseline.shape[1]):
+        correlations.append(_rank_correlation(baseline[:, column], candidate[:, column]))
+        left = set(np.argsort(np.where(
+            np.isfinite(baseline[:, column]), baseline[:, column], np.inf
+        ))[:k].tolist())
+        right = set(np.argsort(np.where(
+            np.isfinite(candidate[:, column]), candidate[:, column], np.inf
+        ))[:k].tolist())
+        union = left | right
+        overlaps.append(len(left & right) / len(union) if union else 1.0)
+    return correlations, overlaps
+
+
 def _basic_robustness_contexts(
     context: OmniBBenchmarkContext, seed: int
 ) -> dict[str, OmniBBenchmarkContext]:
@@ -2113,14 +2481,22 @@ def _basic_robustness_contexts(
         generated: dict[str, SubgenomeData] = {}
         for copy_index, label in enumerate(context.family.subgenomes):
             per_group = int(marker_counts[copy_index])
-            blocks = [
-                marker_rng.binomial(
-                    2,
-                    allele_frequency,
-                    size=(context.phenotype.size, per_group),
-                ).astype(float)
-                for _ in context.family.group_ids
-            ]
+            source = np.asarray(context.subdata[label].X, dtype=float)
+            with np.errstate(invalid="ignore"):
+                frequencies = np.nanmean(source[context.sample_idx], axis=0) / 2.0
+            distance = np.abs(frequencies - allele_frequency)
+            candidate_order = np.argsort(
+                np.where(np.isfinite(distance), distance, np.inf), kind="stable"
+            )
+            blocks: list[np.ndarray] = []
+            for gene in (row[copy_index] for row in context.family.genes):
+                native = np.asarray(
+                    context.subdata[label].gene_snp[gene], dtype=int
+                )
+                pool = np.unique(np.concatenate([native, candidate_order]))
+                marker_rng.shuffle(pool)
+                selected = np.resize(pool, per_group)
+                blocks.append(source[:, selected])
             values = np.column_stack(blocks)
             generated[label] = SubgenomeData(
                 X=values,
@@ -2234,20 +2610,207 @@ def run_encoding_check(
     )
     robustness: dict[str, Any] = {}
     if include_robustness:
+        response_count = 20 if qa_only else 500
+        calibration_count = 20 if qa_only else 2_000
+        architectures = [
+            "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
+            "single_snp_pair", "mixed_sign",
+        ]
+        if len(context.family.subgenomes) > 2:
+            architectures.append("multi_edge_group")
+        canonical_prepared = _prepare_scenario(
+            context, design_hash=design_hash, stage=stage,
+            scenario_id=scenario_id + ".robustness", n_jobs=n_jobs,
+        )
+        calibration_responses, calibration_seeds, calibration_ids, _ = (
+            _draw_bank_responses(
+                canonical_prepared, requested_role="calibration",
+                canonical_role="calibration", count=calibration_count,
+                design_hash=design_hash, stage=stage,
+                scenario_id=scenario_id + ".robustness.calibration",
+                replicate_offset=0, null_model="gaussian",
+            )
+        )
+        heldout_responses, heldout_seeds, heldout_ids, _ = _draw_bank_responses(
+            canonical_prepared, requested_role="heldout", canonical_role="heldout",
+            count=response_count, design_hash=design_hash, stage=stage,
+            scenario_id=scenario_id + ".robustness.heldout", replicate_offset=0,
+            null_model="gaussian",
+        )
+        power_banks: dict[str, tuple[np.ndarray, tuple[int, ...], tuple[str, ...], list[str]]] = {}
+        for architecture in architectures:
+            signal, causal_ids, _signal_metadata = _group_signal(
+                canonical_prepared, architecture, 1
+            )
+
+            def response_factory(
+                rng: np.random.Generator, _response_index: int,
+                *, frozen_signal: np.ndarray = signal,
+                frozen_architecture: str = architecture,
+                frozen_causal_ids: list[str] = causal_ids,
+            ) -> tuple[np.ndarray, dict[str, Any]]:
+                residual, residual_metadata = draw_null(
+                    "gaussian", canonical_prepared.root_v, rng,
+                    canonical_prepared.pc1,
+                    genotype_main_effect=canonical_prepared.genotype_main_effect,
+                )
+                phenotype, pve = compose_exact_pve(frozen_signal, residual, 0.05)
+                return phenotype, {
+                    "null": residual_metadata, "pve": pve,
+                    "architecture": frozen_architecture,
+                    "causal_group_ids": frozen_causal_ids,
+                }
+
+            values, seeds, ids, _ = _draw_bank_responses(
+                canonical_prepared, requested_role="power", canonical_role="power",
+                count=response_count, design_hash=design_hash, stage=stage,
+                scenario_id=f"{scenario_id}.robustness.power.{architecture}",
+                replicate_offset=0, null_model="gaussian",
+                response_factory=response_factory,
+            )
+            power_banks[architecture] = (values, seeds, ids, causal_ids)
+        if (
+            set(calibration_ids) & set(heldout_ids)
+            or any(set(calibration_ids) & set(item[2]) for item in power_banks.values())
+        ):
+            raise RuntimeError("robustness response banks overlap")
         for name, transformed in _basic_robustness_contexts(context, seed).items():
             try:
-                candidate = _score_fixed_context(
-                    transformed,
-                    context.phenotype,
-                    bootstrap_B=bootstrap_B,
-                    bootstrap_seed=seed,
-                    n_jobs=n_jobs,
+                challenge_prepared = _prepare_scenario(
+                    transformed, design_hash=design_hash, stage=stage,
+                    scenario_id=f"{scenario_id}.robustness.{name}", n_jobs=n_jobs,
                 )
+                calibration_scores = _robustness_score_bank(
+                    challenge_prepared, calibration_responses, n_jobs=n_jobs
+                )
+                heldout_scores = _robustness_score_bank(
+                    challenge_prepared, heldout_responses, n_jobs=n_jobs
+                )
+                thresholds = {
+                    method: empirical_threshold(values)
+                    for method, values in calibration_scores.items()
+                }
+                heldout_decisions = {
+                    method: apply_threshold(heldout_scores[method], thresholds[method])
+                    for method in _ROBUSTNESS_METHODS
+                }
+                strata: dict[str, Any] = {}
+                for architecture, (responses, power_seeds, power_ids, causal_ids) in power_banks.items():
+                    candidate_scores = _robustness_score_bank(
+                        challenge_prepared, responses, n_jobs=n_jobs
+                    )
+                    canonical_scores = _robustness_score_bank(
+                        canonical_prepared, responses, n_jobs=n_jobs
+                    )
+                    causal_index = context.family.group_ids.index(causal_ids[0])
+                    detection = {
+                        method: (
+                            candidate_scores[method][causal_index] < thresholds[method]
+                        ).tolist()
+                        for method in _ROBUSTNESS_METHODS
+                    }
+                    correlations, top_k = _ranking_metrics(
+                        canonical_scores["omnib"], candidate_scores["omnib"],
+                        context.family.group_ids,
+                    )
+                    powers = {
+                        method: float(np.mean(values))
+                        for method, values in detection.items()
+                    }
+                    strata[architecture] = {
+                        "response_ids": list(power_ids), "seeds": list(power_seeds),
+                        "response_hash": _array_hash(responses),
+                        "causal_group_ids": causal_ids,
+                        "p_by_method": {
+                            method: _json_safe(values)
+                            for method, values in candidate_scores.items()
+                        },
+                        "p_hashes": {
+                            method: sha256_payload(_json_safe(values))
+                            for method, values in candidate_scores.items()
+                        },
+                        "baseline_omnib_p": _json_safe(canonical_scores["omnib"]),
+                        "baseline_omnib_hash": sha256_payload(
+                            _json_safe(canonical_scores["omnib"])
+                        ),
+                        "detection_by_method": detection,
+                        "power_by_method": powers,
+                        "rank_correlation_by_response": correlations,
+                        "top_k_jaccard_by_response": top_k,
+                        "absolute_power_regret": abs(
+                            powers["omnib"] - max(
+                                powers["minor_burden"], powers["pc1"],
+                                powers["kernel_hadamard"],
+                            )
+                        ),
+                    }
+                finite_correlations = [
+                    value for record in strata.values()
+                    for value in record["rank_correlation_by_response"]
+                    if value is not None
+                ]
                 robustness[name] = {
                     "status": "completed",
                     "error_type": None,
                     "message": None,
-                    **_robustness_metrics(baseline, candidate),
+                    "fwer": float(np.mean(heldout_decisions["omnib"])),
+                    "power": None,
+                    "rank_correlation": (
+                        float(np.mean(finite_correlations))
+                        if finite_correlations else None
+                    ),
+                    "top_k": min(10, len(context.family.group_ids)),
+                    "top_k_jaccard": float(np.mean([
+                        value for record in strata.values()
+                        for value in record["top_k_jaccard_by_response"]
+                    ])),
+                    "non_estimable_rate": float(np.mean(
+                        ~np.isfinite(heldout_scores["omnib"])
+                    )),
+                    "absolute_power_regret": None,
+                    "note": "response-level challenge evidence; metrics stratified by architecture",
+                    "design_ruling": {
+                        "interaction_pve": 0.05, "causal_groups": 1,
+                        "architectures": architectures,
+                        "calibration_count": calibration_count,
+                        "heldout_count": response_count,
+                        "power_count_per_architecture": response_count,
+                        "stratify_by_architecture": True,
+                        "component_regret_reference": [
+                            "minor_burden", "pc1", "kernel_hadamard",
+                        ],
+                    },
+                    "calibration": {
+                        "response_ids": list(calibration_ids),
+                        "seeds": list(calibration_seeds),
+                        "response_hash": _array_hash(calibration_responses),
+                        "p_by_method": {
+                            method: _json_safe(values)
+                            for method, values in calibration_scores.items()
+                        },
+                        "p_hashes": {
+                            method: sha256_payload(_json_safe(values))
+                            for method, values in calibration_scores.items()
+                        },
+                        "thresholds": thresholds,
+                    },
+                    "heldout": {
+                        "response_ids": list(heldout_ids), "seeds": list(heldout_seeds),
+                        "response_hash": _array_hash(heldout_responses),
+                        "p_by_method": {
+                            method: _json_safe(values)
+                            for method, values in heldout_scores.items()
+                        },
+                        "p_hashes": {
+                            method: sha256_payload(_json_safe(values))
+                            for method, values in heldout_scores.items()
+                        },
+                        "rejections_by_method": {
+                            method: values.tolist()
+                            for method, values in heldout_decisions.items()
+                        },
+                    },
+                    "power_by_architecture": strata,
                 }
             except Exception as error:
                 robustness[name] = {
@@ -2262,6 +2825,10 @@ def run_encoding_check(
                     "non_estimable_rate": None,
                     "absolute_power_regret": None,
                     "note": "robustness scoring failed; no metric was inferred",
+                    "design_ruling": None,
+                    "calibration": None,
+                    "heldout": None,
+                    "power_by_architecture": None,
                 }
     required_checks = [check for check in exact_checks.values() if check["required"]]
     exact_fields = (
@@ -2321,7 +2888,7 @@ def run_encoding_check(
 
 def run_omnib_replicate(
     scenario: Scenario,
-    context: OmniBBenchmarkContext,
+    context: OmniBBenchmarkContext | Mapping[str, OmniBBenchmarkContext],
     *,
     replicate: int,
     design_hash: str,
@@ -2333,6 +2900,20 @@ def run_omnib_replicate(
 
     if scenario.track != "omnib":
         raise ValueError("run_omnib_replicate requires an omnib scenario")
+    if isinstance(context, Mapping):
+        backbone = str(scenario.parameters.get("backbone", ""))
+        context_key = (
+            f"{backbone}:g{scenario.parameters['family_size']}"
+            if scenario.parameters.get("experiment") == "family_size" else backbone
+        )
+        selected = context.get(context_key)
+        if not isinstance(selected, OmniBBenchmarkContext):
+            raise ValueError(
+                f"scenario requires presealed benchmark context {context_key!r}"
+            )
+        context = selected
+    if not isinstance(context, OmniBBenchmarkContext):
+        raise ValueError("run_omnib_replicate requires a benchmark context")
     if replicate < 0 or replicate >= scenario.replicates:
         raise ValueError("replicate is outside the scenario registry range")
     experiment = scenario.parameters.get("experiment")
@@ -2419,13 +3000,12 @@ def run_omnib_replicate(
                 design_hash=design_hash,
                 qa_only=qa_only,
                 scenario_id=scenario.scenario_id,
+                replicate=replicate,
+                calibration_count=(
+                    int(scenario.parameters["calibration_count"])
+                    if "calibration_count" in scenario.parameters else None
+                ),
             )
-            payload = {
-                "track": "omnib",
-                "replicate": replicate,
-                "design_hash": design_hash,
-                **payload,
-            }
         elif experiment == "family_size":
             declared_size = int(scenario.parameters["family_size"])
             payload = {

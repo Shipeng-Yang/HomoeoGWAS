@@ -216,9 +216,11 @@ def draw_null(
             }
         )
     elif canonical_kind == "additive_only":
-        raw_main = np.roll(pc, 1) if genotype_main_effect is None else np.asarray(
-            genotype_main_effect, dtype=float
-        )
+        if genotype_main_effect is None:
+            raise ValueError(
+                "additive_only requires an explicit sample-aligned genotype main effect"
+            )
+        raw_main = np.asarray(genotype_main_effect, dtype=float)
         if raw_main.shape != (n,) or not np.all(np.isfinite(raw_main)):
             raise ValueError("genotype_main_effect must be a finite aligned vector")
         main_effect = standardize(raw_main)
@@ -228,6 +230,10 @@ def draw_null(
                 "main_effect": "independent_genotype_main_effect",
                 "main_effect_scale": 1.0,
                 "main_effect_pc1_correlation": float(np.corrcoef(main_effect, pc)[0, 1]),
+                "main_effect_sha256": hashlib.sha256(
+                    np.ascontiguousarray(main_effect).tobytes()
+                ).hexdigest(),
+                "main_effect_sample_alignment": "root_V_rows",
             }
         )
     elif canonical_kind == "structure_aligned":

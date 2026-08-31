@@ -1599,6 +1599,7 @@ def run_fit_replicate(
     comparator_preflight_hash: str | None = None,
     scan_comparators: Mapping[str, Any] | None = None,
     released_scan_truth: Mapping[str, Any] | None = None,
+    loco_design_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run or parse one Track A replicate and write one immutable shard."""
 
@@ -1627,6 +1628,10 @@ def run_fit_replicate(
     experiment = scenario.parameters.get("experiment")
     if not isinstance(experiment, str):
         experiment = "invalid"
+    if experiment == "loco" and released_scan_truth is not None:
+        raise ValueError(
+            "LOCO truth must be loaded from the presealed design-lock artifact"
+        )
     coverage_y: np.ndarray | None = None
     coverage_truth: dict[str, Any] | None = None
     coverage_request_binding: dict[str, Any] | None = None
@@ -1693,6 +1698,41 @@ def run_fit_replicate(
     released_scan_truth_binding: dict[str, Any] | None = None
     released_scan_truth_error: str | None = None
     released_loco_evidence: dict[str, Any] | None = None
+    if experiment == "loco" and loco_design_root is not None:
+        try:
+            design_root = Path(loco_design_root).resolve()
+            lock_path = design_root / "design_lock.json"
+            if lock_path.is_symlink():
+                raise ValueError("LOCO design lock must not be a symlink")
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            record = lock.get("loco_truth_artifacts", {}).get(scenario.scenario_id)
+            required = {
+                "path", "sha256", "truth_hash", "source", "seed",
+                "generated_config_sha256", "phenotype_sha256",
+            }
+            if (
+                lock.get("design_hash") != design_hash
+                or not isinstance(record, Mapping) or set(record) != required
+            ):
+                raise ValueError("LOCO truth artifact is absent from the design lock")
+            truth_path = (design_root / str(record["path"])).resolve()
+            if (
+                design_root not in truth_path.parents
+                or truth_path.is_symlink() or not truth_path.is_file()
+                or hashlib.sha256(truth_path.read_bytes()).hexdigest() != record["sha256"]
+            ):
+                raise ValueError("LOCO truth artifact path/hash differs from design lock")
+            loaded_truth = json.loads(truth_path.read_text(encoding="utf-8"))
+            manifest = _truth_manifest(loaded_truth)
+            if (
+                loaded_truth.get("truth_hash") != record["truth_hash"]
+                or manifest.get("source") != record["source"]
+                or manifest.get("seed") != record["seed"]
+            ):
+                raise ValueError("LOCO truth artifact provenance differs from design lock")
+            released_scan_truth = loaded_truth
+        except Exception as error:
+            released_scan_truth_error = f"{type(error).__name__}: {error}"
     if experiment == "loco" and released_scan_truth is not None:
         try:
             if fit_output_dir is None or released_source is None or released_request_binding is None:
@@ -1711,6 +1751,13 @@ def run_fit_replicate(
                     "generated_config"
                 ]["sha256"],
             }
+            if (
+                record["generated_config_sha256"]
+                != expected_analysis_context["generated_config_sha256"]
+                or record["phenotype_sha256"]
+                != expected_analysis_context["joined_phenotype"]["sha256"]
+            ):
+                raise ValueError("LOCO config/phenotype differs from design lock")
             if released_truth_manifest.get("analysis_context") != expected_analysis_context:
                 raise ValueError(
                     "released LOCO truth is not bound to the pre-run analysis context"
@@ -1753,6 +1800,12 @@ def run_fit_replicate(
                 raise ValueError("released LOCO causal truth differs from output family")
             released_scan_truth_binding = {
                 "truth_hash": released_scan_truth["truth_hash"],
+                "truth_artifact_path": str(record["path"]),
+                "truth_artifact_sha256": str(record["sha256"]),
+                "source": record["source"],
+                "seed": record["seed"],
+                "generated_config_sha256": record["generated_config_sha256"],
+                "phenotype_sha256": record["phenotype_sha256"],
                 "released_source_manifest_sha256": released_source["sha256"],
                 "released_request_binding_sha256": released_request_binding["sha256"],
                 "ordered_family": ordered,

@@ -85,8 +85,9 @@ def _null_inputs(n=200):
 )
 def test_draw_null_is_deterministic_standardized_and_auditable(kind):
     root_v, pc1 = _null_inputs()
-    first, metadata = draw_null(kind, root_v, np.random.default_rng(123), pc1)
-    second, _ = draw_null(kind, root_v, np.random.default_rng(123), pc1)
+    kwargs = {"genotype_main_effect": np.sin(pc1)} if kind == "additive_only" else {}
+    first, metadata = draw_null(kind, root_v, np.random.default_rng(123), pc1, **kwargs)
+    second, _ = draw_null(kind, root_v, np.random.default_rng(123), pc1, **kwargs)
     np.testing.assert_array_equal(first, second)
     assert np.isclose(first.mean(), 0.0, atol=1e-14)
     assert np.isclose(first.var(ddof=1), 1.0, atol=1e-14)
@@ -120,7 +121,11 @@ def test_draw_null_uses_root_factor_and_locks_stress_distributions():
     assert contamination_meta["contamination_fraction"] == 0.01
     assert contamination_meta["contamination_shift_sd"] == 6.0
 
-    _, additive_meta = draw_null("additive_only", root_v, np.random.default_rng(4), pc1)
+    genotype_main = np.sin(pc1)
+    _, additive_meta = draw_null(
+        "additive_only", root_v, np.random.default_rng(4), pc1,
+        genotype_main_effect=genotype_main,
+    )
     assert additive_meta["interaction_present"] is False
     assert additive_meta["main_effect"] == "independent_genotype_main_effect"
 
@@ -129,7 +134,8 @@ def test_draw_null_uses_root_factor_and_locks_stress_distributions():
     )
     assert structure_meta["main_effect"] == "pc1_aligned"
     assert not np.array_equal(structure, draw_null(
-        "additive_only", root_v, np.random.default_rng(4), pc1
+        "additive_only", root_v, np.random.default_rng(4), pc1,
+        genotype_main_effect=genotype_main,
     )[0])
 
     omitted = np.eye(200) + 0.25 * np.ones((200, 200))
@@ -148,6 +154,8 @@ def test_draw_null_rejects_unknown_malformed_and_degenerate_inputs():
     root_v, pc1 = _null_inputs(n=10)
     with pytest.raises(ValueError, match="unknown null"):
         draw_null("other", root_v, np.random.default_rng(1), pc1)
+    with pytest.raises(ValueError, match="explicit.*aligned"):
+        draw_null("additive_only", root_v, np.random.default_rng(1), pc1)
     with pytest.raises(ValueError, match="root_V"):
         draw_null("gaussian", root_v[:, :-1].T, np.random.default_rng(1), pc1)
     with pytest.raises(ValueError, match="finite"):
