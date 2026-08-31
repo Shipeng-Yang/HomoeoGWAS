@@ -1836,9 +1836,13 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
     for _path, payload in evidence.shards:
         if payload.get("track") == "fit" and payload.get("experiment") == "loco":
             artifacts = evidence.design_lock.get("loco_truth_artifacts")
-            scenario_records = (
-                artifacts.get(str(payload.get("scenario_id")))
+            stage_records = (
+                artifacts.get(str(payload.get("stage")))
                 if isinstance(artifacts, Mapping) else None
+            )
+            scenario_records = (
+                stage_records.get(str(payload.get("scenario_id")))
+                if isinstance(stage_records, Mapping) else None
             )
             record = (
                 scenario_records.get(str(payload.get("replicate")))

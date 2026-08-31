@@ -1435,13 +1435,13 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     (design_root / "design_lock.json").write_text(json.dumps({
         "design_hash": "9" * 64,
         "seed_design": seed_design, "seed_design_hash": seed_design_hash,
-        "loco_truth_artifacts": {scenario.scenario_id: {"0": {
+        "loco_truth_artifacts": {"formal": {scenario.scenario_id: {"0": {
             "path": "inputs/loco-truth.json", "sha256": truth_sha,
             "truth_hash": truth["truth_hash"], "source": truth["source"],
             "seed": truth["seed"],
             "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
             "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
-        }}},
+        }}}},
     }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="9" * 64,
@@ -1517,7 +1517,7 @@ def test_released_loco_uses_distinct_presealed_truth_for_each_replicate(tmp_path
     (design_root / "design_lock.json").write_text(json.dumps({
         "design_hash": "4" * 64,
         "seed_design": seed_design, "seed_design_hash": seed_design_hash,
-        "loco_truth_artifacts": {scenario.scenario_id: records},
+        "loco_truth_artifacts": {"pilot": {scenario.scenario_id: records}},
     }, sort_keys=True) + "\n")
 
     results = [
@@ -1582,13 +1582,13 @@ def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
     (design_root / "design_lock.json").write_text(json.dumps({
         "design_hash": "8" * 64,
         "seed_design": seed_design, "seed_design_hash": seed_design_hash,
-        "loco_truth_artifacts": {scenario.scenario_id: {"0": {
+        "loco_truth_artifacts": {"formal": {scenario.scenario_id: {"0": {
             "path": "inputs/loco-truth.json", "sha256": truth_sha,
             "truth_hash": truth["truth_hash"], "source": truth["source"],
             "seed": truth["seed"],
             "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
             "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
-        }}},
+        }}}},
     }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="8" * 64,

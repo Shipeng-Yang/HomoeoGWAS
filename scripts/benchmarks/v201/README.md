@@ -97,8 +97,18 @@ running statistics. Ordinary pilot execution resumes immutable matching shards
 and never overwrites an existing shard. Every pilot calibration uses `B=199`,
 `qa_only=true`, and the label `noninferential_do_not_threshold`.
 
+Every newly written pilot shard records process-tree user+system CPU seconds,
+wall seconds, observed peak RSS, and a recursive path/size/SHA-256 manifest for
+its benchmark-internal replicate output directory. Projection refuses missing
+or changed measurements; it does not substitute wall time for CPU time or omit
+large result-side artifacts.
+
 Pilot QA results are not publication thresholds, formal rejections, or formal
 benchmark evidence. `project-formal` uses measured pilot CPU time and output
 bytes and exits nonzero if CPU, elapsed-time, or storage caps are exceeded. A
+peak-memory projection is always reported as the observed maximum scaled by the
+requested effective workers. The frozen formal budget has no memory cap, so
+this field is explicitly labelled `not_evaluated_no_formal_memory_cap` rather
+than treated as a pass/fail gate. A
 formal execution command can be added only in a new plan after the pilot audit,
 resource projection, and explicit user approval; no such command exists here.

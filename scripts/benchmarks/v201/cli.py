@@ -11,10 +11,12 @@ import argparse
 import csv
 import hashlib
 import json
+import resource
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,32 @@ _HEX = frozenset("0123456789abcdef")
 
 class CLIError(RuntimeError):
     """An actionable, fail-closed operator error."""
+
+
+def _resource_snapshot() -> tuple[float, int]:
+    """Return process-tree user+sys CPU and conservative maximum RSS bytes."""
+
+    own = resource.getrusage(resource.RUSAGE_SELF)
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = float(own.ru_utime + own.ru_stime + children.ru_utime + children.ru_stime)
+    rss_scale = 1 if sys.platform == "darwin" else 1_024
+    peak = int((own.ru_maxrss + children.ru_maxrss) * rss_scale)
+    return cpu, peak
+
+
+def _measure_operation(operation: Callable[[], Any]) -> tuple[Any, dict[str, Any]]:
+    """Measure one complete replicate, including reaped subprocess descendants."""
+
+    cpu_before, peak_before = _resource_snapshot()
+    wall_before = time.perf_counter()
+    result = operation()
+    wall_seconds = time.perf_counter() - wall_before
+    cpu_after, peak_after = _resource_snapshot()
+    return result, {
+        "cpu_seconds": max(0.0, cpu_after - cpu_before),
+        "wall_seconds": max(0.0, wall_seconds),
+        "peak_rss_bytes": max(peak_before, peak_after),
+    }
 
 
 def run_command(argv: Sequence[str]) -> int:
@@ -133,6 +161,47 @@ def _canonical_root(path: Path) -> Path:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _replicate_output_record(root: Path, output_root: Path) -> dict[str, Any]:
+    """Hash every regular output below one benchmark-internal replicate root."""
+
+    root = root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    resolved = output_root.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise CLIError("replicate output root escapes the benchmark root")
+    if _path_has_symlink(output_root):
+        raise CLIError("replicate output root must not contain symlinks")
+    manifest = []
+    total = 0
+    for path in sorted(output_root.rglob("*")):
+        if path.is_symlink():
+            raise CLIError(f"replicate output must not be a symlink: {path}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        manifest.append({"path": relative, "size": size, "sha256": _sha256(path)})
+        total += size
+    return {
+        "replicate_output_root": output_root.relative_to(root).as_posix(),
+        "replicate_output_manifest": manifest,
+        "replicate_output_bytes": total,
+    }
+
+
+def _attach_measurement(
+    root: Path,
+    output_root: Path,
+    payload: Mapping[str, Any],
+    measurement: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        **dict(payload),
+        **dict(measurement),
+        **_replicate_output_record(root, output_root),
+    }
 
 
 def _git_commit() -> str:
@@ -425,7 +494,7 @@ def _prepare_loco_designs(
     input_records: dict[str, dict[str, Any]],
     contexts: Mapping[str, Mapping[str, Any]],
     harness: Mapping[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], str, dict[str, Any]]:
     """Create deterministic per-replicate LOCO config/truth identities."""
 
     from homoeogwas.cli import build_kernels, join_samples
@@ -439,7 +508,7 @@ def _prepare_loco_designs(
         row for row in (*pilot, *formal)
         if row.track == "fit" and row.parameters.get("experiment") == "loco"
     ]
-    config_paths: dict[tuple[str, int], str] = {}
+    config_paths: dict[tuple[str, str, int], str] = {}
     for scenario in all_loco:
         panel = str(scenario.parameters["panel"])
         entry = fit_entries[panel]
@@ -460,7 +529,10 @@ def _prepare_loco_designs(
             config["phenotype"]["path"] = str(root / phenotype_relative)
             _write_yaml(root / relative, config)
             config_hashes[relative] = _sha256(root / relative)
-            config_paths[(scenario.scenario_id, replicate)] = relative
+            key = (scenario.stage, scenario.scenario_id, replicate)
+            if key in config_paths:
+                raise CLIError(f"duplicate LOCO config identity: {key}")
+            config_paths[key] = relative
 
     seed_payload = seed_design_payload(
         root, input_records=input_records, config_hashes=config_hashes,
@@ -539,7 +611,9 @@ def _prepare_loco_designs(
                 ),
                 encoding="utf-8",
             )
-            config_relative = config_paths[(scenario.scenario_id, replicate)]
+            config_relative = config_paths[
+                (scenario.stage, scenario.scenario_id, replicate)
+            ]
             config = yaml.safe_load((root / config_relative).read_text(encoding="utf-8"))
             joined_samples, joined_y, _fixed = join_samples(config)
             if [str(value) for value in joined_samples] != sample_ids:
@@ -583,7 +657,7 @@ def _prepare_loco_designs(
                 "phenotype_sha256": analysis_context["joined_phenotype"]["sha256"],
             }
         artifacts_by_stage[scenario.stage][scenario.scenario_id] = scenario_records
-    return artifacts_by_stage["pilot"], artifacts_by_stage["formal"], seed_hash, seed_payload
+    return artifacts_by_stage, seed_hash, seed_payload
 
 
 def _prepare_design(staging: Path, input_spec_path: Path) -> dict[str, Any]:
@@ -745,12 +819,7 @@ def _prepare_design(staging: Path, input_spec_path: Path) -> dict[str, Any]:
         bindings[scenario.scenario_id] = path
 
     harness = {"git_commit": _git_commit()}
-    (
-        loco_truth_artifacts,
-        formal_loco_truth_artifacts,
-        seed_design_hash,
-        seed_design,
-    ) = _prepare_loco_designs(
+    loco_truth_artifacts, seed_design_hash, seed_design = _prepare_loco_designs(
         staging, fit_entries=fit, pilot=pilot, formal=formal,
         config_hashes=config_hashes, input_records=input_records,
         contexts=context_records, harness=harness,
@@ -785,7 +854,6 @@ def _prepare_design(staging: Path, input_spec_path: Path) -> dict[str, Any]:
         "formal_scenario_bindings": formal_bindings,
         "contexts": context_records,
         "loco_truth_artifacts": loco_truth_artifacts,
-        "formal_loco_truth_artifacts": formal_loco_truth_artifacts,
         "seed_design_hash": seed_design_hash,
         "seed_design": seed_design,
         "harness": harness,
@@ -801,20 +869,48 @@ def _validate_homoeogwas_configs(root: Path, paths: Sequence[str]) -> None:
             raise CLIError(f"homoeogwas validate failed: {relative}")
 
 
+def _validate_stage_bindings(
+    stage: str,
+    scenarios: Sequence[Scenario],
+    bindings: Any,
+    config_hashes: Mapping[str, str],
+) -> None:
+    expected = {row.scenario_id for row in scenarios}
+    if not isinstance(bindings, Mapping) or set(bindings) != expected:
+        raise CLIError(f"{stage} scenario/config binding coverage mismatch")
+    for scenario_id, relative in bindings.items():
+        if (
+            not isinstance(relative, str) or relative not in config_hashes
+            or f"/{stage}/" not in f"/{relative}"
+        ):
+            raise CLIError(
+                f"{stage} scenario has a missing or cross-stage config: {scenario_id}"
+            )
+
+
 def _validate_presealed_design(staging: Path, prepared: Mapping[str, Any]) -> None:
     input_records = _validate_input_manifest(staging, staging / "inputs" / "manifest.tsv")
     config_hashes = _validate_config_manifest(staging, staging / "configs" / "manifest.tsv")
     if input_records != prepared["input_records"] or config_hashes != prepared["config_hashes"]:
         raise CLIError("generated manifest differs before design seal")
+    pilot = build_scenarios("pilot")
+    formal = build_scenarios("formal")
+    _validate_stage_bindings(
+        "pilot", pilot, prepared["scenario_bindings"], config_hashes,
+    )
+    _validate_stage_bindings(
+        "formal", formal, prepared["formal_scenario_bindings"], config_hashes,
+    )
     _validate_comparator_preflights(
         {"cotton", "wheat"}, prepared["comparator_preflights"], input_records,
     )
     _validate_loco_truth_artifacts(
-        build_scenarios("pilot"), prepared["loco_truth_artifacts"], input_records,
+        pilot, prepared["loco_truth_artifacts"]["pilot"],
+        input_records,
         seed_design_hash=prepared["seed_design_hash"],
     )
     _validate_loco_truth_artifacts(
-        build_scenarios("formal"), prepared["formal_loco_truth_artifacts"],
+        formal, prepared["loco_truth_artifacts"]["formal"],
         input_records, seed_design_hash=prepared["seed_design_hash"],
     )
     manifest_hashes = {
@@ -822,23 +918,33 @@ def _validate_presealed_design(staging: Path, prepared: Mapping[str, Any]) -> No
         for key, value in input_records.items()
     }
     manifest_hashes.update({str((staging / key).resolve()): digest for key, digest in config_hashes.items()})
-    all_bindings = {
-        **prepared["scenario_bindings"], **prepared["formal_scenario_bindings"],
+    stage_bindings = {
+        "pilot": prepared["scenario_bindings"],
+        "formal": prepared["formal_scenario_bindings"],
     }
+    strict_paths: set[tuple[str, str]] = set()
     for context_key, record in prepared["contexts"].items():
         backbone, _, family_label = context_key.partition(":g")
         artifact = _strict_json(staging / record["artifact_path"])
         expected_subgenomes = artifact["family_manifest"]["subgenomes"]
-        relevant = {
-            path for scenario_id, path in all_bindings.items()
-            if scenario_id.startswith("B.") and (
-                f".{backbone}." in scenario_id
-                and ((not family_label and not scenario_id.startswith("B.family_size."))
-                     or (family_label and scenario_id == f"B.family_size.{backbone}.g{family_label}"))
-            )
-        }
-        for relative in relevant:
-            stage = "pilot" if "/pilot/" in relative else "formal"
+        for stage, bindings in stage_bindings.items():
+            relevant = {
+                path for scenario_id, path in bindings.items()
+                if scenario_id.startswith("B.") and (
+                    f".{backbone}." in scenario_id
+                    and ((not family_label and not scenario_id.startswith("B.family_size."))
+                         or (family_label and scenario_id == f"B.family_size.{backbone}.g{family_label}"))
+                )
+            }
+            if len(relevant) != 1:
+                raise CLIError(
+                    f"{stage} context {context_key} must bind exactly one config"
+                )
+            relative = next(iter(relevant))
+            identity = (stage, relative)
+            if identity in strict_paths or f"/{stage}/" not in f"/{relative}":
+                raise CLIError(f"duplicate or cross-stage context config: {identity}")
+            strict_paths.add(identity)
             validate_real_omnib_context(
                 staging / relative,
                 context_artifact_path=staging / record["artifact_path"],
@@ -848,6 +954,9 @@ def _validate_presealed_design(staging: Path, prepared: Mapping[str, Any]) -> No
                 expected_subgenomes=expected_subgenomes,
                 manifest_root=staging,
             )
+    expected_strict = 2 * len(prepared["contexts"])
+    if len(strict_paths) != expected_strict:
+        raise CLIError("strict context validation coverage is incomplete")
     _validate_homoeogwas_configs(staging, tuple(config_hashes))
 
 
@@ -872,7 +981,6 @@ def _seal_design(staging: Path, prepared: Mapping[str, Any]) -> None:
         "formal_scenario_config_bindings": dict(prepared["formal_scenario_bindings"]),
         "benchmark_contexts": dict(prepared["contexts"]),
         "loco_truth_artifacts": dict(prepared["loco_truth_artifacts"]),
-        "formal_loco_truth_artifacts": dict(prepared["formal_loco_truth_artifacts"]),
         "seed_design_hash": prepared["seed_design_hash"],
         "seed_design": prepared["seed_design"],
         "operator_input_spec": prepared["operator_input_spec"],
@@ -1074,94 +1182,127 @@ def _run_fit_scenario(
         shard = root / "pilot" / "fit" / scenario.scenario_id / f"replicate-{replicate:06d}.json"
         if shard.is_file():
             continue
-        experiment = str(scenario.parameters["experiment"])
-        kwargs: dict[str, Any] = {}
-        if experiment == "scan":
-            kwargs["scan_comparators"] = _scan_comparators_for_scenario(
-                scenario, context, design_hash, replicate,
-            )
-            preflight = lock["comparator_preflights"][panel]
-            kwargs["comparator_preflight_path"] = root / preflight["path"]
-            kwargs["comparator_preflight_hash"] = preflight["sha256"]
-        elif experiment == "coverage":
-            seed = derive_seed(design_hash, "fit", scenario.scenario_id, replicate, scenario.stage)
-            from .track_fit import simulate_fit_truth
-
-            phenotype, _truth = simulate_fit_truth(
-                context["kernels"], str(scenario.parameters["allocation"]), seed=seed,
-                total_pve=scenario.parameters.get("total_pve"),
-            )
-            replicate_root = root / "work" / "fit" / "pilot" / scenario.scenario_id / f"replicate-{replicate:06d}"
-            phenotype_path = replicate_root / "phenotype.tsv"
-            phenotype_path.parent.mkdir(parents=True, exist_ok=True)
-            entry = context["entry"]
-            phenotype_path.write_text(
-                f"{entry['sample_col']}\t{entry['trait']}\n" + "".join(
-                    f"{sample}\t{float(value):.17g}\n"
-                    for sample, value in zip(context["samples"], phenotype, strict=True)
-                ), encoding="utf-8",
-            )
-            fixture = {
-                "panel": panel, "subgenomes": list(entry["subgenomes"]),
-                "phenotype": str(phenotype_path), "sample_col": entry["sample_col"],
-                "trait": entry["trait"],
-                "bed_prefixes": {
-                    label: str(entry["bed_prefix_template"]).format(subgenome=label)
-                    for label in entry["subgenomes"]
-                },
-            }
-            config_path = replicate_root / "configs" / "fit.generated.yaml"
-            summary_path = replicate_root / "results" / f"summary_{entry['trait']}.json"
-            if not summary_path.is_file():
-                results = replicate_root / "results"
-                if results.exists() and any(results.iterdir()):
-                    raise CLIError(
-                        f"partial coverage output requires repair: {scenario.scenario_id}/{replicate}"
-                    )
-                build_fit_config(
-                    fixture, replicate_root, coverage=True,
-                    bootstrap_B=scenario.bootstrap_B, bootstrap_jobs=1,
-                )
-                if run_command(("homoeogwas", "fit", "-c", str(config_path))) != 0:
-                    raise CLIError(f"released coverage fit failed: {scenario.scenario_id}/{replicate}")
-            kwargs["fit_output_dir"] = replicate_root
-            kwargs["trait"] = str(entry["trait"])
-        elif experiment == "loco":
-            record = lock["loco_truth_artifacts"][scenario.scenario_id][str(replicate)]
-            source_relative = (
-                f"configs/fit/pilot/loco/{scenario.scenario_id}/"
-                f"replicate-{replicate:06d}.generated.yaml"
-            )
-            replicate_root = root / "work" / "fit" / "pilot" / scenario.scenario_id / f"replicate-{replicate:06d}"
-            config_path = replicate_root / "configs" / "fit.generated.yaml"
-            summary_path = (
-                replicate_root / "results"
-                / f"summary_{context['entry']['trait']}.json"
-            )
-            if not summary_path.is_file():
-                results = replicate_root / "results"
-                if results.exists() and any(results.iterdir()):
-                    raise CLIError(
-                        f"partial LOCO output requires repair: {scenario.scenario_id}/{replicate}"
-                    )
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                config_path.write_bytes((root / source_relative).read_bytes())
-                if _sha256(config_path) != record["generated_config_sha256"]:
-                    raise CLIError("LOCO final config differs from presealed design")
-                if run_command(("homoeogwas", "fit", "-c", str(config_path))) != 0:
-                    raise CLIError(f"released LOCO fit failed: {scenario.scenario_id}/{replicate}")
-            elif _sha256(config_path) != record["generated_config_sha256"]:
-                raise CLIError("completed LOCO config differs from presealed design")
-            kwargs.update({
-                "fit_output_dir": replicate_root,
-                "trait": str(context["entry"]["trait"]),
-                "loco_design_root": root,
-            })
-        run_fit_replicate(
-            scenario, context["kernels"], replicate=replicate,
-            design_hash=design_hash, sample_ids=context["samples"],
-            shard_path=shard, **kwargs,
+        replicate_root = (
+            root / "work" / "fit" / scenario.stage / scenario.scenario_id
+            / f"replicate-{replicate:06d}"
         )
+
+        def execute(
+            replicate: int = replicate,
+            replicate_root: Path = replicate_root,
+        ) -> dict[str, Any]:
+            experiment = str(scenario.parameters["experiment"])
+            kwargs: dict[str, Any] = {}
+            if experiment == "scan":
+                kwargs["scan_comparators"] = _scan_comparators_for_scenario(
+                    scenario, context, design_hash, replicate,
+                )
+                preflight = lock["comparator_preflights"][panel]
+                kwargs["comparator_preflight_path"] = root / preflight["path"]
+                kwargs["comparator_preflight_hash"] = preflight["sha256"]
+            elif experiment == "coverage":
+                seed = derive_seed(
+                    design_hash, "fit", scenario.scenario_id, replicate,
+                    scenario.stage,
+                )
+                from .track_fit import simulate_fit_truth
+
+                phenotype, _truth = simulate_fit_truth(
+                    context["kernels"], str(scenario.parameters["allocation"]),
+                    seed=seed, total_pve=scenario.parameters.get("total_pve"),
+                )
+                phenotype_path = replicate_root / "phenotype.tsv"
+                phenotype_path.parent.mkdir(parents=True, exist_ok=True)
+                entry = context["entry"]
+                phenotype_path.write_text(
+                    f"{entry['sample_col']}\t{entry['trait']}\n" + "".join(
+                        f"{sample}\t{float(value):.17g}\n"
+                        for sample, value in zip(
+                            context["samples"], phenotype, strict=True,
+                        )
+                    ), encoding="utf-8",
+                )
+                fixture = {
+                    "panel": panel, "subgenomes": list(entry["subgenomes"]),
+                    "phenotype": str(phenotype_path),
+                    "sample_col": entry["sample_col"], "trait": entry["trait"],
+                    "bed_prefixes": {
+                        label: str(entry["bed_prefix_template"]).format(
+                            subgenome=label
+                        )
+                        for label in entry["subgenomes"]
+                    },
+                }
+                config_path = replicate_root / "configs" / "fit.generated.yaml"
+                summary_path = (
+                    replicate_root / "results" / f"summary_{entry['trait']}.json"
+                )
+                if not summary_path.is_file():
+                    results = replicate_root / "results"
+                    if results.exists() and any(results.iterdir()):
+                        raise CLIError(
+                            "partial coverage output requires repair: "
+                            f"{scenario.scenario_id}/{replicate}"
+                        )
+                    build_fit_config(
+                        fixture, replicate_root, coverage=True,
+                        bootstrap_B=scenario.bootstrap_B, bootstrap_jobs=1,
+                    )
+                    if run_command(
+                        ("homoeogwas", "fit", "-c", str(config_path))
+                    ) != 0:
+                        raise CLIError(
+                            "released coverage fit failed: "
+                            f"{scenario.scenario_id}/{replicate}"
+                        )
+                kwargs["fit_output_dir"] = replicate_root
+                kwargs["trait"] = str(entry["trait"])
+            elif experiment == "loco":
+                record = lock["loco_truth_artifacts"][scenario.stage][
+                    scenario.scenario_id
+                ][str(replicate)]
+                source_relative = (
+                    f"configs/fit/{scenario.stage}/loco/{scenario.scenario_id}/"
+                    f"replicate-{replicate:06d}.generated.yaml"
+                )
+                config_path = replicate_root / "configs" / "fit.generated.yaml"
+                summary_path = (
+                    replicate_root / "results"
+                    / f"summary_{context['entry']['trait']}.json"
+                )
+                if not summary_path.is_file():
+                    results = replicate_root / "results"
+                    if results.exists() and any(results.iterdir()):
+                        raise CLIError(
+                            "partial LOCO output requires repair: "
+                            f"{scenario.scenario_id}/{replicate}"
+                        )
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    config_path.write_bytes((root / source_relative).read_bytes())
+                    if _sha256(config_path) != record["generated_config_sha256"]:
+                        raise CLIError("LOCO final config differs from presealed design")
+                    if run_command(
+                        ("homoeogwas", "fit", "-c", str(config_path))
+                    ) != 0:
+                        raise CLIError(
+                            f"released LOCO fit failed: {scenario.scenario_id}/{replicate}"
+                        )
+                elif _sha256(config_path) != record["generated_config_sha256"]:
+                    raise CLIError("completed LOCO config differs from presealed design")
+                kwargs.update({
+                    "fit_output_dir": replicate_root,
+                    "trait": str(context["entry"]["trait"]),
+                    "loco_design_root": root,
+                })
+            return run_fit_replicate(
+                scenario, context["kernels"], replicate=replicate,
+                design_hash=design_hash, sample_ids=context["samples"],
+                **kwargs,
+            )
+
+        payload, measurement = _measure_operation(execute)
+        measured = _attach_measurement(root, replicate_root, payload, measurement)
+        write_shard_exclusive(shard, measured)
 
 
 def _run_scaling_scenario(root: Path, scenario: Scenario, design_hash: str) -> None:
@@ -1180,7 +1321,7 @@ def _run_scaling_scenario(root: Path, scenario: Scenario, design_hash: str) -> N
     shard = root / "pilot" / "scaling" / scenario.scenario_id / "replicate-000000.json"
     if shard.is_file():
         return
-    measured = run_anchor(anchor)
+    measured, measurement = _measure_operation(lambda: run_anchor(anchor))
     payload = {
         "track": "scaling", "scenario_id": scenario.scenario_id, "replicate": 0,
         "design_hash": design_hash, "stage": "pilot", "formal": False,
@@ -1189,13 +1330,12 @@ def _run_scaling_scenario(root: Path, scenario: Scenario, design_hash: str) -> N
         "request_hash": sha256_payload({"scenario": scenario.to_dict()}),
         "context_fingerprint": sha256_payload(value),
         "summary": summarize_anchor(anchor, measured),
-        "cpu_seconds": float(sum(item.cpu_seconds for item in measured)),
-        "runtime_seconds": float(sum(item.wall_seconds for item in measured)),
         "failure": {"failed": False, "error_type": None, "message": None},
     }
+    output_root = root / "work" / "scaling" / scenario.scenario_id / "replicate-000000"
     write_shard_exclusive(
         shard,
-        payload,
+        _attach_measurement(root, output_root, payload, measurement),
     )
 
 
@@ -1208,10 +1348,10 @@ def _run_application_scenario(root: Path, scenario: Scenario, design_hash: str) 
     aliases = _APPLICATION_SPECIES.get(species)
     if aliases is None:
         raise CLIError(f"application scenario has unsupported species {species!r}")
-    rows = [
+    rows, measurement = _measure_operation(lambda: [
         row for row in export_application_rows(lock["application_registry"])
         if str(row.get("species", "")).strip().lower() in aliases
-    ]
+    ])
     if not rows:
         raise CLIError(f"application registry has no frozen {species} row")
     payload = {
@@ -1222,12 +1362,12 @@ def _run_application_scenario(root: Path, scenario: Scenario, design_hash: str) 
         "request_hash": sha256_payload({"scenario": scenario.to_dict()}),
         "context_fingerprint": sha256_payload({"species": species}),
         "rows": rows,
-        "runtime_seconds": 0.0,
         "failure": {"failed": False, "error_type": None, "message": None},
     }
+    output_root = root / "work" / "application" / scenario.scenario_id / "replicate-000000"
     write_shard_exclusive(
         shard,
-        payload,
+        _attach_measurement(root, output_root, payload, measurement),
     )
 
 
@@ -1277,11 +1417,30 @@ def _dispatch_pilot(root: Path, scenarios: Sequence[Scenario], *, n_jobs: int) -
                         )
                     bank = ConditionalBank.from_shard(calibration_path)
                     calibration[backbone] = bank
-            result = run_omnib_replicate(
-                scenario, contexts[key], replicate=replicate,
-                design_hash=design_hash, n_jobs=n_jobs, shard_path=path,
-                power_calibration_bank=bank,
-            )
+            if path.is_file():
+                result = run_omnib_replicate(
+                    scenario, contexts[key], replicate=replicate,
+                    design_hash=design_hash, n_jobs=n_jobs, shard_path=path,
+                    power_calibration_bank=bank,
+                )
+            else:
+                context = contexts[key]
+                result, measurement = _measure_operation(
+                    lambda scenario=scenario, context=context,
+                    replicate=replicate, bank=bank: run_omnib_replicate(
+                        scenario, context, replicate=replicate,
+                        design_hash=design_hash, n_jobs=n_jobs,
+                        power_calibration_bank=bank,
+                    )
+                )
+                output_root = (
+                    root / "work" / "omnib" / scenario.scenario_id
+                    / f"replicate-{replicate:06d}"
+                )
+                result = _attach_measurement(
+                    root, output_root, result, measurement,
+                )
+                write_shard_exclusive(path, result)
             if (
                 scenario.parameters.get("experiment") == "conditional"
                 and scenario.parameters.get("bank") == "calibration"
@@ -1348,44 +1507,144 @@ def _formal_multiplier(pilot: Scenario, formal: Scenario) -> float:
     return formal_units / pilot_units
 
 
+def _expected_pilot_shard_count(scenario: Scenario) -> int:
+    if scenario.track in {"scaling", "application"} or scenario.parameters.get(
+        "experiment"
+    ) in {"conditional", "global_vc", "family_size"}:
+        return 1
+    return scenario.replicates
+
+
+def _validated_output_bytes(root: Path, payload: Mapping[str, Any], shard: Path) -> int:
+    output_relative = payload.get("replicate_output_root")
+    manifest = payload.get("replicate_output_manifest")
+    declared_bytes = payload.get("replicate_output_bytes")
+    if (
+        not isinstance(output_relative, str) or not output_relative.startswith("work/")
+        or not isinstance(manifest, list)
+        or isinstance(declared_bytes, bool) or not isinstance(declared_bytes, int)
+        or declared_bytes < 0
+    ):
+        raise CLIError(f"pilot shard lacks a complete output measurement: {shard}")
+    output_root = root / output_relative
+    if not output_root.is_dir() or _path_has_symlink(output_root):
+        raise CLIError(f"pilot replicate output root is invalid: {output_root}")
+    observed = _replicate_output_record(root, output_root)
+    if (
+        observed["replicate_output_root"] != output_relative
+        or observed["replicate_output_manifest"] != manifest
+        or observed["replicate_output_bytes"] != declared_bytes
+    ):
+        raise CLIError(f"pilot replicate output manifest differs: {shard}")
+    return declared_bytes
+
+
 def _pilot_measurements(root: Path) -> list[dict[str, Any]]:
     pilot = build_scenarios("pilot")
     formal = {row.scenario_id: row for row in build_scenarios("formal")}
     measurements = []
     for scenario in pilot:
         paths = sorted((root / "pilot" / scenario.track / scenario.scenario_id).glob("replicate-*.json"))
-        if not paths:
-            raise CLIError(f"pilot measurement is missing: {scenario.scenario_id}")
+        expected_count = _expected_pilot_shard_count(scenario)
+        expected_names = {
+            f"replicate-{replicate:06d}.json" for replicate in range(expected_count)
+        }
+        if {path.name for path in paths} != expected_names:
+            raise CLIError(
+                f"pilot measurement shard coverage differs: {scenario.scenario_id}"
+            )
         cpu = 0.0
+        wall = 0.0
         size = 0
+        peak = 0
         for path in paths:
             payload = _strict_json(path)
-            runtime = payload.get("cpu_seconds", payload.get("runtime_seconds"))
-            if isinstance(runtime, bool) or not isinstance(runtime, (int, float)) or runtime < 0:
-                raise CLIError(f"pilot shard lacks non-negative runtime: {path}")
-            cpu += float(runtime)
-            size += path.stat().st_size
+            values = {
+                "cpu_seconds": payload.get("cpu_seconds"),
+                "wall_seconds": payload.get("wall_seconds"),
+                "peak_rss_bytes": payload.get("peak_rss_bytes"),
+            }
+            for field in ("cpu_seconds", "wall_seconds"):
+                value = values[field]
+                if (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not np.isfinite(value) or value < 0
+                ):
+                    raise CLIError(f"pilot shard lacks non-negative {field}: {path}")
+            peak_value = values["peak_rss_bytes"]
+            if (
+                isinstance(peak_value, bool) or not isinstance(peak_value, int)
+                or peak_value < 1
+            ):
+                raise CLIError(f"pilot shard lacks positive peak_rss_bytes: {path}")
+            cpu += float(values["cpu_seconds"])
+            wall += float(values["wall_seconds"])
+            peak = max(peak, peak_value)
+            size += path.stat().st_size + _validated_output_bytes(root, payload, path)
         target = formal[scenario.scenario_id]
         measurements.append({
             "scenario_id": scenario.scenario_id,
-            "cpu_seconds": cpu, "output_bytes": size,
+            "cpu_seconds": cpu, "wall_seconds": wall,
+            "peak_rss_bytes": peak, "output_bytes": size,
             "scenario_multiplier": _formal_multiplier(scenario, target),
         })
     return measurements
 
 
+def _add_peak_memory_projection(
+    projection: dict[str, Any],
+    measurements: Sequence[Mapping[str, Any]],
+    effective_workers: int,
+) -> dict[str, Any]:
+    observed = max(int(row["peak_rss_bytes"]) for row in measurements)
+    projected = observed * effective_workers
+    memory = {
+        "observed_max_peak_rss_bytes": observed,
+        "observed_max_peak_memory_gb": observed / 1_000_000_000,
+        "projected_peak_memory_bytes": projected,
+        "projected_peak_memory_gb": projected / 1_000_000_000,
+        "cap_gb": None,
+        "threshold_status": "not_evaluated_no_formal_memory_cap",
+    }
+    projection["peak_memory_projection"] = memory
+    projected_wall_seconds = sum(
+        float(row["wall_seconds"]) * float(row["scenario_multiplier"])
+        for row in measurements
+    ) / effective_workers
+    totals = projection.setdefault("totals", {})
+    cpu_based_elapsed = float(totals.get("elapsed_hours", 0.0))
+    wall_based_elapsed = projected_wall_seconds / 3_600
+    totals["projected_peak_memory_gb"] = memory["projected_peak_memory_gb"]
+    totals["projected_wall_seconds"] = projected_wall_seconds
+    totals["wall_based_elapsed_hours"] = wall_based_elapsed
+    totals["elapsed_hours"] = max(cpu_based_elapsed, wall_based_elapsed)
+    return projection
+
+
 def command_project_formal(args: argparse.Namespace) -> int:
     root = _canonical_root(args.root).resolve()
     _validate_sealed_design(root)
+    measurements = _pilot_measurements(root)
     try:
         projection = project_budget(
-            "formal", _pilot_measurements(root),
+            "formal", measurements,
             effective_workers=args.effective_workers,
         )
     except BudgetExceeded as error:
-        print(canonical_json(error.projection))
+        print(canonical_json(_add_peak_memory_projection(
+            error.projection, measurements, args.effective_workers,
+        )))
         return 2
+    projection = _add_peak_memory_projection(
+        projection, measurements, args.effective_workers,
+    )
     print(canonical_json(projection))
+    elapsed_limit = projection.get("limits", {}).get("elapsed_hours")
+    if (
+        isinstance(elapsed_limit, (int, float))
+        and projection["totals"]["elapsed_hours"] > elapsed_limit
+    ):
+        return 2
     return 0
 
 

@@ -1713,8 +1713,12 @@ def run_fit_replicate(
                 or sha256_payload(seed_design) != seed_design_hash
             ):
                 raise ValueError("LOCO seed design identity is invalid")
-            scenario_records = lock.get("loco_truth_artifacts", {}).get(
-                scenario.scenario_id
+            stage_records = lock.get("loco_truth_artifacts", {}).get(
+                scenario.stage
+            )
+            scenario_records = (
+                stage_records.get(scenario.scenario_id)
+                if isinstance(stage_records, Mapping) else None
             )
             required = {
                 "path", "sha256", "truth_hash", "source", "seed",

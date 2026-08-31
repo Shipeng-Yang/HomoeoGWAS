@@ -994,7 +994,15 @@ def _validate_locked_root(
         )
         if seed_design_hash != sha256_payload(expected_seed_design):
             raise BenchmarkAggregateError("seed design hash mismatch")
-    loco_artifacts = lock.get("loco_truth_artifacts")
+    loco_by_stage = lock.get("loco_truth_artifacts")
+    if has_loco and (
+        not isinstance(loco_by_stage, Mapping)
+        or set(loco_by_stage) != {"pilot", "formal"}
+    ):
+        raise BenchmarkAggregateError(
+            "LOCO truth artifacts require exact pilot/formal stage namespaces"
+        )
+    loco_artifacts = loco_by_stage.get(stage) if isinstance(loco_by_stage, Mapping) else None
     _validate_loco_truth_artifacts(
         canonical, loco_artifacts, input_records,
         seed_design_hash=seed_design_hash,
@@ -1014,7 +1022,7 @@ def _validate_locked_root(
                 "formal scenario config bindings are incomplete"
             )
         _validate_loco_truth_artifacts(
-            formal, lock.get("formal_loco_truth_artifacts"), input_records,
+            formal, loco_by_stage.get("formal"), input_records,
             seed_design_hash=seed_design_hash,
         )
     if lock.get("acceptance_rules") != ACCEPTANCE_RULES:
