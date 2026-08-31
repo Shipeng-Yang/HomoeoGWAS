@@ -9,16 +9,20 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from scripts.benchmarks.v201 import aggregate as aggregate_module
 from scripts.benchmarks.v201.aggregate import (
     ACCEPTANCE_RULES,
     TABLE_SCHEMAS,
     BenchmarkAggregateError,
+    _validate_comparator_preflights,
     _validate_config_manifest,
     _validate_context_artifact,
     _validate_input_manifest,
+    _validate_loco_truth_artifacts,
     aggregate_benchmark,
+    seed_design_payload,
     table_schemas,
 )
 from scripts.benchmarks.v201.audit import (
@@ -739,6 +743,104 @@ def test_design_lock_distinguishes_target_release_from_harness(
     lock_path.write_text(canonical_json(lock) + "\n", encoding="utf-8")
     with pytest.raises(BenchmarkAuditError, match="release target/harness"):
         audit_benchmark(root)
+
+
+def test_loco_lock_requires_complete_per_replicate_artifact_mapping(tmp_path):
+    seed_design_hash = "d" * 64
+    scenarios = [Scenario(
+        "A.loco.cotton.pve_0", "fit", "pilot", 2, 199,
+        {"panel": "cotton", "experiment": "loco", "scan_pve": 0.0},
+    )]
+    records = {}
+    artifacts = {scenarios[0].scenario_id: {}}
+    for replicate in range(2):
+        truth = tmp_path / f"truth-{replicate}.json"
+        truth.write_text(f"{{\"replicate\":{replicate}}}\n")
+        digest = hashlib.sha256(truth.read_bytes()).hexdigest()
+        key = f"inputs/truth-{replicate}.json"
+        records[key] = {
+            "size": truth.stat().st_size, "sha256": digest, "type": "loco_truth",
+        }
+        artifacts[scenarios[0].scenario_id][str(replicate)] = {
+            "path": key, "sha256": digest, "truth_hash": f"{replicate + 1}" * 64,
+            "source": "deterministic_pre_fit_simulation",
+            "seed": derive_seed(
+                seed_design_hash, "fit", scenarios[0].scenario_id, replicate,
+                "pilot:loco_truth",
+            ),
+            "generated_config_sha256": f"{replicate + 10:x}" * 64,
+            "phenotype_sha256": f"{replicate + 2}" * 64,
+        }
+
+    _validate_loco_truth_artifacts(
+        scenarios, artifacts, records, seed_design_hash=seed_design_hash,
+    )
+    missing = json.loads(json.dumps(artifacts))
+    del missing[scenarios[0].scenario_id]["1"]
+    with pytest.raises(BenchmarkAggregateError, match="replicate coverage"):
+        _validate_loco_truth_artifacts(
+            scenarios, missing, records, seed_design_hash=seed_design_hash,
+        )
+    legacy = {scenarios[0].scenario_id: artifacts[scenarios[0].scenario_id]["0"]}
+    with pytest.raises(BenchmarkAggregateError, match="legacy single-artifact"):
+        _validate_loco_truth_artifacts(
+            scenarios, legacy, records, seed_design_hash=seed_design_hash,
+        )
+    wrong_seed = json.loads(json.dumps(artifacts))
+    wrong_seed[scenarios[0].scenario_id]["1"]["seed"] += 1
+    with pytest.raises(BenchmarkAggregateError, match="derived seed"):
+        _validate_loco_truth_artifacts(
+            scenarios, wrong_seed, records, seed_design_hash=seed_design_hash,
+        )
+
+
+def test_comparator_preflights_are_bound_separately_for_both_fit_panels():
+    records = {
+        "inputs/comparator_preflight.cotton.tsv": {
+            "size": 10, "sha256": "a" * 64, "type": "comparator_preflight",
+        },
+        "inputs/comparator_preflight.wheat.tsv": {
+            "size": 11, "sha256": "b" * 64, "type": "comparator_preflight",
+        },
+    }
+    mapping = {
+        "cotton": {"path": "inputs/comparator_preflight.cotton.tsv", "sha256": "a" * 64},
+        "wheat": {"path": "inputs/comparator_preflight.wheat.tsv", "sha256": "b" * 64},
+    }
+    assert _validate_comparator_preflights({"cotton", "wheat"}, mapping, records) == mapping
+    with pytest.raises(BenchmarkAggregateError, match="panel coverage"):
+        _validate_comparator_preflights({"cotton", "wheat"}, {"cotton": mapping["cotton"]}, records)
+    with pytest.raises(BenchmarkAggregateError, match="legacy global"):
+        _validate_comparator_preflights({"cotton", "wheat"}, "a" * 64, records)
+
+
+def test_seed_design_excludes_dynamic_paths_but_detects_scientific_config_tamper(tmp_path):
+    config = tmp_path / "configs" / "fit.yaml"
+    config.parent.mkdir()
+    base = {
+        "fit_version": 1,
+        "panel": {"name": "cotton", "subgenomes": ["A", "D"]},
+        "phenotype": {"path": "/generated/p0.tsv", "sample_col": "sample", "trait": "trait"},
+        "scan": {"maf_min": 0.05, "loco": {"enabled": True}},
+        "outputs": {"out_dir": "/generated/run0", "prefix": "trait"},
+    }
+    config.write_text(yaml.safe_dump(base, sort_keys=False))
+    kwargs = {
+        "input_records": {
+            "/external/a.bed": {"sha256": "a" * 64, "type": "bed"},
+        },
+        "config_hashes": {"configs/fit.yaml": hashlib.sha256(config.read_bytes()).hexdigest()},
+        "contexts": {}, "target_release": {"version": "2.0.1"},
+        "harness": {"git_commit": "b" * 40},
+    }
+    first = seed_design_payload(tmp_path, **kwargs)
+    base["phenotype"]["path"] = "/generated/p1.tsv"
+    base["outputs"]["out_dir"] = "/generated/run1"
+    config.write_text(yaml.safe_dump(base, sort_keys=False))
+    assert seed_design_payload(tmp_path, **kwargs) == first
+    base["scan"]["maf_min"] = 0.01
+    config.write_text(yaml.safe_dump(base, sort_keys=False))
+    assert seed_design_payload(tmp_path, **kwargs) != first
 
 
 @pytest.mark.parametrize("fake_track", ["fit", "application", "scaling", "conditional"])

@@ -1406,10 +1406,16 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
         f"A.loco.cotton.pve_{scan_pve}", "fit", "formal", 1, 0,
         {"experiment": "loco", "scan_pve": scan_pve, "panel": "cotton"},
     )
+    seed_design = {"fixture": f"formal-{scan_pve}"}
+    seed_design_hash = sha256_payload(seed_design)
     truth = {
         "scan_pve": scan_pve, "distance_unit": "bp",
         "causal_variants": causal_variants,
-        "source": "deterministic_pre_fit_simulation", "seed": 2026,
+        "source": "deterministic_pre_fit_simulation",
+        "seed": derive_seed(
+            seed_design_hash, "fit", scenario.scenario_id, 0,
+            "formal:loco_truth",
+        ),
         "analysis_context": {
             "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
             "joined_phenotype": binding["joined_phenotype"],
@@ -1428,13 +1434,14 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     truth_sha = hashlib.sha256(truth_path.read_bytes()).hexdigest()
     (design_root / "design_lock.json").write_text(json.dumps({
         "design_hash": "9" * 64,
-        "loco_truth_artifacts": {scenario.scenario_id: {
+        "seed_design": seed_design, "seed_design_hash": seed_design_hash,
+        "loco_truth_artifacts": {scenario.scenario_id: {"0": {
             "path": "inputs/loco-truth.json", "sha256": truth_sha,
             "truth_hash": truth["truth_hash"], "source": truth["source"],
             "seed": truth["seed"],
             "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
             "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
-        }},
+        }}},
     }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="9" * 64,
@@ -1448,6 +1455,89 @@ def test_formal_released_loco_binds_explicit_truth_and_bp_family(
     assert _audit_fit_scenario(result, scenario) is True
 
 
+def test_released_loco_uses_distinct_presealed_truth_for_each_replicate(tmp_path):
+    sample_ids = [f"s{i:02d}" for i in range(24)]
+    scenario = Scenario(
+        "A.loco.cotton.pve_0", "fit", "pilot", 2, 0,
+        {"experiment": "loco", "scan_pve": 0.0, "panel": "cotton"},
+    )
+    design_root = tmp_path / "design-two-replicates"
+    (design_root / "inputs").mkdir(parents=True)
+    records = {}
+    runs = []
+    seed_design = {"fixture": "pilot-two-replicates"}
+    seed_design_hash = sha256_payload(seed_design)
+    for replicate in range(2):
+        output = tmp_path / f"loco-output-{replicate}"
+        _write_released_fit_output(
+            output, sample_ids=sample_ids, bootstrap=False, loco=True,
+        )
+        phenotype = output / "phenotype.tsv"
+        phenotype.write_text(
+            "sample\tsimulated_trait\n" + "".join(
+                f"{sample_id}\t{replicate + index / 100:.12g}\n"
+                for index, sample_id in enumerate(sample_ids)
+            )
+        )
+        _, _, kernels = _production_released_inputs(output)
+        binding = _released_fit_inputs(
+            _released_config_context(output), sample_ids,
+            expected_phenotype=None, expected_kernels=kernels,
+            expected_truth_hash=None,
+        )
+        truth = {
+            "scan_pve": 0.0, "distance_unit": "bp", "causal_variants": [],
+            "source": "deterministic_pre_fit_simulation",
+            "seed": derive_seed(
+                seed_design_hash, "fit", scenario.scenario_id, replicate,
+                "pilot:loco_truth",
+            ),
+            "analysis_context": {
+                "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
+                "joined_phenotype": binding["joined_phenotype"],
+                "kernel_order": binding["kernel_order"],
+                "kernel_fingerprints": binding["kernel_fingerprints"],
+                "generated_config_sha256": hashlib.sha256(
+                    (output / "configs" / "fit.generated.yaml").read_bytes()
+                ).hexdigest(),
+            },
+        }
+        truth["truth_hash"] = sha256_payload(truth)
+        truth_path = design_root / "inputs" / f"loco-truth-{replicate}.json"
+        truth_path.write_text(json.dumps(truth, sort_keys=True) + "\n")
+        records[str(replicate)] = {
+            "path": truth_path.relative_to(design_root).as_posix(),
+            "sha256": hashlib.sha256(truth_path.read_bytes()).hexdigest(),
+            "truth_hash": truth["truth_hash"], "source": truth["source"],
+            "seed": truth["seed"],
+            "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
+            "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
+        }
+        runs.append((output, kernels))
+    (design_root / "design_lock.json").write_text(json.dumps({
+        "design_hash": "4" * 64,
+        "seed_design": seed_design, "seed_design_hash": seed_design_hash,
+        "loco_truth_artifacts": {scenario.scenario_id: records},
+    }, sort_keys=True) + "\n")
+
+    results = [
+        run_fit_replicate(
+            scenario, kernels, replicate=replicate, design_hash="4" * 64,
+            sample_ids=np.asarray(sample_ids), fit_output_dir=output,
+            loco_design_root=design_root,
+        )
+        for replicate, (output, kernels) in enumerate(runs)
+    ]
+
+    assert all(result["failure"]["failed"] is False for result in results)
+    assert [result["released_scan_truth_binding"]["seed"] for result in results] == [
+        derive_seed(seed_design_hash, "fit", scenario.scenario_id, replicate,
+                    "pilot:loco_truth")
+        for replicate in range(2)
+    ]
+    assert len({result["truth_hash"] for result in results}) == 2
+
+
 def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
     output = tmp_path / "loco-no-comparator"
     sample_ids = [f"s{i:02d}" for i in range(24)]
@@ -1459,6 +1549,8 @@ def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
         "A.loco.cotton.pve_0", "fit", "formal", 1, 0,
         {"experiment": "loco", "scan_pve": 0.0, "panel": "cotton"},
     )
+    seed_design = {"fixture": "formal-no-comparator"}
+    seed_design_hash = sha256_payload(seed_design)
     binding = _released_fit_inputs(
         _released_config_context(output), sample_ids,
         expected_phenotype=None, expected_kernels=kernels,
@@ -1466,7 +1558,11 @@ def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
     )
     truth = {
         "scan_pve": 0.0, "distance_unit": "bp", "causal_variants": [],
-        "source": "deterministic_pre_fit_simulation", "seed": 2026,
+        "source": "deterministic_pre_fit_simulation",
+        "seed": derive_seed(
+            seed_design_hash, "fit", scenario.scenario_id, 0,
+            "formal:loco_truth",
+        ),
         "analysis_context": {
             "analysis_sample_ids_sha256": binding["analysis_sample_ids_sha256"],
             "joined_phenotype": binding["joined_phenotype"],
@@ -1485,13 +1581,14 @@ def test_loco_forbids_comparator_injection_even_with_released_truth(tmp_path):
     truth_sha = hashlib.sha256(truth_path.read_bytes()).hexdigest()
     (design_root / "design_lock.json").write_text(json.dumps({
         "design_hash": "8" * 64,
-        "loco_truth_artifacts": {scenario.scenario_id: {
+        "seed_design": seed_design, "seed_design_hash": seed_design_hash,
+        "loco_truth_artifacts": {scenario.scenario_id: {"0": {
             "path": "inputs/loco-truth.json", "sha256": truth_sha,
             "truth_hash": truth["truth_hash"], "source": truth["source"],
             "seed": truth["seed"],
             "generated_config_sha256": truth["analysis_context"]["generated_config_sha256"],
             "phenotype_sha256": truth["analysis_context"]["joined_phenotype"]["sha256"],
-        }},
+        }}},
     }, sort_keys=True) + "\n")
     result = run_fit_replicate(
         scenario, kernels, replicate=0, design_hash="8" * 64,

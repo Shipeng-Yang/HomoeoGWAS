@@ -1705,16 +1705,41 @@ def run_fit_replicate(
             if lock_path.is_symlink():
                 raise ValueError("LOCO design lock must not be a symlink")
             lock = json.loads(lock_path.read_text(encoding="utf-8"))
-            record = lock.get("loco_truth_artifacts", {}).get(scenario.scenario_id)
+            seed_design = lock.get("seed_design")
+            seed_design_hash = lock.get("seed_design_hash")
+            if (
+                not isinstance(seed_design, Mapping)
+                or not isinstance(seed_design_hash, str)
+                or sha256_payload(seed_design) != seed_design_hash
+            ):
+                raise ValueError("LOCO seed design identity is invalid")
+            scenario_records = lock.get("loco_truth_artifacts", {}).get(
+                scenario.scenario_id
+            )
             required = {
                 "path", "sha256", "truth_hash", "source", "seed",
                 "generated_config_sha256", "phenotype_sha256",
             }
+            if isinstance(scenario_records, Mapping) and set(scenario_records) == required:
+                raise ValueError(
+                    "legacy single-artifact LOCO lock is unsupported; regenerate "
+                    "the design with one presealed artifact per replicate"
+                )
+            record = (
+                scenario_records.get(str(replicate))
+                if isinstance(scenario_records, Mapping) else None
+            )
             if (
                 lock.get("design_hash") != design_hash
                 or not isinstance(record, Mapping) or set(record) != required
             ):
                 raise ValueError("LOCO truth artifact is absent from the design lock")
+            expected_seed = derive_seed(
+                seed_design_hash, "fit", scenario.scenario_id, replicate,
+                f"{scenario.stage}:loco_truth",
+            )
+            if record.get("seed") != expected_seed:
+                raise ValueError("LOCO truth artifact derived seed differs from design")
             truth_path = (design_root / str(record["path"])).resolve()
             if (
                 design_root not in truth_path.parents

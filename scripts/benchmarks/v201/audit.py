@@ -1836,9 +1836,13 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
     for _path, payload in evidence.shards:
         if payload.get("track") == "fit" and payload.get("experiment") == "loco":
             artifacts = evidence.design_lock.get("loco_truth_artifacts")
-            record = (
+            scenario_records = (
                 artifacts.get(str(payload.get("scenario_id")))
                 if isinstance(artifacts, Mapping) else None
+            )
+            record = (
+                scenario_records.get(str(payload.get("replicate")))
+                if isinstance(scenario_records, Mapping) else None
             )
             binding = payload.get("released_scan_truth_binding")
             truth_manifest = payload.get("truth_manifest")
@@ -2939,9 +2943,20 @@ def _pilot_and_engineering_gates(
     for _path, payload in evidence.shards:
         scenario = registry[str(payload["scenario_id"])]
         if payload["track"] == "fit":
+            panel_preflights = evidence.design_lock.get("comparator_preflights")
+            panel = str(scenario.parameters.get("panel", ""))
+            panel_record = (
+                panel_preflights.get(panel)
+                if isinstance(panel_preflights, Mapping) else None
+            )
+            preflight_sha256 = (
+                str(panel_record["sha256"])
+                if isinstance(panel_record, Mapping)
+                else str(evidence.design_lock.get("comparator_preflight_sha256"))
+            )
             _audit_fit_scenario(
                 payload, scenario,
-                preflight_sha256=str(evidence.design_lock["comparator_preflight_sha256"]),
+                preflight_sha256=preflight_sha256,
             )
             truth = payload.get("truth") or payload.get("scan_truth")
             if isinstance(truth, Mapping):

@@ -23,7 +23,7 @@ import numpy as np
 import yaml
 
 from .comparators import METHOD_NAMES
-from .contracts import canonical_json, sha256_payload
+from .contracts import canonical_json, derive_seed, sha256_payload
 from .scenarios import build_scenarios
 
 MASTER_SEED = 20260830
@@ -493,6 +493,44 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
     return records
 
 
+def _validate_comparator_preflights(
+    panels: set[str],
+    mapping: Any,
+    input_records: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Validate one outcome-before comparator preflight identity per fit panel."""
+
+    if panels and not isinstance(mapping, Mapping):
+        raise BenchmarkAggregateError(
+            "legacy global comparator preflight is unsupported for a multi-panel design"
+        )
+    if not isinstance(mapping, Mapping) or set(mapping) != panels:
+        raise BenchmarkAggregateError("comparator preflight panel coverage mismatch")
+    validated: dict[str, dict[str, str]] = {}
+    seen_paths: set[str] = set()
+    seen_hashes: set[str] = set()
+    for panel in sorted(panels):
+        record = mapping[panel]
+        if not isinstance(record, Mapping) or set(record) != {"path", "sha256"}:
+            raise BenchmarkAggregateError("comparator preflight panel record is invalid")
+        path = record.get("path")
+        digest = record.get("sha256")
+        manifest = input_records.get(str(path))
+        if (
+            not isinstance(path, str) or not path.startswith("inputs/")
+            or path in seen_paths or digest in seen_hashes
+            or not isinstance(manifest, Mapping)
+            or manifest.get("type") != "comparator_preflight"
+            or manifest.get("sha256") != digest
+            or _sha256_hex(digest, "comparator preflight hash") != digest
+        ):
+            raise BenchmarkAggregateError("comparator preflight panel binding is invalid")
+        seen_paths.add(path)
+        seen_hashes.add(str(digest))
+        validated[panel] = {"path": path, "sha256": str(digest)}
+    return validated
+
+
 def _validate_context_artifact(
     root: Path,
     context_key: str,
@@ -606,6 +644,95 @@ def _validate_context_artifact(
         raise BenchmarkAggregateError(f"context lock differs from artifact: {context_key}")
 
 
+def _validate_loco_truth_artifacts(
+    scenarios: Sequence[Any],
+    artifacts: Any,
+    input_records: Mapping[str, Mapping[str, Any]],
+    *,
+    seed_design_hash: str | None = None,
+) -> None:
+    """Require one immutable pre-run truth artifact for every LOCO replicate."""
+
+    loco = [
+        row for row in scenarios
+        if row.track == "fit" and row.parameters.get("experiment") == "loco"
+    ]
+    scenario_ids = {row.scenario_id for row in loco}
+    if not scenario_ids and artifacts in (None, {}):
+        return
+    if not isinstance(artifacts, Mapping) or set(artifacts) != scenario_ids:
+        raise BenchmarkAggregateError("design LOCO truth artifacts are incomplete")
+    required = {
+        "path", "sha256", "truth_hash", "source", "seed",
+        "generated_config_sha256", "phenotype_sha256",
+    }
+    for scenario in loco:
+        records = artifacts.get(scenario.scenario_id)
+        if isinstance(records, Mapping) and set(records) == required:
+            raise BenchmarkAggregateError(
+                "legacy single-artifact LOCO lock is unsupported; regenerate "
+                "one presealed artifact per replicate"
+            )
+        expected_replicates = {str(index) for index in range(scenario.replicates)}
+        if not isinstance(records, Mapping) or set(records) != expected_replicates:
+            raise BenchmarkAggregateError(
+                f"design LOCO replicate coverage mismatch: {scenario.scenario_id}"
+            )
+        paths: set[str] = set()
+        seeds: set[int] = set()
+        truth_hashes: set[str] = set()
+        phenotype_hashes: set[str] = set()
+        config_hashes: set[str] = set()
+        for replicate in range(scenario.replicates):
+            record = records[str(replicate)]
+            if (
+                not isinstance(record, Mapping) or set(record) != required
+                or record.get("path") not in input_records
+                or input_records[str(record["path"])].get("sha256") != record.get("sha256")
+                or input_records[str(record["path"])].get("type") != "loco_truth"
+                or any(
+                    not isinstance(record.get(field), str)
+                    or len(record[field]) != 64
+                    or any(character not in _HEX for character in record[field])
+                    for field in (
+                        "sha256", "truth_hash", "generated_config_sha256",
+                        "phenotype_sha256",
+                    )
+                )
+                or not isinstance(record.get("source"), str) or not record["source"]
+                or isinstance(record.get("seed"), bool) or not isinstance(record["seed"], int)
+            ):
+                raise BenchmarkAggregateError(
+                    f"design LOCO truth artifact is invalid: "
+                    f"{scenario.scenario_id}/{replicate}"
+                )
+            if seed_design_hash is not None and record["seed"] != derive_seed(
+                seed_design_hash, "fit", scenario.scenario_id, replicate,
+                f"{scenario.stage}:loco_truth",
+            ):
+                raise BenchmarkAggregateError(
+                    f"design LOCO derived seed mismatch: "
+                    f"{scenario.scenario_id}/{replicate}"
+                )
+            path = str(record["path"])
+            seed = int(record["seed"])
+            if (
+                path in paths or seed in seeds
+                or record["truth_hash"] in truth_hashes
+                or record["phenotype_sha256"] in phenotype_hashes
+                or record["generated_config_sha256"] in config_hashes
+            ):
+                raise BenchmarkAggregateError(
+                    f"design LOCO replicate identities are not unique: "
+                    f"{scenario.scenario_id}/{replicate}"
+                )
+            paths.add(path)
+            seeds.add(seed)
+            truth_hashes.add(str(record["truth_hash"]))
+            phenotype_hashes.add(str(record["phenotype_sha256"]))
+            config_hashes.add(str(record["generated_config_sha256"]))
+
+
 def _current_git_commit() -> str:
     repository = Path(__file__).resolve().parents[3]
     try:
@@ -619,6 +746,80 @@ def _current_git_commit() -> str:
     if len(commit) != 40 or any(character not in _HEX for character in commit):
         raise BenchmarkAggregateError("current software commit is invalid")
     return commit
+
+
+def _static_scientific_config(path: Path) -> dict[str, Any]:
+    """Project a generated config onto seed-stable scientific parameters."""
+
+    try:
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise BenchmarkAggregateError("cannot read static scientific config") from error
+    if not isinstance(parsed, Mapping) or not parsed:
+        raise BenchmarkAggregateError("static scientific config is invalid")
+    projected = json.loads(canonical_json(dict(parsed)))
+    projected.pop("outputs", None)
+    phenotype = projected.get("phenotype")
+    if isinstance(phenotype, dict):
+        phenotype.pop("path", None)
+    interact = projected.get("interact")
+    if isinstance(interact, dict):
+        interact.pop("phenotype", None)
+    return projected
+
+
+def seed_design_payload(
+    root: Path,
+    *,
+    input_records: Mapping[str, Mapping[str, Any]],
+    config_hashes: Mapping[str, str],
+    contexts: Mapping[str, Mapping[str, Any]],
+    target_release: Mapping[str, Any],
+    harness: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the acyclic identity used only to derive pre-run LOCO seeds."""
+
+    external_inputs = {
+        path: {"sha256": record.get("sha256"), "type": record.get("type")}
+        for path, record in sorted(input_records.items())
+        if Path(path).is_absolute()
+    }
+    preflight_manifests = {
+        path: {"sha256": record.get("sha256"), "type": record.get("type")}
+        for path, record in sorted(input_records.items())
+        if record.get("type") == "comparator_preflight"
+    }
+    context_science = {
+        key: {
+            field: record.get(field)
+            for field in (
+                "group_count", "ordered_family_ids_hash",
+                "context_fingerprint", "family_hash",
+            )
+        }
+        for key, record in sorted(contexts.items())
+    }
+    static_configs = {
+        relative: _static_scientific_config(root / relative)
+        for relative in sorted(config_hashes)
+    }
+    return {
+        "schema": "homoeogwas-v201-seed-design-v1",
+        "pilot_registry": [row.to_dict() for row in build_scenarios("pilot")],
+        "formal_registry": [row.to_dict() for row in build_scenarios("formal")],
+        "master_seed": MASTER_SEED,
+        "target_release": dict(target_release),
+        "harness": dict(harness),
+        "external_inputs": external_inputs,
+        "preflight_manifests": preflight_manifests,
+        "context_science": context_science,
+        "static_scientific_configs": static_configs,
+        "excludes": [
+            "generated_loco_phenotype_bytes",
+            "generated_loco_truth_bytes",
+            "final_config_bytes_and_output_paths",
+        ],
+    }
 
 
 def _validate_locked_root(
@@ -666,7 +867,6 @@ def _validate_locked_root(
         raise BenchmarkAggregateError("release target/harness identity mismatch")
     locked_files = {
         "input_manifest_sha256": root / "inputs" / "manifest.tsv",
-        "comparator_preflight_sha256": root / "inputs" / "comparator_preflight.tsv",
         "config_manifest_sha256": root / "configs" / "manifest.tsv",
     }
     for field, path in locked_files.items():
@@ -679,6 +879,25 @@ def _validate_locked_root(
     config_hashes = _validate_config_manifest(root, locked_files["config_manifest_sha256"])
     if lock.get("config_hashes") != config_hashes:
         raise BenchmarkAggregateError("design config hashes mismatch")
+    fit_panels = {
+        str(row.parameters["panel"])
+        for row in canonical
+        if row.track == "fit" and "panel" in row.parameters
+    }
+    if fit_panels:
+        _validate_comparator_preflights(
+            fit_panels, lock.get("comparator_preflights"), input_records,
+        )
+        if "comparator_preflight_sha256" in lock:
+            raise BenchmarkAggregateError(
+                "legacy global comparator preflight is unsupported for a multi-panel design"
+            )
+    else:
+        legacy = root / "inputs" / "comparator_preflight.tsv"
+        if lock.get("comparator_preflight_sha256") != _file_sha256(
+            legacy, "comparator_preflight_sha256"
+        ):
+            raise BenchmarkAggregateError("comparator_preflight_sha256 mismatch")
     scenario_configs = lock.get("scenario_config_bindings")
     if (
         not isinstance(scenario_configs, Mapping)
@@ -758,40 +977,46 @@ def _validate_locked_root(
                 raise BenchmarkAggregateError(
                     f"strict real context validation failed: {context_key}"
                 ) from error
-    loco_ids = {
-        row.scenario_id for row in canonical
-        if row.track == "fit" and row.parameters.get("experiment") == "loco"
-    }
+    has_loco = any(
+        row.track == "fit" and row.parameters.get("experiment") == "loco"
+        for row in canonical
+    )
+    seed_design_hash = None
+    if has_loco:
+        expected_seed_design = seed_design_payload(
+            root, input_records=input_records, config_hashes=config_hashes,
+            contexts=contexts, target_release=target, harness=harness,
+        )
+        if lock.get("seed_design") != expected_seed_design:
+            raise BenchmarkAggregateError("seed design payload mismatch")
+        seed_design_hash = _sha256_hex(
+            lock.get("seed_design_hash"), "seed design hash"
+        )
+        if seed_design_hash != sha256_payload(expected_seed_design):
+            raise BenchmarkAggregateError("seed design hash mismatch")
     loco_artifacts = lock.get("loco_truth_artifacts")
-    if loco_ids and (
-        not isinstance(loco_artifacts, Mapping) or set(loco_artifacts) != loco_ids
-    ):
-        raise BenchmarkAggregateError("design LOCO truth artifacts are incomplete")
-    required_loco = {
-        "path", "sha256", "truth_hash", "source", "seed",
-        "generated_config_sha256", "phenotype_sha256",
-    }
-    for scenario_id, record in (loco_artifacts or {}).items():
+    _validate_loco_truth_artifacts(
+        canonical, loco_artifacts, input_records,
+        seed_design_hash=seed_design_hash,
+    )
+    if has_loco:
+        formal = build_scenarios("formal")
+        formal_bindings = lock.get("formal_scenario_config_bindings")
         if (
-            not isinstance(record, Mapping) or set(record) != required_loco
-            or record.get("path") not in input_records
-            or input_records[str(record["path"])].get("sha256") != record.get("sha256")
-            or input_records[str(record["path"])].get("type") != "loco_truth"
+            not isinstance(formal_bindings, Mapping)
+            or set(formal_bindings) != {row.scenario_id for row in formal}
             or any(
-                not isinstance(record.get(field), str)
-                or len(record[field]) != 64
-                or any(character not in _HEX for character in record[field])
-                for field in (
-                    "sha256", "truth_hash", "generated_config_sha256",
-                    "phenotype_sha256",
-                )
+                not isinstance(path, str) or path not in config_hashes
+                for path in formal_bindings.values()
             )
-            or not isinstance(record.get("source"), str) or not record["source"]
-            or isinstance(record.get("seed"), bool) or not isinstance(record["seed"], int)
         ):
             raise BenchmarkAggregateError(
-                f"design LOCO truth artifact is invalid: {scenario_id}"
+                "formal scenario config bindings are incomplete"
             )
+        _validate_loco_truth_artifacts(
+            formal, lock.get("formal_loco_truth_artifacts"), input_records,
+            seed_design_hash=seed_design_hash,
+        )
     if lock.get("acceptance_rules") != ACCEPTANCE_RULES:
         raise BenchmarkAggregateError("design acceptance rules mismatch")
 
