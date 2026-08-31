@@ -602,10 +602,14 @@ def test_negative_control_emits_response_level_false_positives(tiny_context):
     )
     assert result["causal_group_ids"] == []
     assert "causal_detection_by_method" not in result
-    assert all(len(values) == 1 for values in result["false_positive_by_method"].values())
-    assert result["specificity_by_method"] == {
+    assert not ({"false_positive_by_method", "specificity_by_method"} & set(result))
+    assert all(
+        len(values) == 1
+        for values in result["qa_false_positive_by_method"].values()
+    )
+    assert result["qa_specificity_by_method"] == {
         method: [not value for value in values]
-        for method, values in result["false_positive_by_method"].items()
+        for method, values in result["qa_false_positive_by_method"].items()
     }
 
 
@@ -635,12 +639,12 @@ def test_robustness_checks_are_not_mislabeled_as_exact():
     for metrics in result["robustness_checks"].values():
         assert metrics["status"] in {"completed", "failed"}
         assert {
-            "fwer",
-            "power",
+            "qa_fwer",
+            "qa_power",
             "rank_correlation",
             "top_k_jaccard",
             "non_estimable_rate",
-            "absolute_power_regret",
+            "qa_absolute_power_regret",
         } <= set(metrics)
 
 
@@ -853,7 +857,7 @@ def test_encoding_dispatcher_runs_one_declared_batch(tiny_context):
 
 def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
     result = run_encoding_check(
-        tiny_context, bootstrap_B=1, design_hash="1" * 64,
+        tiny_context, bootstrap_B=19, design_hash="1" * 64,
         n_jobs=1, parallel_jobs=2, include_robustness=True,
     )
     assert set(result["exact_checks"]) == {
@@ -884,16 +888,51 @@ def test_encoding_payload_has_exact_locked_check_sets(tiny_context):
     }
     assert all(set(record) == exact_schema for record in result["exact_checks"].values())
     robustness_schema = {
-        "status", "error_type", "message", "fwer", "power",
+        "status", "error_type", "message", "qa_fwer", "qa_power",
         "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
-            "absolute_power_regret", "note",
-            "design_ruling", "calibration", "heldout", "power_by_architecture",
+            "qa_absolute_power_regret", "note",
+            "design_ruling", "calibration", "heldout", "qa_power_by_architecture",
             "realized_marker_design",
     }
     assert all(
         set(record) == robustness_schema
         for record in result["robustness_checks"].values()
     )
+    completed = [
+        record for record in result["robustness_checks"].values()
+        if record["status"] == "completed"
+    ]
+    assert completed
+    for record in completed:
+        assert len(record["calibration"]["response_ids"]) == result["bootstrap_B"]
+        assert "thresholds" not in record["calibration"]
+        assert "rejections_by_method" not in record["heldout"]
+        assert "qa_cutoffs_by_method" in record["calibration"]
+        assert "qa_rejections_by_method" in record["heldout"]
+        assert "power_by_architecture" not in record
+        for stratum in record["qa_power_by_architecture"].values():
+            assert not ({
+                "detection_by_method", "power_by_method",
+                "absolute_power_regret_by_method",
+            } & set(stratum))
+            assert {
+                "qa_detection_by_method", "qa_power_by_method",
+                "qa_absolute_power_regret_by_method",
+            } <= set(stratum)
+            assert set(stratum["baseline_p_by_method"]) == {
+                "omnib", "minor_burden", "pc1", "kernel_hadamard",
+            }
+            for method, baseline in stratum["baseline_p_by_method"].items():
+                assert stratum["baseline_p_hashes"][method] == sha256_payload(
+                    baseline
+                )
+                correlations, overlaps = track_omnib_module._ranking_metrics(
+                    np.asarray(baseline, dtype=float),
+                    np.asarray(stratum["p_by_method"][method], dtype=float),
+                    result["family_ids"],
+                )
+                assert stratum["rank_correlation_by_method"][method] == correlations
+                assert stratum["top_k_jaccard_by_method"][method] == overlaps
 
 
 def test_power_dispatcher_uses_declared_calibration_count(tiny_context):

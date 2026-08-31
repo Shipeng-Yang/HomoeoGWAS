@@ -2302,14 +2302,24 @@ def run_power_replicate(
         }
     )
     if negative_control:
-        payload["false_positive_by_method"] = {
+        false_positive = {
             method: np.asarray(values, dtype=bool).tolist()
             for method, values in rejections.items()
         }
-        payload["specificity_by_method"] = {
-            method: [not value for value in payload["false_positive_by_method"][method]]
+        specificity = {
+            method: [not value for value in false_positive[method]]
             for method in METHOD_NAMES
         }
+        payload.update(
+            {
+                "qa_false_positive_by_method": false_positive,
+                "qa_specificity_by_method": specificity,
+            }
+            if qa_only else {
+                "false_positive_by_method": false_positive,
+                "specificity_by_method": specificity,
+            }
+        )
     else:
         payload.update({
             "causal_minima_by_method": causal_minima,
@@ -2825,7 +2835,7 @@ def run_encoding_check(
     robustness: dict[str, Any] = {}
     if include_robustness:
         response_count = 20 if qa_only else 500
-        calibration_count = 20 if qa_only else 2_000
+        calibration_count = bootstrap_B
         architectures = [
             "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
             "single_snp_pair", "mixed_sign",
@@ -2928,13 +2938,29 @@ def run_encoding_check(
                         ).tolist()
                         for method in _ROBUSTNESS_METHODS
                     }
-                    correlations, top_k = _ranking_metrics(
-                        canonical_scores["omnib"], candidate_scores["omnib"],
-                        context.family.group_ids,
-                    )
+                    correlations_by_method: dict[str, list[float | None]] = {}
+                    top_k_by_method: dict[str, list[float]] = {}
+                    for method in _ROBUSTNESS_METHODS:
+                        correlations, top_k = _ranking_metrics(
+                            canonical_scores[method], candidate_scores[method],
+                            context.family.group_ids,
+                        )
+                        correlations_by_method[method] = correlations
+                        top_k_by_method[method] = top_k
                     powers = {
                         method: float(np.mean(values))
                         for method, values in detection.items()
+                    }
+                    regret_by_method = {
+                        "omnib": abs(
+                            powers["omnib"] - max(
+                                powers["minor_burden"], powers["pc1"],
+                                powers["kernel_hadamard"],
+                            )
+                        ),
+                        "minor_burden": None,
+                        "pc1": None,
+                        "kernel_hadamard": None,
                     }
                     strata[architecture] = {
                         "response_ids": list(power_ids), "seeds": list(power_seeds),
@@ -2948,45 +2974,52 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in candidate_scores.items()
                         },
-                        "baseline_omnib_p": _json_safe(canonical_scores["omnib"]),
-                        "baseline_omnib_hash": sha256_payload(
-                            _json_safe(canonical_scores["omnib"])
-                        ),
-                        "detection_by_method": detection,
-                        "power_by_method": powers,
-                        "rank_correlation_by_response": correlations,
-                        "top_k_jaccard_by_response": top_k,
-                        "absolute_power_regret": abs(
-                            powers["omnib"] - max(
-                                powers["minor_burden"], powers["pc1"],
-                                powers["kernel_hadamard"],
-                            )
+                        "baseline_p_by_method": {
+                            method: _json_safe(values)
+                            for method, values in canonical_scores.items()
+                        },
+                        "baseline_p_hashes": {
+                            method: sha256_payload(_json_safe(values))
+                            for method, values in canonical_scores.items()
+                        },
+                        "rank_correlation_by_method": correlations_by_method,
+                        "top_k_jaccard_by_method": top_k_by_method,
+                        **(
+                            {
+                                "qa_detection_by_method": detection,
+                                "qa_power_by_method": powers,
+                                "qa_absolute_power_regret_by_method": regret_by_method,
+                            }
+                            if qa_only else {
+                                "detection_by_method": detection,
+                                "power_by_method": powers,
+                                "absolute_power_regret_by_method": regret_by_method,
+                            }
                         ),
                     }
                 finite_correlations = [
                     value for record in strata.values()
-                    for value in record["rank_correlation_by_response"]
+                    for value in record["rank_correlation_by_method"]["omnib"]
                     if value is not None
                 ]
+                top_k_values = [
+                    value for record in strata.values()
+                    for value in record["top_k_jaccard_by_method"]["omnib"]
+                ]
+                fwer_value = float(np.mean(heldout_decisions["omnib"]))
                 robustness[name] = {
                     "status": "completed",
                     "error_type": None,
                     "message": None,
-                    "fwer": float(np.mean(heldout_decisions["omnib"])),
-                    "power": None,
                     "rank_correlation": (
                         float(np.mean(finite_correlations))
                         if finite_correlations else None
                     ),
                     "top_k": min(10, len(context.family.group_ids)),
-                    "top_k_jaccard": float(np.mean([
-                        value for record in strata.values()
-                        for value in record["top_k_jaccard_by_response"]
-                    ])),
+                    "top_k_jaccard": float(np.mean(top_k_values)),
                     "non_estimable_rate": float(np.mean(
                         ~np.isfinite(heldout_scores["omnib"])
                     )),
-                    "absolute_power_regret": None,
                     "realized_marker_design": marker_designs.get(name),
                     "note": "response-level challenge evidence; metrics stratified by architecture",
                     "design_ruling": {
@@ -3012,7 +3045,10 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in calibration_scores.items()
                         },
-                        "thresholds": thresholds,
+                        **(
+                            {"qa_cutoffs_by_method": thresholds}
+                            if qa_only else {"thresholds": thresholds}
+                        ),
                     },
                     "heldout": {
                         "response_ids": list(heldout_ids), "seeds": list(heldout_seeds),
@@ -3025,31 +3061,60 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in heldout_scores.items()
                         },
-                        "rejections_by_method": {
-                            method: values.tolist()
-                            for method, values in heldout_decisions.items()
-                        },
+                        **(
+                            {"qa_rejections_by_method": {
+                                method: values.tolist()
+                                for method, values in heldout_decisions.items()
+                            }}
+                            if qa_only else {"rejections_by_method": {
+                                method: values.tolist()
+                                for method, values in heldout_decisions.items()
+                            }}
+                        ),
                     },
-                    "power_by_architecture": strata,
+                    **(
+                        {
+                            "qa_fwer": fwer_value,
+                            "qa_power": None,
+                            "qa_absolute_power_regret": None,
+                            "qa_power_by_architecture": strata,
+                        }
+                        if qa_only else {
+                            "fwer": fwer_value,
+                            "power": None,
+                            "absolute_power_regret": None,
+                            "power_by_architecture": strata,
+                        }
+                    ),
                 }
             except Exception as error:
                 robustness[name] = {
                     "status": "failed",
                     "error_type": type(error).__name__,
                     "message": str(error),
-                    "fwer": None,
-                    "power": None,
                     "rank_correlation": None,
                     "top_k": None,
                     "top_k_jaccard": None,
                     "non_estimable_rate": None,
-                    "absolute_power_regret": None,
                     "realized_marker_design": marker_designs.get(name),
                     "note": "robustness scoring failed; no metric was inferred",
                     "design_ruling": None,
                     "calibration": None,
                     "heldout": None,
-                    "power_by_architecture": None,
+                    **(
+                        {
+                            "qa_fwer": None,
+                            "qa_power": None,
+                            "qa_absolute_power_regret": None,
+                            "qa_power_by_architecture": None,
+                        }
+                        if qa_only else {
+                            "fwer": None,
+                            "power": None,
+                            "absolute_power_regret": None,
+                            "power_by_architecture": None,
+                        }
+                    ),
                 }
     required_checks = [check for check in exact_checks.values() if check["required"]]
     exact_fields = (
@@ -3073,7 +3138,9 @@ def run_encoding_check(
                 n_jobs=n_jobs,
             ),
             "experiment": "encoding",
-            "inference_status": "noninferential_do_not_threshold",
+            "inference_status": (
+                "noninferential_do_not_threshold" if qa_only else "formal"
+            ),
             "request_hash": request_hash,
             "seed_id": seed_id,
             "response_hash": baseline["response_hash"],

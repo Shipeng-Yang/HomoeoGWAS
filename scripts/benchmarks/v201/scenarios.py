@@ -141,7 +141,7 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
             robustness_design={
                 "interaction_pve": 0.05, "causal_groups": 1,
                 "architectures": robustness_architectures,
-                "calibration_count": 20 if stage == "pilot" else 2_000,
+                "calibration_count": 199 if stage == "pilot" else 2_000,
                 "heldout_count": 20 if stage == "pilot" else 500,
                 "power_count_per_architecture": 20 if stage == "pilot" else 500,
                 "stratify_by_architecture": True,

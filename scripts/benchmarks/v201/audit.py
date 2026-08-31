@@ -78,11 +78,11 @@ _ENCODING_EXACT_SCHEMA = {
     "candidate_observed_hash", "requested_jobs", "effective_jobs",
     "backend", "worker_pids", "skip_reason",
 }
-_ENCODING_ROBUSTNESS_SCHEMA = {
-    "status", "error_type", "message", "fwer", "power",
+_ENCODING_ROBUSTNESS_SCHEMA_BASE = {
+    "status", "error_type", "message",
     "rank_correlation", "top_k", "top_k_jaccard", "non_estimable_rate",
-    "absolute_power_regret", "note",
-    "design_ruling", "calibration", "heldout", "power_by_architecture",
+    "note",
+    "design_ruling", "calibration", "heldout",
     "realized_marker_design",
 }
 _ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
@@ -1306,6 +1306,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         field in payload for field in (
             "thresholds", "rejections_by_method", "causal_detection_by_method",
             "recall_by_method", "adjusted_decisions", "formal_rejections",
+            "false_positive_by_method", "specificity_by_method",
         )
     ):
         raise BenchmarkAuditError("pilot power payload contains formal decision fields")
@@ -1313,6 +1314,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         field in payload for field in (
             "qa_cutoffs_by_method", "qa_rejections_by_method",
             "qa_causal_detection_by_method", "qa_recall_by_method",
+            "qa_false_positive_by_method", "qa_specificity_by_method",
         )
     ):
         raise BenchmarkAuditError("formal power payload contains QA decision fields")
@@ -1365,8 +1367,16 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         "recall_by_method"
         if payload.get("stage") == "formal" else "qa_recall_by_method"
     )
+    false_positive_name = (
+        "false_positive_by_method"
+        if payload.get("stage") == "formal" else "qa_false_positive_by_method"
+    )
+    specificity_name = (
+        "specificity_by_method"
+        if payload.get("stage") == "formal" else "qa_specificity_by_method"
+    )
     names += (
-        ["false_positive_by_method", "specificity_by_method"]
+        [false_positive_name, specificity_name]
         if negative_control else [
             "causal_minima_by_method", "causal_minima_hashes",
             causal_detection_name, recall_name,
@@ -1532,8 +1542,8 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         ]
         decisions_ok = maps[rejection_name][method] == rejected
         if negative_control:
-            decisions_ok = decisions_ok and maps["false_positive_by_method"][method] == rejected
-            decisions_ok = decisions_ok and maps["specificity_by_method"][method] == [
+            decisions_ok = decisions_ok and maps[false_positive_name][method] == rejected
+            decisions_ok = decisions_ok and maps[specificity_name][method] == [
                 not value for value in rejected
             ]
         else:
@@ -1549,15 +1559,24 @@ def _audit_robustness_record(
     ruling = record.get("design_ruling")
     calibration = record.get("calibration")
     heldout = record.get("heldout")
-    strata = record.get("power_by_architecture")
+    pilot = payload.get("stage") == "pilot"
+    strata = record.get(
+        "qa_power_by_architecture" if pilot else "power_by_architecture"
+    )
     architectures = [
         "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
         "single_snp_pair", "mixed_sign",
     ]
     if payload.get("pair_edges_per_group") != 1:
         architectures.append("multi_edge_group")
-    response_count = 20 if payload.get("stage") == "pilot" else 500
-    calibration_count = 20 if payload.get("stage") == "pilot" else 2_000
+    response_count = 20 if pilot else 500
+    calibration_count = payload.get("bootstrap_B")
+    if (
+        isinstance(calibration_count, bool)
+        or not isinstance(calibration_count, int)
+        or calibration_count != (199 if pilot else 2_000)
+    ):
+        raise BenchmarkAuditError("robustness calibration count is invalid")
     if (
         ruling != {
             "interaction_pve": 0.05, "causal_groups": 1,
@@ -1574,6 +1593,22 @@ def _audit_robustness_record(
         or not isinstance(strata, Mapping) or list(strata) != architectures
     ):
         raise BenchmarkAuditError("robustness frozen design ruling is invalid")
+    cutoff_name = "qa_cutoffs_by_method" if pilot else "thresholds"
+    rejection_name = "qa_rejections_by_method" if pilot else "rejections_by_method"
+    detection_name = "qa_detection_by_method" if pilot else "detection_by_method"
+    power_name = "qa_power_by_method" if pilot else "power_by_method"
+    regret_name = (
+        "qa_absolute_power_regret_by_method"
+        if pilot else "absolute_power_regret_by_method"
+    )
+    if set(calibration) != {
+        "response_ids", "seeds", "response_hash", "p_by_method", "p_hashes",
+        cutoff_name,
+    } or set(heldout) != {
+        "response_ids", "seeds", "response_hash", "p_by_method", "p_hashes",
+        rejection_name,
+    }:
+        raise BenchmarkAuditError("robustness raw stage schema is invalid")
     marker_design = record.get("realized_marker_design")
     maf_bands = {
         "maf_0p01_0p05": (0.01, True, 0.05, False),
@@ -1638,22 +1673,28 @@ def _audit_robustness_record(
         )(_finite_minima(calibration_scores[method]))
         for method in _ROBUSTNESS_METHODS
     }
-    if calibration.get("thresholds") != thresholds:
+    if calibration.get(cutoff_name) != thresholds:
         raise BenchmarkAuditError("robustness threshold differs from calibration")
     heldout_decisions = {
         method: (_finite_minimum_array(values) < thresholds[method]).tolist()
         for method, values in heldout_scores.items()
     }
-    if heldout.get("rejections_by_method") != heldout_decisions:
+    if heldout.get(rejection_name) != heldout_decisions:
         raise BenchmarkAuditError("robustness heldout decisions do not recompute")
-    if record.get("fwer") != float(np.mean(heldout_decisions["omnib"])):
+    record_fwer_name = "qa_fwer" if pilot else "fwer"
+    if record.get(record_fwer_name) != float(np.mean(heldout_decisions["omnib"])):
         raise BenchmarkAuditError("robustness FWER does not recompute")
     family_ids = payload["family_ids"]
     all_correlations: list[float] = []
     all_top: list[float] = []
     for architecture in architectures:
         arm = strata[architecture]
-        if not isinstance(arm, Mapping):
+        if not isinstance(arm, Mapping) or set(arm) != {
+            "response_ids", "seeds", "response_hash", "causal_group_ids",
+            "p_by_method", "p_hashes", "baseline_p_by_method",
+            "baseline_p_hashes", "rank_correlation_by_method",
+            "top_k_jaccard_by_method", detection_name, power_name, regret_name,
+        }:
             raise BenchmarkAuditError("robustness power stratum is invalid")
         scores = score_matrices(arm, response_count)
         if set(calibration["response_ids"]) & set(arm["response_ids"]):
@@ -1667,41 +1708,84 @@ def _audit_robustness_record(
             for method, values in scores.items()
         }
         powers = {method: float(np.mean(values)) for method, values in detection.items()}
-        if arm.get("detection_by_method") != detection or arm.get("power_by_method") != powers:
+        if arm.get(detection_name) != detection or arm.get(power_name) != powers:
             raise BenchmarkAuditError("robustness power decisions do not recompute")
-        if arm.get("absolute_power_regret") != abs(
-            powers["omnib"] - max(
-                powers["minor_burden"], powers["pc1"], powers["kernel_hadamard"]
-            )
-        ):
+        expected_regret = {
+            "omnib": abs(
+                powers["omnib"] - max(
+                    powers["minor_burden"], powers["pc1"],
+                    powers["kernel_hadamard"],
+                )
+            ),
+            "minor_burden": None,
+            "pc1": None,
+            "kernel_hadamard": None,
+        }
+        if arm.get(regret_name) != expected_regret:
             raise BenchmarkAuditError("robustness component regret does not recompute")
-        baseline_raw = arm.get("baseline_omnib_p")
-        if arm.get("baseline_omnib_hash") != sha256_payload(baseline_raw):
-            raise BenchmarkAuditError("robustness baseline rank commitment is invalid")
-        baseline = np.asarray(baseline_raw, dtype=float)
-        correlations: list[float | None] = []
-        overlaps: list[float] = []
-        k = min(10, len(family_ids))
-        for column in range(response_count):
-            left, right = baseline[:, column], scores["omnib"][:, column]
-            finite = np.isfinite(left) & np.isfinite(right)
-            correlation = None
-            if finite.sum() >= 2:
-                lrank = np.argsort(np.argsort(left[finite], kind="stable"), kind="stable")
-                rrank = np.argsort(np.argsort(right[finite], kind="stable"), kind="stable")
-                value = np.corrcoef(lrank, rrank)[0, 1]
-                correlation = float(value) if np.isfinite(value) else None
-            correlations.append(correlation)
-            ltop = set(np.argsort(np.where(np.isfinite(left), left, np.inf))[:k])
-            rtop = set(np.argsort(np.where(np.isfinite(right), right, np.inf))[:k])
-            overlaps.append(len(ltop & rtop) / len(ltop | rtop) if ltop | rtop else 1.0)
+        baseline_raw = arm.get("baseline_p_by_method")
+        baseline_hashes = arm.get("baseline_p_hashes")
         if (
-            arm.get("rank_correlation_by_response") != correlations
-            or arm.get("top_k_jaccard_by_response") != overlaps
+            not isinstance(baseline_raw, Mapping)
+            or set(baseline_raw) != set(_ROBUSTNESS_METHODS)
+            or not isinstance(baseline_hashes, Mapping)
+            or set(baseline_hashes) != set(_ROBUSTNESS_METHODS)
+        ):
+            raise BenchmarkAuditError("robustness baseline rank commitment is invalid")
+        correlations_by_method: dict[str, list[float | None]] = {}
+        overlaps_by_method: dict[str, list[float]] = {}
+        k = min(10, len(family_ids))
+        for method in _ROBUSTNESS_METHODS:
+            baseline_method = baseline_raw[method]
+            if (
+                not isinstance(baseline_method, list)
+                or len(baseline_method) != len(family_ids)
+                or any(
+                    not isinstance(row, list) or len(row) != response_count
+                    for row in baseline_method
+                )
+                or baseline_hashes[method] != sha256_payload(baseline_method)
+            ):
+                raise BenchmarkAuditError(
+                    "robustness baseline rank commitment is invalid"
+                )
+            baseline = np.asarray(baseline_method, dtype=float)
+            correlations: list[float | None] = []
+            overlaps: list[float] = []
+            for column in range(response_count):
+                left, right = baseline[:, column], scores[method][:, column]
+                finite = np.isfinite(left) & np.isfinite(right)
+                correlation = None
+                if finite.sum() >= 2:
+                    lrank = np.argsort(
+                        np.argsort(left[finite], kind="stable"), kind="stable"
+                    )
+                    rrank = np.argsort(
+                        np.argsort(right[finite], kind="stable"), kind="stable"
+                    )
+                    value = np.corrcoef(lrank, rrank)[0, 1]
+                    correlation = float(value) if np.isfinite(value) else None
+                correlations.append(correlation)
+                ltop = set(np.argsort(
+                    np.where(np.isfinite(left), left, np.inf)
+                )[:k])
+                rtop = set(np.argsort(
+                    np.where(np.isfinite(right), right, np.inf)
+                )[:k])
+                overlaps.append(
+                    len(ltop & rtop) / len(ltop | rtop) if ltop | rtop else 1.0
+                )
+            correlations_by_method[method] = correlations
+            overlaps_by_method[method] = overlaps
+        if (
+            arm.get("rank_correlation_by_method") != correlations_by_method
+            or arm.get("top_k_jaccard_by_method") != overlaps_by_method
         ):
             raise BenchmarkAuditError("robustness ranking metrics do not recompute")
-        all_correlations.extend(value for value in correlations if value is not None)
-        all_top.extend(overlaps)
+        all_correlations.extend(
+            value for value in correlations_by_method["omnib"] if value is not None
+        )
+        all_top.extend(overlaps_by_method["omnib"])
     if (
         record.get("rank_correlation")
         != (float(np.mean(all_correlations)) if all_correlations else None)
@@ -2348,6 +2432,14 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         "power cells do not share the frozen backbone calibration bank"
                     )
         if payload.get("experiment") == "encoding":
+            registry_row = next(
+                row for row in evidence.registry
+                if row.scenario_id == payload["scenario_id"]
+            )
+            if payload.get("bootstrap_B") != registry_row.bootstrap_B:
+                raise BenchmarkAuditError(
+                    "encoding robustness calibration B differs from registry"
+                )
             checks = payload.get("exact_checks")
             robustness = payload.get("robustness_checks")
             if (
@@ -2387,10 +2479,22 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     )
             if payload.get("all_required_exact") is not recomputed_all_required:
                 raise BenchmarkAuditError("encoding aggregate decision differs from checks")
+            robustness_stage_fields = (
+                {
+                    "qa_fwer", "qa_power", "qa_absolute_power_regret",
+                    "qa_power_by_architecture",
+                }
+                if payload.get("stage") == "pilot"
+                else {
+                    "fwer", "power", "absolute_power_regret",
+                    "power_by_architecture",
+                }
+            )
             for perturbation, record in robustness.items():
                 if (
                     not isinstance(record, Mapping)
-                    or set(record) != _ENCODING_ROBUSTNESS_SCHEMA
+                    or set(record)
+                    != (_ENCODING_ROBUSTNESS_SCHEMA_BASE | robustness_stage_fields)
                     or record.get("status") not in {"completed", "failed"}
                     or not isinstance(record.get("note"), str)
                 ):
@@ -2405,11 +2509,16 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 ):
                     raise BenchmarkAuditError("failed robustness record lacks an error")
                 for field, lower, upper in (
-                    ("fwer", 0.0, 1.0), ("power", 0.0, 1.0),
+                    (("qa_fwer" if payload.get("stage") == "pilot" else "fwer"),
+                     0.0, 1.0),
+                    (("qa_power" if payload.get("stage") == "pilot" else "power"),
+                     0.0, 1.0),
                     ("rank_correlation", -1.0, 1.0),
                     ("top_k_jaccard", 0.0, 1.0),
                     ("non_estimable_rate", 0.0, 1.0),
-                    ("absolute_power_regret", 0.0, 1.0),
+                    (("qa_absolute_power_regret"
+                      if payload.get("stage") == "pilot"
+                      else "absolute_power_regret"), 0.0, 1.0),
                 ):
                     value = record.get(field)
                     if value is not None and (

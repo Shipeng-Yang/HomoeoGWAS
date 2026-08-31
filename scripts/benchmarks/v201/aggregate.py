@@ -73,6 +73,7 @@ _COMMON = (
     "design_hash", "request_hash", "context_fingerprint", "failed",
     "failure_type", "runtime_seconds",
 )
+_ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
 
 TABLE_SCHEMAS: dict[str, tuple[str, ...]] = {
     "fit_pve_recovery.tsv": _COMMON + (
@@ -304,8 +305,19 @@ def _file_sha256(path: Path, label: str) -> str:
         raise BenchmarkAggregateError(f"{label} is missing or unreadable") from error
 
 
+def _uses_internal_symlink(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(
+        (root / Path(*relative.parts[:index])).is_symlink()
+        for index in range(1, len(relative.parts) + 1)
+    )
+
+
 def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
-    if path.is_symlink():
+    if _uses_internal_symlink(root, path):
         raise BenchmarkAggregateError("config manifest must not be a symlink")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
@@ -327,7 +339,7 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
         ):
             raise BenchmarkAggregateError("config manifest has invalid or duplicate paths")
         unresolved = root / relative
-        if unresolved.is_symlink() or not unresolved.is_file():
+        if _uses_internal_symlink(root, unresolved) or not unresolved.is_file():
             raise BenchmarkAggregateError("declared config is not a regular file")
         candidate = unresolved.resolve()
         try:
@@ -403,7 +415,7 @@ def _validate_config_manifest(root: Path, path: Path) -> dict[str, str]:
 
 
 def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]]:
-    if path.is_symlink():
+    if _uses_internal_symlink(root, path):
         raise BenchmarkAggregateError("input manifest must not be a symlink")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
@@ -416,18 +428,46 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
     if not rows:
         raise BenchmarkAggregateError("input manifest is empty")
     records: dict[str, dict[str, Any]] = {}
+    seen_resolved: set[Path] = set()
+    root = root.resolve()
     for row in rows:
-        relative = row["path"]
-        if not relative or relative in records or not row["type"]:
+        declared = row["path"]
+        if not declared or declared in records or not row["type"]:
             raise BenchmarkAggregateError("input manifest has invalid or duplicate paths")
-        candidate = root / relative
+        declared_path = Path(declared)
+        if declared_path.is_absolute():
+            candidate = declared_path
+            if candidate.is_symlink():
+                raise BenchmarkAggregateError("declared input is not a regular file")
+            resolved = candidate.resolve()
+            if str(candidate) != str(resolved):
+                raise BenchmarkAggregateError(
+                    "external input path must be a normalized absolute path"
+                )
+            record_key = str(resolved)
+        else:
+            if not declared.startswith("inputs/"):
+                raise BenchmarkAggregateError(
+                    "internal input path must be rooted below inputs/"
+                )
+            candidate = root / declared_path
+            if _uses_internal_symlink(root, candidate):
+                raise BenchmarkAggregateError("declared input is not a regular file")
+            resolved = candidate.resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError as error:
+                raise BenchmarkAggregateError(
+                    "input manifest path escapes benchmark root"
+                ) from error
+            record_key = declared
+        if record_key in records:
+            raise BenchmarkAggregateError("input manifest has invalid or duplicate paths")
         if candidate.is_symlink() or not candidate.is_file():
             raise BenchmarkAggregateError("declared input is not a regular file")
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as error:
-            raise BenchmarkAggregateError("input manifest path escapes benchmark root") from error
+        if resolved in seen_resolved:
+            raise BenchmarkAggregateError("input manifest has invalid or duplicate paths")
+        seen_resolved.add(resolved)
         try:
             size = int(row["size"])
         except (TypeError, ValueError) as error:
@@ -437,7 +477,7 @@ def _validate_input_manifest(root: Path, path: Path) -> dict[str, dict[str, Any]
             resolved, "declared input"
         ) != digest:
             raise BenchmarkAggregateError("declared input size/hash mismatch")
-        records[relative] = {
+        records[record_key] = {
             "size": size, "sha256": digest, "type": row["type"],
         }
     declared_inputs = {
@@ -474,6 +514,8 @@ def _validate_context_artifact(
     input_record = input_records.get(str(artifact_path))
     if (
         not isinstance(artifact_path, str)
+        or Path(artifact_path).is_absolute()
+        or not artifact_path.startswith("inputs/")
         or not isinstance(input_record, Mapping)
         or input_record.get("type") != "omnib_context"
         or input_record.get("sha256") != record.get("artifact_sha256")
@@ -481,7 +523,12 @@ def _validate_context_artifact(
         raise BenchmarkAggregateError(
             f"context artifact is not bound to the input manifest: {context_key}"
         )
-    artifact = _strict_json(root / artifact_path)
+    artifact_file = root / artifact_path
+    if _uses_internal_symlink(root, artifact_file):
+        raise BenchmarkAggregateError(
+            f"context artifact must be an internal regular file: {context_key}"
+        )
+    artifact = _strict_json(artifact_file)
     expected_artifact_fields = {
         "schema", "backbone", "context_manifest", "context_fingerprint",
         "family_manifest", "family_hash", "group_count", "ordered_family_ids",
@@ -758,7 +805,10 @@ def load_evidence(root: str | Path) -> LoadedEvidence:
     benchmark_root = requested_root.resolve()
     lock_path = benchmark_root / "design_lock.json"
     registry_path = benchmark_root / "scenario_registry.tsv"
-    if lock_path.is_symlink() or registry_path.is_symlink():
+    if (
+        _uses_internal_symlink(benchmark_root, lock_path)
+        or _uses_internal_symlink(benchmark_root, registry_path)
+    ):
         raise BenchmarkAggregateError("design lock/registry must not be symlinks")
     lock = _strict_json(lock_path)
     if lock.get("schema") != "homoeogwas-v201-benchmark-lock-v1":
@@ -1236,9 +1286,11 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
     elif experiment == "power":
         name = "omnib_power_replicates.tsv"
         negative_control = registry.parameters.get("control_type") == "negative"
+        formal = payload.get("stage") == "formal"
         decisions = payload.get(
-            "specificity_by_method" if negative_control else (
-                "causal_detection_by_method" if payload.get("stage") == "formal"
+            ("specificity_by_method" if formal else "qa_specificity_by_method")
+            if negative_control else (
+                "causal_detection_by_method" if formal
                 else "qa_causal_detection_by_method"
             )
         )
@@ -1257,8 +1309,7 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
         if set(decisions) != set(METHOD_NAMES):
             raise BenchmarkAggregateError("power method set differs from locked comparators")
         thresholds = payload.get(
-            "thresholds" if payload.get("stage") == "formal"
-            else "qa_cutoffs_by_method", {}
+            "thresholds" if formal else "qa_cutoffs_by_method", {}
         )
         for method in METHOD_NAMES:
             method_decisions = decisions[method]
@@ -1296,7 +1347,10 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 ranking_hash_identical=record.get("ranking_hash_identical"),
                 rejection_sets_identical=record.get("rejection_sets_identical")))
         for perturbation, record in sorted(payload.get("robustness_checks", {}).items()):
-            strata = record.get("power_by_architecture")
+            pilot = payload.get("stage") == "pilot"
+            strata = record.get(
+                "qa_power_by_architecture" if pilot else "power_by_architecture"
+            )
             heldout = record.get("heldout")
             if record.get("status") != "completed":
                 output[name].append(_empty(name, common, perturbation=perturbation,
@@ -1306,7 +1360,9 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 continue
             if not isinstance(strata, Mapping) or not isinstance(heldout, Mapping):
                 raise BenchmarkAggregateError("robustness raw response evidence is missing")
-            heldout_decisions = heldout.get("rejections_by_method")
+            heldout_decisions = heldout.get(
+                "qa_rejections_by_method" if pilot else "rejections_by_method"
+            )
             heldout_scores = heldout.get("p_by_method")
             if not isinstance(heldout_decisions, Mapping) or not isinstance(
                 heldout_scores, Mapping
@@ -1315,20 +1371,30 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             for architecture, stratum in sorted(strata.items()):
                 if not isinstance(stratum, Mapping):
                     raise BenchmarkAggregateError("robustness architecture evidence is invalid")
-                power_decisions = stratum.get("detection_by_method")
+                power_decisions = stratum.get(
+                    "qa_detection_by_method" if pilot else "detection_by_method"
+                )
                 power_scores = stratum.get("p_by_method")
                 if not isinstance(power_decisions, Mapping) or not isinstance(
                     power_scores, Mapping
                 ):
                     raise BenchmarkAggregateError("robustness power evidence is invalid")
-                correlations = [
-                    float(value) for value in stratum.get("rank_correlation_by_response", [])
-                    if value is not None
-                ]
-                overlaps = [
-                    float(value) for value in stratum.get("top_k_jaccard_by_response", [])
-                    if value is not None
-                ]
+                correlations_by_method = stratum.get("rank_correlation_by_method")
+                overlaps_by_method = stratum.get("top_k_jaccard_by_method")
+                regret_by_method = stratum.get(
+                    "qa_absolute_power_regret_by_method"
+                    if pilot else "absolute_power_regret_by_method"
+                )
+                if not all(
+                    isinstance(value, Mapping)
+                    and set(value) == set(_ROBUSTNESS_METHODS)
+                    for value in (
+                        correlations_by_method, overlaps_by_method, regret_by_method,
+                    )
+                ):
+                    raise BenchmarkAggregateError(
+                        "robustness method-specific metrics are invalid"
+                    )
                 for method in sorted(power_decisions):
                     fwer_flags = heldout_decisions.get(method)
                     power_flags = power_decisions.get(method)
@@ -1366,14 +1432,26 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                         check_kind="robustness", required=record.get("required"),
                         status=record.get("status"), architecture=architecture,
                         method=method,
-                        rank_correlation=(sum(correlations) / len(correlations)
-                                          if correlations else None),
-                        top_k_jaccard=(sum(overlaps) / len(overlaps)
-                                       if overlaps else None),
+                        rank_correlation=(
+                            sum(correlations) / len(correlations)
+                            if (correlations := [
+                                float(value)
+                                for value in correlations_by_method[method]
+                                if value is not None
+                            ]) else None
+                        ),
+                        top_k_jaccard=(
+                            sum(overlaps) / len(overlaps)
+                            if (overlaps := [
+                                float(value)
+                                for value in overlaps_by_method[method]
+                                if value is not None
+                            ]) else None
+                        ),
                         non_estimable_rate=(non_estimable / non_estimable_total),
                         non_estimable_count=non_estimable,
                         non_estimable_total=non_estimable_total,
-                        absolute_power_regret=stratum.get("absolute_power_regret"),
+                        absolute_power_regret=regret_by_method[method],
                         realized_marker_design=record.get("realized_marker_design"),
                         **_binomial_cells(
                             "fwer" if payload.get("stage") == "formal" else "qa_fwer",

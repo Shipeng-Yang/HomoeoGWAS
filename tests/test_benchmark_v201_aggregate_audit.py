@@ -17,6 +17,7 @@ from scripts.benchmarks.v201.aggregate import (
     BenchmarkAggregateError,
     _validate_config_manifest,
     _validate_context_artifact,
+    _validate_input_manifest,
     aggregate_benchmark,
     table_schemas,
 )
@@ -27,6 +28,7 @@ from scripts.benchmarks.v201.audit import (
     _audit_families_and_parallel,
     _audit_fit_scenario,
     _audit_power_evidence,
+    _audit_robustness_record,
     _audit_scaling_scenario,
     _conditional_score_matrices,
     _fit_scan_gates,
@@ -47,6 +49,7 @@ from scripts.benchmarks.v201.contracts import (
 from scripts.benchmarks.v201.shards import write_shard_exclusive
 from scripts.benchmarks.v201.track_fit import run_fit_replicate
 from scripts.benchmarks.v201.track_omnib import (
+    _ranking_metrics,
     build_synthetic_omnib_context,
     run_conditional_bank,
     run_global_vc_bank,
@@ -311,6 +314,127 @@ def test_audit_seals_then_detects_changed_shard(tmp_path, monkeypatch):
     shard.write_text(canonical_json(payload) + "\n", encoding="utf-8")
     with pytest.raises(BenchmarkAuditError, match="shard hash mismatch"):
         audit_benchmark(root)
+
+
+def test_input_manifest_accepts_only_normalized_external_regular_files(tmp_path):
+    root = tmp_path / "benchmark"
+    inputs = root / "inputs"
+    inputs.mkdir(parents=True)
+    external = tmp_path / "real-input.bed"
+    external.write_bytes(b"real-plink-bed")
+    digest = hashlib.sha256(external.read_bytes()).hexdigest()
+    manifest = inputs / "manifest.tsv"
+
+    def write(path: str, *, sha256: str = digest) -> None:
+        manifest.write_text(
+            "path\tsize\tsha256\ttype\n"
+            f"{path}\t{external.stat().st_size}\t{sha256}\tbed\n",
+            encoding="utf-8",
+        )
+
+    write(str(external.resolve()))
+    records = _validate_input_manifest(root, manifest)
+    assert records == {
+        str(external.resolve()): {
+            "size": external.stat().st_size,
+            "sha256": digest,
+            "type": "bed",
+        }
+    }
+
+    family_ids = [f"group-{index:03d}" for index in range(80)]
+    family = {
+        "subgenomes": ["A", "B"], "group_ids": family_ids,
+        "genes": [[f"a-{index}", f"b-{index}"] for index in range(80)],
+    }
+    context = {
+        "family": family,
+        "subgenomes": [
+            {"label": label, "X": {}, "gene_snp": [], "samples": ["sample-1"]}
+            for label in ("A", "B")
+        ],
+        "sample_idx": {"values": [0]},
+        "phenotype": {"shape": [1]},
+    }
+    artifact = {
+        "schema": "homoeogwas-v201-omnib-context-v1",
+        "backbone": "cotton", "context_manifest": context,
+        "context_fingerprint": sha256_payload(context),
+        "family_manifest": family, "family_hash": sha256_payload(family),
+        "group_count": 80, "ordered_family_ids": family_ids,
+        "ordered_family_ids_hash": sha256_payload(family_ids),
+        "source_inputs": [{
+            "path": str(external.resolve()), "sha256": digest, "type": "bed",
+        }],
+    }
+    artifact_path = inputs / "cotton.context.json"
+    artifact_path.write_text(canonical_json(artifact) + "\n", encoding="utf-8")
+    artifact_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    manifest.write_text(
+        "path\tsize\tsha256\ttype\n"
+        f"{external.resolve()}\t{external.stat().st_size}\t{digest}\tbed\n"
+        f"inputs/cotton.context.json\t{artifact_path.stat().st_size}\t"
+        f"{artifact_digest}\tomnib_context\n",
+        encoding="utf-8",
+    )
+    context_records = _validate_input_manifest(root, manifest)
+    _validate_context_artifact(root, "cotton", {
+        "artifact_path": "inputs/cotton.context.json",
+        "artifact_sha256": artifact_digest,
+        "group_count": 80, "ordered_family_ids": family_ids,
+        "ordered_family_ids_hash": sha256_payload(family_ids),
+        "context_fingerprint": sha256_payload(context),
+        "family_hash": sha256_payload(family),
+    }, context_records)
+
+    real_context_dir = inputs / "real-contexts"
+    real_context_dir.mkdir()
+    linked_artifact = real_context_dir / "cotton.context.json"
+    linked_artifact.write_bytes(artifact_path.read_bytes())
+    linked_context_dir = inputs / "linked-contexts"
+    linked_context_dir.symlink_to(real_context_dir, target_is_directory=True)
+    linked_key = "inputs/linked-contexts/cotton.context.json"
+    linked_records = {
+        str(external.resolve()): context_records[str(external.resolve())],
+        linked_key: {
+            "size": linked_artifact.stat().st_size,
+            "sha256": artifact_digest,
+            "type": "omnib_context",
+        },
+    }
+    with pytest.raises(BenchmarkAggregateError, match="internal regular file"):
+        _validate_context_artifact(root, "cotton", {
+            "artifact_path": linked_key,
+            "artifact_sha256": artifact_digest,
+            "group_count": 80, "ordered_family_ids": family_ids,
+            "ordered_family_ids_hash": sha256_payload(family_ids),
+            "context_fingerprint": sha256_payload(context),
+            "family_hash": sha256_payload(family),
+        }, linked_records)
+
+    write(str(external.parent / "missing" / ".." / external.name))
+    with pytest.raises(BenchmarkAggregateError, match="normalized absolute"):
+        _validate_input_manifest(root, manifest)
+
+    link = tmp_path / "external-link.bed"
+    link.symlink_to(external)
+    write(str(link))
+    with pytest.raises(BenchmarkAggregateError, match="regular file"):
+        _validate_input_manifest(root, manifest)
+
+    write(str(external.resolve()), sha256="0" * 64)
+    with pytest.raises(BenchmarkAggregateError, match="size/hash mismatch"):
+        _validate_input_manifest(root, manifest)
+
+    row = (
+        f"{external.resolve()}\t{external.stat().st_size}\t{digest}\tbed\n"
+    )
+    manifest.write_text(
+        "path\tsize\tsha256\ttype\n" + row + row,
+        encoding="utf-8",
+    )
+    with pytest.raises(BenchmarkAggregateError, match="duplicate"):
+        _validate_input_manifest(root, manifest)
 
 
 def test_audit_document_self_hash_is_verified_on_replay(tmp_path, monkeypatch):
@@ -840,22 +964,42 @@ def test_robustness_table_is_architecture_method_stratified_from_raw_responses()
         method: [[0.2, 0.01], [0.8, 0.9]] for method in methods
     }
     power_scores = {
-        method: [[0.01, 0.2], [0.8, 0.9]] for method in methods
+        "omnib": [[0.01, 0.2], [0.8, 0.9]],
+        "minor_burden": [[0.8, 0.9], [0.01, 0.2]],
+        "pc1": [[0.2, 0.01], [0.9, 0.8]],
+        "kernel_hadamard": [[0.9, 0.8], [0.2, 0.01]],
+    }
+    correlations = {
+        "omnib": [1.0, 0.5], "minor_burden": [0.5, 0.0],
+        "pc1": [0.0, -0.5], "kernel_hadamard": [-0.5, -1.0],
+    }
+    overlaps = {
+        "omnib": [1.0, 0.5], "minor_burden": [0.5, 0.5],
+        "pc1": [0.5, 0.0], "kernel_hadamard": [0.0, 0.0],
     }
     record = {
         "status": "completed", "required": None,
-        "calibration": {"thresholds": {method: 0.05 for method in methods}},
+        "calibration": {
+            "qa_cutoffs_by_method": {method: 0.05 for method in methods}
+        },
         "heldout": {
             "p_by_method": heldout_scores,
-            "rejections_by_method": {method: [False, True] for method in methods},
+            "qa_rejections_by_method": {
+                method: [False, True] for method in methods
+            },
         },
-        "power_by_architecture": {
+        "qa_power_by_architecture": {
             "minor_burden_aligned": {
                 "p_by_method": power_scores,
-                "detection_by_method": {method: [True, False] for method in methods},
-                "rank_correlation_by_response": [1.0, 0.5],
-                "top_k_jaccard_by_response": [1.0, 0.5],
-                "absolute_power_regret": 0.25,
+                "qa_detection_by_method": {
+                    method: [True, False] for method in methods
+                },
+                "rank_correlation_by_method": correlations,
+                "top_k_jaccard_by_method": overlaps,
+                "qa_absolute_power_regret_by_method": {
+                    "omnib": 0.25, "minor_burden": None,
+                    "pc1": None, "kernel_hadamard": None,
+                },
             }
         },
     }
@@ -884,9 +1028,172 @@ def test_robustness_table_is_architecture_method_stratified_from_raw_responses()
         assert row["qa_power_total"] == 2
         assert row["fwer_successes"] is None
         assert row["power_successes"] is None
-        assert row["rank_correlation"] == 0.75
-        assert row["top_k_jaccard"] == 0.75
-        assert row["absolute_power_regret"] == 0.25
+    by_method = {row["method"]: row for row in rows}
+    assert {method: row["rank_correlation"] for method, row in by_method.items()} == {
+        method: np.mean(values) for method, values in correlations.items()
+    }
+    assert {method: row["top_k_jaccard"] for method, row in by_method.items()} == {
+        method: np.mean(values) for method, values in overlaps.items()
+    }
+    assert by_method["omnib"]["absolute_power_regret"] == 0.25
+    assert all(
+        by_method[method]["absolute_power_regret"] is None
+        for method in ("minor_burden", "pc1", "kernel_hadamard")
+    )
+
+
+def test_robustness_audit_recomputes_each_method_and_rejects_formal_pilot_keys():
+    methods = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
+    family_ids = [f"group-{index:02d}" for index in range(12)]
+    calibration_count, response_count = 199, 20
+    calibration_ids = [f"cal-{index}" for index in range(calibration_count)]
+    heldout_ids = [f"held-{index}" for index in range(response_count)]
+
+    def bank_scores(count: int, offset: float = 0.0) -> dict[str, list[list[float]]]:
+        return {
+            method: [
+                [0.40 + offset + row / 1_000 + column / 100_000
+                 for column in range(count)]
+                for row in range(len(family_ids))
+            ]
+            for method in methods
+        }
+
+    calibration_scores = bank_scores(calibration_count)
+    heldout_scores = bank_scores(response_count, 0.05)
+    thresholds = {
+        method: sorted(
+            min(row[column] for row in values)
+            for column in range(calibration_count)
+        )[9]
+        for method, values in calibration_scores.items()
+    }
+    heldout_decisions = {
+        method: [False] * response_count for method in methods
+    }
+    calibration = {
+        "response_ids": calibration_ids,
+        "seeds": list(range(calibration_count)),
+        "response_hash": "1" * 64,
+        "p_by_method": calibration_scores,
+        "p_hashes": {
+            method: sha256_payload(values)
+            for method, values in calibration_scores.items()
+        },
+        "qa_cutoffs_by_method": thresholds,
+    }
+    heldout = {
+        "response_ids": heldout_ids,
+        "seeds": list(range(10_000, 10_000 + response_count)),
+        "response_hash": "2" * 64,
+        "p_by_method": heldout_scores,
+        "p_hashes": {
+            method: sha256_payload(values)
+            for method, values in heldout_scores.items()
+        },
+        "qa_rejections_by_method": heldout_decisions,
+    }
+    architectures = [
+        "minor_burden_aligned", "pc1_distributed", "kernel_multidimensional",
+        "single_snp_pair", "mixed_sign",
+    ]
+    strata = {}
+    permutations = {
+        "omnib": np.arange(12),
+        "minor_burden": np.arange(12)[::-1],
+        "pc1": np.roll(np.arange(12), 3),
+        "kernel_hadamard": np.roll(np.arange(12), 7),
+    }
+    for architecture_index, architecture in enumerate(architectures):
+        baseline = bank_scores(response_count, 0.10)
+        candidate = {
+            method: np.asarray(values, dtype=float)[permutations[method]].tolist()
+            for method, values in baseline.items()
+        }
+        correlations = {}
+        overlaps = {}
+        for method in methods:
+            correlations[method], overlaps[method] = _ranking_metrics(
+                np.asarray(baseline[method]), np.asarray(candidate[method]), family_ids,
+            )
+        detection = {
+            method: [False] * response_count for method in methods
+        }
+        powers = {method: 0.0 for method in methods}
+        strata[architecture] = {
+            "response_ids": [
+                f"power-{architecture_index}-{index}"
+                for index in range(response_count)
+            ],
+            "seeds": [
+                20_000 + architecture_index * 100 + index
+                for index in range(response_count)
+            ],
+            "response_hash": f"{architecture_index + 3:x}" * 64,
+            "causal_group_ids": [family_ids[0]],
+            "p_by_method": candidate,
+            "p_hashes": {
+                method: sha256_payload(values) for method, values in candidate.items()
+            },
+            "baseline_p_by_method": baseline,
+            "baseline_p_hashes": {
+                method: sha256_payload(values) for method, values in baseline.items()
+            },
+            "rank_correlation_by_method": correlations,
+            "top_k_jaccard_by_method": overlaps,
+            "qa_detection_by_method": detection,
+            "qa_power_by_method": powers,
+            "qa_absolute_power_regret_by_method": {
+                "omnib": 0.0, "minor_burden": None,
+                "pc1": None, "kernel_hadamard": None,
+            },
+        }
+    record = {
+        "status": "completed", "error_type": None, "message": None,
+        "rank_correlation": float(np.mean([
+            value for arm in strata.values()
+            for value in arm["rank_correlation_by_method"]["omnib"]
+            if value is not None
+        ])),
+        "top_k": 10,
+        "top_k_jaccard": float(np.mean([
+            value for arm in strata.values()
+            for value in arm["top_k_jaccard_by_method"]["omnib"]
+        ])),
+        "non_estimable_rate": 0.0,
+        "realized_marker_design": None,
+        "note": "fixture",
+        "design_ruling": {
+            "interaction_pve": 0.05, "causal_groups": 1,
+            "architectures": architectures, "calibration_count": 199,
+            "heldout_count": 20, "power_count_per_architecture": 20,
+            "stratify_by_architecture": True,
+            "component_regret_reference": [
+                "minor_burden", "pc1", "kernel_hadamard",
+            ],
+        },
+        "calibration": calibration, "heldout": heldout,
+        "qa_power_by_architecture": strata,
+        "qa_fwer": 0.0, "qa_power": None,
+        "qa_absolute_power_regret": None,
+    }
+    payload = {
+        "stage": "pilot", "bootstrap_B": 199,
+        "pair_edges_per_group": 1, "family_ids": family_ids,
+    }
+    _audit_robustness_record("missingness_2pct", record, payload)
+
+    tampered = copy.deepcopy(record)
+    tampered["qa_power_by_architecture"][architectures[0]][
+        "rank_correlation_by_method"
+    ]["pc1"][0] = 0.123
+    with pytest.raises(BenchmarkAuditError, match="ranking metrics"):
+        _audit_robustness_record("missingness_2pct", tampered, payload)
+
+    cross_stage = copy.deepcopy(record)
+    cross_stage["calibration"]["thresholds"] = thresholds
+    with pytest.raises(BenchmarkAuditError, match="raw stage schema"):
+        _audit_robustness_record("missingness_2pct", cross_stage, payload)
 
 
 def test_family_size_audit_recomputes_response_level_fwer():

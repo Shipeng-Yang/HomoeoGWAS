@@ -140,6 +140,24 @@ def test_power_scenarios_declare_independent_calibration_bank_size():
         )
 
 
+def test_encoding_robustness_uses_stage_bootstrap_width_for_calibration_only():
+    for stage, calibration_count, response_count in (
+        ("pilot", 199, 20), ("formal", 2_000, 500),
+    ):
+        rows = [
+            row for row in build_scenarios(stage)
+            if row.track == "omnib"
+            and row.parameters["experiment"] == "encoding"
+        ]
+        assert rows
+        for row in rows:
+            design = row.parameters["robustness_design"]
+            assert row.bootstrap_B == calibration_count
+            assert design["calibration_count"] == row.bootstrap_B
+            assert design["heldout_count"] == response_count
+            assert design["power_count_per_architecture"] == response_count
+
+
 def test_registry_has_global_vc_and_locked_family_size_stress_matrix():
     rows = [row for row in build_scenarios("formal") if row.track == "omnib"]
     global_rows = [row for row in rows if row.parameters["experiment"] == "global_vc"]
