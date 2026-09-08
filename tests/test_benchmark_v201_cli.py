@@ -111,12 +111,51 @@ def test_generated_pilot_interaction_config_is_noninferential_b199(tmp_path):
             "groups": str(groups), "phenotype": str(phenotype),
             "sample_col": "sample", "trait": "trait",
         },
-        "pilot", tmp_path / "results",
+        "pilot", tmp_path / "results", backbone="cotton",
     )
 
     assert config["interact"]["calibration"] == {
         "method": "bootstrap", "B": 199, "seed": 2026, "qa_only": True,
     }
+    assert config["interact"]["benchmark_identity"] == {
+        "panel_id": "REALG.CGVD1245",
+        "sample_context": "full",
+        "feature_seed": 5_177_468_918_036_905_819,
+    }
+
+
+def test_real_panel_identity_is_frozen_and_cannot_be_overridden(tmp_path):
+    groups = tmp_path / "groups.tsv"
+    phenotype = tmp_path / "phenotype.tsv"
+    mappings = {label: tmp_path / f"{label}.npz" for label in ("A", "B", "D")}
+    for path in (groups, phenotype, *mappings.values()):
+        path.write_bytes(b"fixture")
+    entry = {
+        "subgenomes": ["A", "B", "D"],
+        "bed_prefixes": {
+            label: str(tmp_path / label / "all") for label in mappings
+        },
+        "snp_to_gene": {label: str(path) for label, path in mappings.items()},
+        "groups": str(groups),
+        "phenotype": str(phenotype),
+        "sample_col": "sample",
+        "trait": "trait",
+    }
+
+    config = cli._interact_config(
+        entry, "pilot", tmp_path / "results", backbone="wheat",
+    )
+    assert config["interact"]["benchmark_identity"] == {
+        "panel_id": "REALG.WATKINS_F2143",
+        "sample_context": "full",
+        "feature_seed": 4_248_740_791_639_463_210,
+    }
+
+    with pytest.raises(cli.CLIError, match="frozen identity"):
+        cli._interact_config(
+            {**entry, "feature_seed": 17},
+            "pilot", tmp_path / "results", backbone="wheat",
+        )
 
 
 def test_aggregate_and_audit_delegate_to_approved_task9_functions(tmp_path, monkeypatch):

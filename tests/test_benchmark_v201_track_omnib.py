@@ -79,6 +79,8 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
         f"  groups: {groups}\n  statistic: omniB\n  hypothesis_unit: group\n"
         "  subset_order: 2\n  family_scope: primary_only\n  primary_transform: INT\n"
         "  primary_multiplicity: bootstrap_minp\n"
+        "  benchmark_identity: {panel_id: FIXTURE, sample_context: full, "
+        "feature_seed: 1902}\n"
         f"  genotype: {{A: {genotype['A']}, B: {genotype['B']}}}\n"
         f"  snp_to_gene: {{A: {mapping['A']}, B: {mapping['B']}}}\n"
         f"  phenotype: {phenotype}\n  sample_col: sample\n  trait: trait\n"
@@ -92,7 +94,13 @@ def test_real_plink_context_calibration_restart_and_power(tmp_path):
         for line in phenotype.read_text().splitlines()[1:]
     ])
     expected = OmniBBenchmarkContext(
-        subdata, family, phenotype_values, np.arange(72)
+        subdata,
+        family,
+        phenotype_values,
+        np.arange(72),
+        panel_id="FIXTURE",
+        sample_context="full",
+        feature_seed=1902,
     )
     context_manifest = _context_manifest(expected)
     source_paths = [groups, phenotype]
@@ -296,7 +304,7 @@ def test_context_canonicalizes_subgenome_mapping_order(tiny_context):
     assert tuple(reordered.subdata) == tiny_context.family.subgenomes
 
 
-def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
+def test_independent_banks_have_disjoint_responses_and_equal_identities(tiny_context):
     calibration = run_conditional_bank(
         tiny_context,
         bank="calibration",
@@ -333,6 +341,26 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
     assert not np.shares_memory(calibration.responses, power.responses)
     assert calibration.family_ids == evaluation.family_ids == power.family_ids
     assert calibration.family_hash == evaluation.family_hash == power.family_hash
+    assert (
+        calibration.prepared_design_sha256
+        == evaluation.prepared_design_sha256
+        == power.prepared_design_sha256
+    )
+    assert (
+        calibration.feature_cache_sha256
+        == evaluation.feature_cache_sha256
+        == power.feature_cache_sha256
+    )
+    assert (
+        calibration.fixed_mask_sha256
+        == evaluation.fixed_mask_sha256
+        == power.fixed_mask_sha256
+    )
+    assert (
+        calibration.marker_mask_sha256
+        == evaluation.marker_mask_sha256
+        == power.marker_mask_sha256
+    )
     assert calibration.response_hash != evaluation.response_hash != power.response_hash
     assert calibration.runtime_seconds >= 0.0
     assert calibration.null_covariance["shape"] == [72, 72]
@@ -348,6 +376,76 @@ def test_calibration_and_evaluation_seed_namespaces_are_disjoint(tiny_context):
     assert evaluation.response_hash != evaluation.calibration_reference["response_hash"]
     assert evaluation.calibration_reference["shares_memory"] is False
     assert evaluation.calibration_reference["response_hash"] == calibration.response_hash
+    track_omnib_module._assert_independent_banks(calibration, evaluation)
+    with pytest.raises(RuntimeError, match="prepared identity"):
+        track_omnib_module._assert_independent_banks(
+            calibration,
+            replace(evaluation, prepared_design_sha256="0" * 64),
+        )
+
+
+def test_over_cap_power_transfers_one_feature_and_prepared_identity():
+    rng = np.random.default_rng(917)
+    n = 64
+    subdata = {
+        "A": SubgenomeData(
+            X=rng.integers(0, 3, size=(n, 180)).astype(float),
+            gene_snp={"gA": np.arange(180)},
+            samples=[f"s{index}" for index in range(n)],
+            chunk=None,
+        ),
+        "B": SubgenomeData(
+            X=rng.integers(0, 3, size=(n, 3)).astype(float),
+            gene_snp={"gB": np.arange(3)},
+            samples=[f"s{index}" for index in range(n)],
+            chunk=None,
+        ),
+    }
+    family = track_omnib_module.MasterGroupFamily(
+        ("A", "B"), ("g0",), (("gA", "gB"),)
+    )
+    context = OmniBBenchmarkContext(
+        subdata,
+        family,
+        rng.normal(size=n),
+        np.arange(n),
+        panel_id="SYNTH.OVERCAP",
+        sample_context="full",
+        feature_seed=1907,
+        retained_variant_masks={
+            "A": np.ones(180, dtype=bool),
+            "B": np.ones(3, dtype=bool),
+        },
+    )
+    calibration_id = "B.conditional.overcap.gaussian.calibration"
+    calibration = run_conditional_bank(
+        context,
+        bank="calibration",
+        count=1,
+        design_hash="c" * 64,
+        n_jobs=1,
+        scenario_id=calibration_id,
+    )
+    result = run_power_replicate(
+        context,
+        calibration_bank=calibration,
+        calibration_scenario_id=calibration_id,
+        replicate=0,
+        architecture="minor_burden_aligned",
+        interaction_pve=0.05,
+        causal_groups=1,
+        calibration_count=1,
+        design_hash="c" * 64,
+        qa_only=True,
+        n_jobs=1,
+        scenario_id="B.power.overcap.minor_burden_aligned",
+    )
+
+    target = result["target_bank"]
+    assert target["feature_cache_sha256"] == calibration.feature_cache_sha256
+    assert target["prepared_design_sha256"] == calibration.prepared_design_sha256
+    assert target["fixed_mask_sha256"] == calibration.fixed_mask_sha256
+    assert target["marker_mask_sha256"] == calibration.marker_mask_sha256
 
 
 def test_conditional_bank_rejects_duplicate_seeds_and_method_provenance_tampering(
@@ -400,6 +498,16 @@ def test_omitted_kernel_bank_excludes_declared_kernel_from_fitted_covariance(
         assert metadata["omitted_subgenome"] == omitted
         assert omitted not in metadata["fitted_null_components"]
         assert metadata["fitted_null_covariance_sha256"] == bank.null_covariance["sha256"]
+    gaussian = run_conditional_bank(
+        tiny_context, bank="calibration", count=2,
+        design_hash="5" * 64, n_jobs=1, null_model="gaussian",
+        scenario_id="B.conditional.synthetic.gaussian.calibration",
+    )
+    assert bank.feature_cache_sha256 == gaussian.feature_cache_sha256
+    assert bank.fixed_mask_sha256 == gaussian.fixed_mask_sha256
+    assert bank.marker_mask_sha256 == gaussian.marker_mask_sha256
+    assert bank.null_fit_sha256 != gaussian.null_fit_sha256
+    assert bank.prepared_design_sha256 != gaussian.prepared_design_sha256
 
 
 def test_end_to_end_rejection_uses_group_minp_only(tiny_context):

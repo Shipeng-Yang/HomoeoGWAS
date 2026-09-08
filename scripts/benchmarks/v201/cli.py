@@ -70,6 +70,11 @@ _TARGET_RELEASE = {
 _INPUT_SPEC_SCHEMA = "homoeogwas-v201-benchmark-inputs-v1"
 _LOCK_SCHEMA = "homoeogwas-v201-benchmark-lock-v1"
 _HEX = frozenset("0123456789abcdef")
+_OMNIB_PANEL_IDENTITIES = {
+    "cotton": ("REALG.CGVD1245", 5_177_468_918_036_905_819),
+    "wheat": ("REALG.WATKINS_F2143", 4_248_740_791_639_463_210),
+    "quartet": ("SYNTH.QUARTET", 8_943_763_419_572_680_113),
+}
 
 
 class CLIError(RuntimeError):
@@ -105,7 +110,12 @@ def _measure_operation(operation: Callable[[], Any]) -> tuple[Any, dict[str, Any
 def run_command(argv: Sequence[str]) -> int:
     """Run one installed command without a shell."""
 
-    return subprocess.run(list(argv), check=False).returncode
+    command = list(argv)
+    if command and command[0] == "homoeogwas" and shutil.which(command[0]) is None:
+        environment_launcher = Path(sys.executable).with_name("homoeogwas")
+        if environment_launcher.is_file():
+            command[0] = str(environment_launcher)
+    return subprocess.run(command, check=False).returncode
 
 
 def _add_root(parser: argparse.ArgumentParser) -> None:
@@ -270,7 +280,13 @@ def _write_yaml(path: Path, value: Mapping[str, Any]) -> None:
     )
 
 
-def _interact_config(entry: Mapping[str, Any], stage: str, out_dir: Path) -> dict[str, Any]:
+def _interact_config(
+    entry: Mapping[str, Any],
+    stage: str,
+    out_dir: Path,
+    *,
+    backbone: str,
+) -> dict[str, Any]:
     subgenomes = entry.get("subgenomes")
     bed = entry.get("bed_prefixes")
     mappings = entry.get("snp_to_gene")
@@ -282,6 +298,23 @@ def _interact_config(entry: Mapping[str, Any], stage: str, out_dir: Path) -> dic
         or not isinstance(mappings, Mapping) or set(mappings) != set(subgenomes)
     ):
         raise CLIError("each omniB context needs 2-4 unique subgenomes and exact BED/NPZ maps")
+    if backbone not in _OMNIB_PANEL_IDENTITIES:
+        raise CLIError(f"unknown omniB backbone identity: {backbone}")
+    default_panel_id, default_feature_seed = _OMNIB_PANEL_IDENTITIES[backbone]
+    panel_id = entry.get("panel_id", default_panel_id)
+    sample_context = entry.get("sample_context", "full")
+    feature_seed = entry.get("feature_seed", default_feature_seed)
+    if (
+        not isinstance(panel_id, str) or not panel_id
+        or not isinstance(sample_context, str) or not sample_context
+        or isinstance(feature_seed, bool) or not isinstance(feature_seed, int)
+        or feature_seed < 0
+    ):
+        raise CLIError("invalid omniB panel/sample-context/feature-seed identity")
+    if panel_id != default_panel_id or feature_seed != default_feature_seed:
+        raise CLIError(
+            f"{backbone} omniB panel and feature seed must match the frozen identity"
+        )
     return {
         "interact": {
             "mode": "group", "subgenomes": list(subgenomes),
@@ -289,6 +322,11 @@ def _interact_config(entry: Mapping[str, Any], stage: str, out_dir: Path) -> dic
             "statistic": "omniB", "hypothesis_unit": "group", "subset_order": 2,
             "family_scope": "primary_only", "primary_transform": "INT",
             "primary_multiplicity": "bootstrap_minp",
+            "benchmark_identity": {
+                "panel_id": panel_id,
+                "sample_context": sample_context,
+                "feature_seed": feature_seed,
+            },
             "genotype": {str(label): str(entry["bed_prefixes"][label]) for label in subgenomes},
             "snp_to_gene": {
                 str(label): str(_external_file(entry["snp_to_gene"][label], f"snp_to_gene.{label}"))
@@ -361,6 +399,9 @@ def _context_from_config(config_path: Path) -> OmniBBenchmarkContext:
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     interact = raw["interact"]
+    identity = interact.get("benchmark_identity")
+    if not isinstance(identity, Mapping):
+        raise CLIError("generated omniB config lacks benchmark identity")
     labels = list(interact["subgenomes"])
     subdata = {
         label: _load_subgenome(
@@ -395,7 +436,15 @@ def _context_from_config(config_path: Path) -> OmniBBenchmarkContext:
         raise CLIError("real PLINK subgenomes do not share ordered sample IDs")
     indices = np.asarray([index for index, sample_id in enumerate(reference) if sample_id in values])
     phenotype = np.asarray([values[reference[index]] for index in indices])
-    return OmniBBenchmarkContext(subdata, family, phenotype, indices)
+    return OmniBBenchmarkContext(
+        subdata,
+        family,
+        phenotype,
+        indices,
+        panel_id=identity.get("panel_id"),
+        sample_context=identity.get("sample_context"),
+        feature_seed=identity.get("feature_seed"),
+    )
 
 
 def _context_source_paths(config: Mapping[str, Any]) -> list[tuple[Path, str]]:
@@ -711,8 +760,10 @@ def _prepare_design(staging: Path, input_spec_path: Path) -> dict[str, Any]:
             relative = f"configs/interact/{stage}/{safe_key}.generated.group.omnib.yaml"
             config_path = staging / relative
             config = _interact_config(
-                entry, stage,
+                entry,
+                stage,
                 staging / stage / "omnib-results" / safe_key,
+                backbone=backbone,
             )
             _write_yaml(config_path, config)
             config_hashes[relative] = _sha256(config_path)

@@ -30,7 +30,6 @@ METHOD_NAMES = (
     "minor_burden",
     "pc1",
     "kernel_hadamard",
-    "legacy_burden_product",
     "snpxsnp",
 )
 GLOBAL_VC_METHOD = "global_hadamard_variance_component"

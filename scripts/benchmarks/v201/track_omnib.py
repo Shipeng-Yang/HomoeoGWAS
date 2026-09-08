@@ -14,17 +14,25 @@ import math
 import os
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
 from homoeogwas.group_family import ExpandedEdgeFamily, MasterGroupFamily, load_master_group_family
-from homoeogwas.interact import SubgenomeData, _load_subgenome
+from homoeogwas.interact import (
+    SubgenomeData,
+    _load_subgenome,
+    build_retained_variant_mask,
+)
 from homoeogwas.omnib_family import (
     OmniBFamilyScores,
+    _array_identity,
+    _text_identity,
     bootstrap_minp_calibration,
+    prepare_omnib_design,
     score_omnib_family,
     score_omnib_responses,
 )
@@ -53,6 +61,7 @@ _FORMAL_BOOTSTRAP_MINIMUM = 2_000
 _DEFAULT_DESIGN_HASH = "0" * 64
 _BINDING_GAUSSIAN_FAILURE_RATE_MAX = 0.002
 _DIAGNOSTIC_FAILURE_RATE_MAX = 0.01
+_DEFAULT_SYNTHETIC_FEATURE_SEED = 20_260_830
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,14 @@ class OmniBBenchmarkContext:
     family: MasterGroupFamily
     phenotype: np.ndarray
     sample_idx: np.ndarray
+    panel_id: str = "SYNTHETIC"
+    sample_context: str = "full"
+    feature_seed: int = _DEFAULT_SYNTHETIC_FEATURE_SEED
+    retained_variant_masks: Mapping[str, np.ndarray] | None = field(
+        default=None, repr=False
+    )
+    marker_mask_identity: Mapping[str, Mapping[str, Any]] | None = None
+    marker_mask_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.subdata, dict):
@@ -84,14 +101,121 @@ class OmniBBenchmarkContext:
             raise ValueError("phenotype must contain at least eight finite samples")
         if np.any(sample_idx < 0) or len(set(sample_idx.tolist())) != sample_idx.size:
             raise ValueError("sample_idx must contain unique non-negative indices")
+        if not isinstance(self.panel_id, str) or not self.panel_id:
+            raise ValueError("panel_id must be a non-empty string")
+        if not isinstance(self.sample_context, str) or not self.sample_context:
+            raise ValueError("sample_context must be a non-empty string")
+        if (
+            isinstance(self.feature_seed, bool)
+            or not isinstance(self.feature_seed, (int, np.integer))
+            or int(self.feature_seed) < 0
+        ):
+            raise ValueError("feature_seed must be a non-negative integer")
         for label, data in self.subdata.items():
             values = np.asarray(data.X)
             if values.ndim != 2 or values.shape[0] <= int(sample_idx.max()):
                 raise ValueError(f"subgenome {label} is not aligned to sample_idx")
+        supplied_masks = self.retained_variant_masks
+        if supplied_masks is not None and (
+            not isinstance(supplied_masks, Mapping)
+            or set(supplied_masks) != set(self.family.subgenomes)
+        ):
+            raise ValueError(
+                "retained_variant_masks must exactly match context subgenomes"
+            )
+        masks: dict[str, np.ndarray] = {}
+        generated_identity: dict[str, dict[str, Any]] = {}
+        sample_hash = _array_hash(sample_idx)
+        for label in self.family.subgenomes:
+            values = np.asarray(self.subdata[label].X)
+            if supplied_masks is None:
+                mask, qc = build_retained_variant_mask(
+                    values[sample_idx],
+                    call_rate_min=0.90,
+                    maf_min=0.01,
+                    mac_min=5,
+                )
+                source = "derived_context_qc"
+            else:
+                raw = supplied_masks[label]
+                if not isinstance(raw, np.ndarray) or raw.dtype != np.bool_:
+                    raise ValueError(
+                        "retained_variant_masks entries must be boolean ndarrays"
+                    )
+                mask = np.array(raw, dtype=bool, copy=True)
+                if mask.ndim != 1 or mask.size != values.shape[1]:
+                    raise ValueError(
+                        "retained_variant_masks entries must align to variants"
+                    )
+                qc = {
+                    "n_samples": int(sample_idx.size),
+                    "n_variants_input": int(mask.size),
+                    "n_variants_retained": int(mask.sum()),
+                    "retained_variant_mask_encoding": (
+                        "uint8_input_variant_order"
+                    ),
+                    "retained_variant_mask_sha256": hashlib.sha256(
+                        np.ascontiguousarray(mask, dtype=np.uint8).tobytes()
+                    ).hexdigest(),
+                }
+                source = "explicit_context_mask"
+            mask.setflags(write=False)
+            masks[label] = mask
+            generated_identity[label] = {
+                "panel_id": self.panel_id,
+                "sample_context": self.sample_context,
+                "subgenome": label,
+                "sample_index_sha256": sample_hash,
+                "source": source,
+                **qc,
+            }
+        identity = self.marker_mask_identity
+        if identity is None:
+            identity_copy = generated_identity
+        else:
+            if not isinstance(identity, Mapping) or set(identity) != set(masks):
+                raise ValueError(
+                    "marker_mask_identity must exactly match context subgenomes"
+                )
+            identity_copy = {
+                label: dict(identity[label]) for label in self.family.subgenomes
+            }
+            for label, record in identity_copy.items():
+                expected = generated_identity[label]
+                for key in (
+                    "panel_id",
+                    "sample_context",
+                    "subgenome",
+                    "sample_index_sha256",
+                    "n_variants_input",
+                    "n_variants_retained",
+                    "retained_variant_mask_sha256",
+                ):
+                    if record.get(key) != expected[key]:
+                        raise ValueError(
+                            f"marker_mask_identity {key} mismatch for {label}"
+                        )
         phenotype.setflags(write=False)
         sample_idx.setflags(write=False)
         object.__setattr__(self, "phenotype", phenotype)
         object.__setattr__(self, "sample_idx", sample_idx)
+        object.__setattr__(self, "feature_seed", int(self.feature_seed))
+        object.__setattr__(
+            self, "retained_variant_masks", MappingProxyType(masks)
+        )
+        frozen_identity = MappingProxyType({
+            label: MappingProxyType(dict(identity_copy[label]))
+            for label in self.family.subgenomes
+        })
+        object.__setattr__(self, "marker_mask_identity", frozen_identity)
+        object.__setattr__(
+            self,
+            "marker_mask_sha256",
+            sha256_payload({
+                label: dict(frozen_identity[label])
+                for label in self.family.subgenomes
+            }),
+        )
 
 
 @dataclass(frozen=True)
@@ -109,6 +233,15 @@ class ConditionalBank:
     family_ids: tuple[str, ...]
     family_hash: str
     design_hash: str
+    panel_id: str
+    sample_context: str
+    feature_seed: int
+    marker_mask_identity: Mapping[str, Mapping[str, Any]]
+    marker_mask_sha256: str
+    feature_cache_sha256: str
+    fixed_mask_sha256: str
+    null_fit_sha256: str
+    prepared_design_sha256: str
     score_bank: MethodScoreBank
     tested_family_members: Mapping[str, tuple[str, ...]]
     tested_family_hashes: Mapping[str, str]
@@ -132,6 +265,39 @@ class ConditionalBank:
             raise ValueError("seeds must be unique within a bank")
         if self.canonical_role not in {"calibration", "heldout", "power"}:
             raise ValueError("invalid canonical response-bank role")
+        if not isinstance(self.panel_id, str) or not self.panel_id:
+            raise ValueError("conditional bank panel_id must be non-empty")
+        if not isinstance(self.sample_context, str) or not self.sample_context:
+            raise ValueError("conditional bank sample_context must be non-empty")
+        if (
+            isinstance(self.feature_seed, bool)
+            or not isinstance(self.feature_seed, (int, np.integer))
+            or int(self.feature_seed) < 0
+        ):
+            raise ValueError("conditional bank feature_seed must be non-negative")
+        for name in (
+            "marker_mask_sha256",
+            "feature_cache_sha256",
+            "fixed_mask_sha256",
+            "null_fit_sha256",
+            "prepared_design_sha256",
+        ):
+            digest = getattr(self, name)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(f"conditional bank {name} must be SHA-256")
+        if (
+            not isinstance(self.marker_mask_identity, Mapping)
+            or not self.marker_mask_identity
+            or self.marker_mask_sha256 != sha256_payload({
+                str(label): dict(record)
+                for label, record in self.marker_mask_identity.items()
+            })
+        ):
+            raise ValueError("conditional bank marker-mask identity is invalid")
         methods = set(self.score_bank.p_by_method)
         if not (
             methods
@@ -142,6 +308,15 @@ class ConditionalBank:
             raise ValueError("score and tested-family method sets must match")
         values.setflags(write=False)
         object.__setattr__(self, "responses", values)
+        object.__setattr__(self, "feature_seed", int(self.feature_seed))
+        object.__setattr__(
+            self,
+            "marker_mask_identity",
+            MappingProxyType({
+                str(label): MappingProxyType(dict(record))
+                for label, record in self.marker_mask_identity.items()
+            }),
+        )
 
     @property
     def p_by_method(self) -> Mapping[str, np.ndarray]:
@@ -168,6 +343,18 @@ class ConditionalBank:
             "family_ids": list(self.family_ids),
             "family_hash": self.family_hash,
             "design_hash": self.design_hash,
+            "panel_id": self.panel_id,
+            "sample_context": self.sample_context,
+            "feature_seed": self.feature_seed,
+            "marker_mask_identity": {
+                label: dict(record)
+                for label, record in self.marker_mask_identity.items()
+            },
+            "marker_mask_sha256": self.marker_mask_sha256,
+            "feature_cache_sha256": self.feature_cache_sha256,
+            "fixed_mask_sha256": self.fixed_mask_sha256,
+            "null_fit_sha256": self.null_fit_sha256,
+            "prepared_design_sha256": self.prepared_design_sha256,
             "tested_family_sizes": dict(self.score_bank.tested_family_sizes),
             "tested_family_members": {
                 method: list(members)
@@ -251,6 +438,15 @@ class ConditionalBank:
             family_ids=tuple(payload.get("family_ids", [])),
             family_hash=str(payload.get("family_hash")),
             design_hash=str(payload.get("design_hash")),
+            panel_id=str(payload.get("panel_id")),
+            sample_context=str(payload.get("sample_context")),
+            feature_seed=payload.get("feature_seed"),
+            marker_mask_identity=dict(payload.get("marker_mask_identity", {})),
+            marker_mask_sha256=str(payload.get("marker_mask_sha256")),
+            feature_cache_sha256=str(payload.get("feature_cache_sha256")),
+            fixed_mask_sha256=str(payload.get("fixed_mask_sha256")),
+            null_fit_sha256=str(payload.get("null_fit_sha256")),
+            prepared_design_sha256=str(payload.get("prepared_design_sha256")),
             score_bank=score_bank,
             tested_family_members={
                 method: tuple(payload["tested_family_members"][method])
@@ -301,6 +497,14 @@ class ConditionalBank:
             "family_ids": list(self.family_ids),
             "family_hash": self.family_hash,
             "design_hash": self.design_hash,
+            "panel_id": self.panel_id,
+            "sample_context": self.sample_context,
+            "feature_seed": self.feature_seed,
+            "marker_mask_sha256": self.marker_mask_sha256,
+            "feature_cache_sha256": self.feature_cache_sha256,
+            "fixed_mask_sha256": self.fixed_mask_sha256,
+            "null_fit_sha256": self.null_fit_sha256,
+            "prepared_design_sha256": self.prepared_design_sha256,
             "tested_family_sizes": dict(self.score_bank.tested_family_sizes),
             "tested_family_members": {
                 method: list(value) for method, value in self.tested_family_members.items()
@@ -396,6 +600,14 @@ def _context_manifest(context: OmniBBenchmarkContext) -> dict[str, Any]:
             }
         )
     return {
+        "panel_id": context.panel_id,
+        "sample_context": context.sample_context,
+        "feature_seed": context.feature_seed,
+        "marker_mask_identity": {
+            label: dict(context.marker_mask_identity[label])
+            for label in context.family.subgenomes
+        },
+        "marker_mask_sha256": context.marker_mask_sha256,
         "subgenomes": subgenomes,
         "family": _family_manifest(context.family),
         "sample_idx": {
@@ -442,6 +654,13 @@ def load_omnib_benchmark_context(
     if not isinstance(raw, Mapping) or not isinstance(raw.get("interact"), Mapping):
         raise ValueError("validated config must contain an interact mapping")
     ic = raw["interact"]
+    benchmark_identity = ic.get("benchmark_identity")
+    if (
+        not isinstance(benchmark_identity, Mapping)
+        or set(benchmark_identity)
+        != {"panel_id", "sample_context", "feature_seed"}
+    ):
+        raise ValueError("validated config benchmark identity is invalid")
     exact = {
         "mode": "group", "statistic": "omniB", "hypothesis_unit": "group",
         "subset_order": 2, "family_scope": "primary_only",
@@ -532,7 +751,15 @@ def load_omnib_benchmark_context(
         [phenotype_by_id[str(reference_samples[index])] for index in sample_idx],
         dtype=float,
     )
-    context = OmniBBenchmarkContext(subdata, family, phenotype, sample_idx)
+    context = OmniBBenchmarkContext(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        panel_id=benchmark_identity["panel_id"],
+        sample_context=benchmark_identity["sample_context"],
+        feature_seed=benchmark_identity["feature_seed"],
+    )
     artifact_file = Path(context_artifact_path).resolve()
     artifact = json.loads(artifact_file.read_text(encoding="utf-8"))
     manifest = _context_manifest(context)
@@ -570,6 +797,9 @@ def validate_real_omnib_context(
         raise ValueError("strict benchmark interaction config is unreadable") from error
     interact = raw.get("interact") if isinstance(raw, Mapping) else None
     calibration = interact.get("calibration") if isinstance(interact, Mapping) else None
+    benchmark_identity = (
+        interact.get("benchmark_identity") if isinstance(interact, Mapping) else None
+    )
     expected_calibration = {
         "method": "bootstrap",
         "B": 199 if stage == "pilot" else 2_000,
@@ -587,6 +817,9 @@ def validate_real_omnib_context(
         }
         or calibration != expected_calibration
         or interact.get("subgenomes") != list(expected_subgenomes)
+        or not isinstance(benchmark_identity, Mapping)
+        or set(benchmark_identity)
+        != {"panel_id", "sample_context", "feature_seed"}
     ):
         raise ValueError("strict benchmark interaction config contract is invalid")
     context = load_omnib_benchmark_context(
@@ -851,15 +1084,14 @@ def _prepare_scenario(
     null_model: str = "gaussian",
 ) -> _PreparedScenario:
     setup_seed, setup_seed_id = _seed(design_hash, scenario_id, 0, stage, "scenario_setup")
-    scores, expanded = score_omnib_family(
+    scores, expanded = prepare_omnib_design(
         context.subdata,
         context.family,
         context.phenotype,
         context.sample_idx,
         transform="INT",
-        bootstrap_B=0,
-        bootstrap_seed=setup_seed,
-        n_jobs=n_jobs,
+        feature_seed=context.feature_seed,
+        retained_variant_masks=context.retained_variant_masks,
         grm_method="grm_from_X",
         maf_min=0.01,
         burden_maf=0.01,
@@ -884,18 +1116,51 @@ def _prepare_scenario(
         whitener = (
             eigenvectors * (1.0 / np.sqrt(eigenvalues))
         ) @ eigenvectors.T
+        retained_components = {
+            key: value for key, value in scores.covariance_components.items()
+            if key != omitted_label
+        }
+        retained_kernels = {
+            key: value for key, value in scores.null_kernels.items()
+            if key != omitted_label
+        }
+        null_fit_identity = {
+            "W": _array_identity(whitener),
+            "covariance": _array_identity(excluded_covariance),
+            "beta": _array_identity(np.asarray(scores.null_beta, float)),
+            "design": _array_identity(np.asarray(scores.null_design, float)),
+            "kernels": {
+                sub: _array_identity(retained_kernels[sub])
+                for sub in sorted(retained_kernels)
+            },
+            "components": {
+                str(key): float(value)
+                for key, value in sorted(retained_components.items())
+            },
+            "benchmark_covariance_override": {
+                "kind": "omitted_kernel",
+                "omitted_subgenome": omitted_label,
+            },
+        }
+        null_fit_sha256 = _text_identity(null_fit_identity)
+        prepared_design_identity = {
+            **dict(scores.prepared_design_identity),
+            "null_fit_sha256": null_fit_sha256,
+            "benchmark_covariance_override": {
+                "kind": "omitted_kernel",
+                "omitted_subgenome": omitted_label,
+            },
+        }
         scores = replace(
             scores,
             W=whitener,
             null_covariance=excluded_covariance,
-            covariance_components={
-                key: value for key, value in scores.covariance_components.items()
-                if key != omitted_label
-            },
-            null_kernels={
-                key: value for key, value in scores.null_kernels.items()
-                if key != omitted_label
-            },
+            covariance_components=retained_components,
+            null_kernels=retained_kernels,
+            null_fit_identity=null_fit_identity,
+            null_fit_sha256=null_fit_sha256,
+            prepared_design_identity=prepared_design_identity,
+            prepared_design_sha256=_text_identity(prepared_design_identity),
             projection_cache={},
         )
     blocks = _gene_blocks(context, scores)
@@ -967,7 +1232,6 @@ def _method_scores(
                 "minor_burden": component_scores[0],
                 "pc1": component_scores[1],
                 "kernel_hadamard": component_scores[2],
-                "legacy_burden_product": component_scores[0].copy(),
                 "snpxsnp": snpxsnp,
             },
             tested_family_sizes={
@@ -975,7 +1239,6 @@ def _method_scores(
                 "minor_burden": group_count,
                 "pc1": group_count,
                 "kernel_hadamard": group_count,
-                "legacy_burden_product": group_count,
                 "snpxsnp": snpxsnp_size,
             },
         ),
@@ -984,7 +1247,7 @@ def _method_scores(
     )
 
 
-def _local_five_scores(
+def _local_component_scores(
     prepared: _PreparedScenario,
     responses: np.ndarray,
     *,
@@ -1003,7 +1266,6 @@ def _local_five_scores(
         "minor_burden": component[0],
         "pc1": component[1],
         "kernel_hadamard": component[2],
-        "legacy_burden_product": component[0].copy(),
     }
 
 
@@ -1060,8 +1322,10 @@ def run_family_size_stress(
         tested_members["snpxsnp"] = target_snpxsnp.member_ids
         snpxsnp_status = "applicable"
     else:
-        calibration_map = _local_five_scores(prepared, calibration, n_jobs=n_jobs)
-        target_map = _local_five_scores(prepared, target, n_jobs=n_jobs)
+        calibration_map = _local_component_scores(
+            prepared, calibration, n_jobs=n_jobs
+        )
+        target_map = _local_component_scores(prepared, target, n_jobs=n_jobs)
         tested_sizes = {method: family_size for method in calibration_map}
         tested_members = {
             method: tuple(context.family.group_ids) for method in calibration_map
@@ -1138,6 +1402,10 @@ def run_family_size_stress(
         "target_seeds": list(target_seeds),
         "calibration_response_hash": _array_hash(calibration),
         "target_response_hash": _array_hash(target),
+        "feature_cache_sha256": prepared.scores.feature_cache_sha256,
+        "fixed_mask_sha256": prepared.scores.fixed_mask_sha256,
+        "null_fit_sha256": prepared.scores.null_fit_sha256,
+        "prepared_design_sha256": prepared.scores.prepared_design_sha256,
         "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
         "failure": {"failed": False, "status": "completed"},
         "requested_jobs": n_jobs,
@@ -1187,7 +1455,6 @@ def _tested_family_members(prepared: _PreparedScenario) -> dict[str, tuple[str, 
         "minor_burden": local_members,
         "pc1": local_members,
         "kernel_hadamard": local_members,
-        "legacy_burden_product": local_members,
         "snpxsnp": tuple(snpxsnp_members),
     }
     return members
@@ -1360,7 +1627,6 @@ def _bank_from_prepared(
         "minor_burden": list(component_failures["minor_burden"]),
         "pc1": list(component_failures["pc1"]),
         "kernel_hadamard": list(component_failures["kernel_hadamard"]),
-        "legacy_burden_product": list(component_failures["minor_burden"]),
     })
     all_nan_by_method = {
         method: np.flatnonzero(~np.isfinite(values).any(axis=0)).astype(int).tolist()
@@ -1429,6 +1695,15 @@ def _bank_from_prepared(
         family_ids=score_bank.family_ids,
         family_hash=prepared.family_hash,
         design_hash=design_hash,
+        panel_id=prepared.context.panel_id,
+        sample_context=prepared.context.sample_context,
+        feature_seed=prepared.context.feature_seed,
+        marker_mask_identity=prepared.context.marker_mask_identity,
+        marker_mask_sha256=prepared.context.marker_mask_sha256,
+        feature_cache_sha256=prepared.scores.feature_cache_sha256,
+        fixed_mask_sha256=prepared.scores.fixed_mask_sha256,
+        null_fit_sha256=prepared.scores.null_fit_sha256,
+        prepared_design_sha256=prepared.scores.prepared_design_sha256,
         score_bank=score_bank,
         tested_family_members=members,
         tested_family_hashes=tested_hashes,
@@ -1688,6 +1963,10 @@ def run_global_vc_bank(
         "target_p_values": _json_safe(target_p),
         "calibration_p_hash": sha256_payload(_json_safe(calibration_p)),
         "target_p_hash": sha256_payload(_json_safe(target_p)),
+        "feature_cache_sha256": prepared.scores.feature_cache_sha256,
+        "fixed_mask_sha256": prepared.scores.fixed_mask_sha256,
+        "null_fit_sha256": prepared.scores.null_fit_sha256,
+        "prepared_design_sha256": prepared.scores.prepared_design_sha256,
         "failed_calibration_response_indices": calibration_failed,
         "failed_target_response_indices": target_failed,
         "calibration_lrt_evidence": calibration_result["lrt_evidence"],
@@ -1856,6 +2135,10 @@ def _base_replicate_payload(
         "pair_edges_per_group": _edge_count_per_group(context),
         "direct_higher_order_term": False,
         "requested_jobs": int(n_jobs),
+        "panel_id": context.panel_id,
+        "sample_context": context.sample_context,
+        "feature_seed": context.feature_seed,
+        "marker_mask_sha256": context.marker_mask_sha256,
         "family_ids": list(context.family.group_ids),
         "family_manifest": family_manifest,
         "family_hash": sha256_payload(family_manifest),
@@ -2002,6 +2285,8 @@ def run_end_to_end_null(
                 transform="INT",
                 bootstrap_B=bootstrap_B,
                 bootstrap_seed=bootstrap_seed,
+                feature_seed=context.feature_seed,
+                retained_variant_masks=context.retained_variant_masks,
                 n_jobs=n_jobs,
                 grm_method="grm_from_X",
                 maf_min=0.01,
@@ -2070,6 +2355,10 @@ def run_end_to_end_null(
                     "shape": list(scores.null_covariance.shape),
                     "sha256": _array_hash(scores.null_covariance),
                 },
+                "feature_cache_sha256": scores.feature_cache_sha256,
+                "fixed_mask_sha256": scores.fixed_mask_sha256,
+                "null_fit_sha256": scores.null_fit_sha256,
+                "prepared_design_sha256": scores.prepared_design_sha256,
                 "effective_jobs": execution.get("effective_jobs", 1),
                 "parallel_backend": execution.get("backend", "serial"),
                 "worker_pids": list(execution.get("worker_pids", [])),
@@ -2163,6 +2452,26 @@ def _assert_independent_banks(left: ConditionalBank, right: ConditionalBank) -> 
         raise RuntimeError("independent response banks have the same response hash")
     if left.family_ids != right.family_ids or left.family_hash != right.family_hash:
         raise RuntimeError("response banks do not share the frozen hypothesis family")
+    identity_fields = (
+        "panel_id",
+        "sample_context",
+        "feature_seed",
+        "marker_mask_sha256",
+        "feature_cache_sha256",
+        "fixed_mask_sha256",
+        "null_fit_sha256",
+        "prepared_design_sha256",
+    )
+    mismatched = [
+        field
+        for field in identity_fields
+        if getattr(left, field) != getattr(right, field)
+    ]
+    if mismatched:
+        raise RuntimeError(
+            "response banks do not share prepared identity: "
+            + ", ".join(mismatched)
+        )
 
 
 def run_power_replicate(
@@ -2200,6 +2509,10 @@ def run_power_replicate(
         or len(calibration_bank.seed_ids) != calibration_count
         or calibration_bank.family_ids != context.family.group_ids
         or calibration_bank.family_hash != _family_hash(context.family)
+        or calibration_bank.panel_id != context.panel_id
+        or calibration_bank.sample_context != context.sample_context
+        or calibration_bank.feature_seed != context.feature_seed
+        or calibration_bank.marker_mask_sha256 != context.marker_mask_sha256
         or calibration_bank.failure.get("within_failure_ceiling") is not True
         or any(
             metadata.get("canonical_kind") != null_model
@@ -2409,6 +2722,10 @@ def run_power_replicate(
             "calibration_bank_manifest_hash": calibration_manifest_hash,
             "calibration_artifact": calibration_artifact,
             "target_response_hash": target.response_hash,
+            "feature_cache_sha256": target.feature_cache_sha256,
+            "fixed_mask_sha256": target.fixed_mask_sha256,
+            "null_fit_sha256": target.null_fit_sha256,
+            "prepared_design_sha256": target.prepared_design_sha256,
             "threshold_source": "independent_calibration_bank",
             "calibration_minima_by_method": calibration_minima,
             "target_minima_by_method": target_minima,
@@ -2524,6 +2841,8 @@ def _score_fixed_context(
         transform="INT",
         bootstrap_B=bootstrap_B,
         bootstrap_seed=bootstrap_seed,
+        feature_seed=context.feature_seed,
+        retained_variant_masks=context.retained_variant_masks,
         n_jobs=n_jobs,
         grm_method="grm_from_X",
         maf_min=0.01,
@@ -2561,6 +2880,10 @@ def _score_fixed_context(
             "shape": list(scores.null_covariance.shape),
             "sha256": _array_hash(scores.null_covariance),
         },
+        "feature_cache_sha256": scores.feature_cache_sha256,
+        "fixed_mask_sha256": scores.fixed_mask_sha256,
+        "null_fit_sha256": scores.null_fit_sha256,
+        "prepared_design_sha256": scores.prepared_design_sha256,
     }
 
 
@@ -2571,11 +2894,21 @@ def _copy_context(
     family: MasterGroupFamily | None = None,
     phenotype: np.ndarray | None = None,
 ) -> OmniBBenchmarkContext:
+    changed_subdata = subdata is not None
     return OmniBBenchmarkContext(
         subdata=context.subdata if subdata is None else subdata,
         family=context.family if family is None else family,
         phenotype=context.phenotype if phenotype is None else phenotype,
         sample_idx=context.sample_idx,
+        panel_id=context.panel_id,
+        sample_context=context.sample_context,
+        feature_seed=context.feature_seed,
+        retained_variant_masks=(
+            None if changed_subdata else context.retained_variant_masks
+        ),
+        marker_mask_identity=(
+            None if changed_subdata else context.marker_mask_identity
+        ),
     )
 
 
@@ -2732,7 +3065,7 @@ _ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
 def _robustness_score_bank(
     prepared: _PreparedScenario, responses: np.ndarray, *, n_jobs: int,
 ) -> dict[str, np.ndarray]:
-    scores = _local_five_scores(prepared, responses, n_jobs=n_jobs)
+    scores = _local_component_scores(prepared, responses, n_jobs=n_jobs)
     return {method: np.asarray(scores[method], dtype=float) for method in _ROBUSTNESS_METHODS}
 
 
@@ -3317,6 +3650,10 @@ def run_encoding_check(
             "pair_edges_per_group": _edge_count_per_group(context),
             "direct_higher_order_term": False,
             "null_covariance": baseline["null_covariance"],
+            "feature_cache_sha256": baseline["feature_cache_sha256"],
+            "fixed_mask_sha256": baseline["fixed_mask_sha256"],
+            "null_fit_sha256": baseline["null_fit_sha256"],
+            "prepared_design_sha256": baseline["prepared_design_sha256"],
             "exact_checks": exact_checks,
             "all_required_exact": all_required_exact,
             "failure": {
@@ -3445,6 +3782,10 @@ def run_omnib_replicate(
                 ),
                 "experiment": "conditional",
                 "bank": bank.to_payload(),
+                "feature_cache_sha256": bank.feature_cache_sha256,
+                "fixed_mask_sha256": bank.fixed_mask_sha256,
+                "null_fit_sha256": bank.null_fit_sha256,
+                "prepared_design_sha256": bank.prepared_design_sha256,
                 "failure": _bank_failure_envelope(bank.failure),
             }
         elif experiment == "global_vc":

@@ -807,6 +807,53 @@ def _matrix(value: Any, label: str) -> list[list[float]]:
     return [[_finite_probability(cell, label) for cell in row] for row in value]
 
 
+_PREPARED_IDENTITY_FIELDS = (
+    "panel_id",
+    "sample_context",
+    "feature_seed",
+    "marker_mask_sha256",
+    "feature_cache_sha256",
+    "fixed_mask_sha256",
+    "null_fit_sha256",
+    "prepared_design_sha256",
+)
+
+
+def _bank_prepared_identity(bank: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {field: bank.get(field) for field in _PREPARED_IDENTITY_FIELDS}
+    if (
+        not isinstance(identity["panel_id"], str)
+        or not identity["panel_id"]
+        or not isinstance(identity["sample_context"], str)
+        or not identity["sample_context"]
+        or isinstance(identity["feature_seed"], bool)
+        or not isinstance(identity["feature_seed"], int)
+        or identity["feature_seed"] < 0
+    ):
+        raise BenchmarkAuditError("conditional prepared context identity is invalid")
+    for field in _PREPARED_IDENTITY_FIELDS[3:]:
+        value = identity[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise BenchmarkAuditError("conditional prepared SHA-256 identity is invalid")
+    marker_identity = bank.get("marker_mask_identity")
+    if (
+        not isinstance(marker_identity, Mapping)
+        or not marker_identity
+        or identity["marker_mask_sha256"] != sha256_payload({
+            str(label): dict(record)
+            for label, record in marker_identity.items()
+            if isinstance(record, Mapping)
+        })
+        or any(not isinstance(record, Mapping) for record in marker_identity.values())
+    ):
+        raise BenchmarkAuditError("conditional marker-mask identity is invalid")
+    return identity
+
+
 def _validate_bank_envelope(
     bank: Mapping[str, Any], expected: int, role: str,
 ) -> tuple[list[int], list[str]]:
@@ -826,6 +873,7 @@ def _validate_bank_envelope(
         or shape[1] != expected
     ):
         raise BenchmarkAuditError("conditional bank response count/identity is invalid")
+    _bank_prepared_identity(bank)
     for index, record in enumerate(metadata):
         if (
             not isinstance(record, Mapping) or record.get("seed") != seeds[index]
@@ -1035,6 +1083,10 @@ def _conditional_gates(
             raise BenchmarkAuditError("conditional calibration/heldout pair is incomplete")
         cal_payload, held_payload = calibration[base], heldout[base]
         cal_bank, held_bank = cal_payload["bank"], held_payload["bank"]
+        if _bank_prepared_identity(cal_bank) != _bank_prepared_identity(held_bank):
+            raise BenchmarkAuditError(
+                "conditional calibration/heldout prepared identities differ"
+            )
         cal_registry = next(
             row for row in evidence.registry if row.scenario_id == cal_payload["scenario_id"]
         )
@@ -1522,7 +1574,8 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         )
         or calibration_bank.get("canonical_role") != "calibration"
         or len(calibration_bank.get("seed_ids", [])) != calibration_count
-        or calibration_bank.get("failure", {}).get("failed") is not False
+        or calibration_bank.get("failure", {}).get("within_failure_ceiling")
+        is not True
         or any(
             not isinstance(item, Mapping)
             or item.get("canonical_kind") != "gaussian"
@@ -1533,6 +1586,20 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         or target_bank.get("response_shape", [None, None])[1] != 1
     ):
         raise BenchmarkAuditError("power frozen calibration binding is invalid")
+    calibration_identity = _bank_prepared_identity(calibration_bank)
+    target_identity = _bank_prepared_identity(target_bank)
+    if (
+        calibration_identity != target_identity
+        or any(
+            artifact.get(field) != value
+            for field, value in calibration_identity.items()
+        )
+        or any(
+            payload.get(field) != value
+            for field, value in target_identity.items()
+        )
+    ):
+        raise BenchmarkAuditError("power prepared identities differ across banks")
     target_scores = target_bank.get("p_by_method")
     target_score_hashes = target_bank.get("score_matrix_hashes")
     family_ids = target_bank.get("family_ids")

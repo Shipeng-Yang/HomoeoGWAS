@@ -27,9 +27,13 @@ METHODS = (
     "minor_burden",
     "pc1",
     "kernel_hadamard",
-    "legacy_burden_product",
     "snpxsnp",
 )
+
+
+def test_legacy_burden_product_is_compatibility_only_not_a_method_row():
+    assert tuple(comparator_module.METHOD_NAMES) == METHODS
+    assert "legacy_burden_product" not in comparator_module.METHOD_NAMES
 
 
 def test_global_hadamard_vc_is_real_detection_only_and_not_local_method():
@@ -118,7 +122,6 @@ def _valid_family_sizes() -> dict[str, int]:
         "minor_burden": 2,
         "pc1": 2,
         "kernel_hadamard": 2,
-        "legacy_burden_product": 2,
         "snpxsnp": 12,
     }
 

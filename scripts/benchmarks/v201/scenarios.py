@@ -152,7 +152,7 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
         ))
 
     # A standalone, non-localizing variance-component comparator.  It is not
-    # one of the six local METHOD_NAMES and therefore has its own response
+    # one of the five local METHOD_NAMES and therefore has its own response
     # banks, threshold and evidence rows.
     for backbone in ("cotton", "wheat", "quartet"):
         copies, edges = {

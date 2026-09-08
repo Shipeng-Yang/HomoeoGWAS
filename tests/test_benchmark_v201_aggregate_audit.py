@@ -1493,6 +1493,10 @@ def test_power_registry_metadata_and_single_response_are_fail_closed():
     with pytest.raises(BenchmarkAuditError, match="frozen calibration"):
         _audit_power_evidence(detached, scenario)
     detached = copy.deepcopy(payload)
+    detached["target_bank"]["prepared_design_sha256"] = "0" * 64
+    with pytest.raises(BenchmarkAuditError, match="prepared identities"):
+        _audit_power_evidence(detached, scenario)
+    detached = copy.deepcopy(payload)
     detached["target_minima_by_method"]["omnib"] = [0.0]
     detached["target_minima_hashes"]["omnib"] = sha256_payload([0.0])
     detached["qa_rejections_by_method"]["omnib"] = [False]
