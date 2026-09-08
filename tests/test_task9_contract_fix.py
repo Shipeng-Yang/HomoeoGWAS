@@ -625,7 +625,10 @@ def test_canonical_cli_forwards_verified_context_to_checkpoint_manifest(
             "phenotype": str(phenotype),
             "sample_col": "sample",
             "trait": "trait",
-            "burden": {"cap": 150, "min_snp": 3, "maf_min": 0.01},
+            "burden": {
+                "cap": 150, "min_snp": 3, "maf_min": 0.01,
+                "feature_seed": 4103,
+            },
             "grm": {"method": "grm_from_X", "maf_min": 0.01,
                     "scope": "all_subgenomes"},
             "calibration": {
@@ -674,3 +677,5 @@ def test_canonical_cli_forwards_verified_context_to_checkpoint_manifest(
     assert I.cmd_interact(SimpleNamespace(
         config=str(config_path), out_dir=None, n_jobs=1)) == 0
     assert captured["checkpoint_manifest_context"] == context
+    assert captured["feature_seed"] == 4103
+    assert captured["evidence_role"] == "formal"

@@ -19,6 +19,7 @@ LOCO support:
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -110,12 +111,20 @@ def _compute_grm_part_from_dosage(
             f"(chrom={chrom!r}, denom={denom})")
     S = Z @ Z.T
     S = 0.5 * (S + S.T)                                       # enforce symmetry
+    mask_bytes = np.ascontiguousarray(keep, dtype=np.uint8).tobytes()
     return GRMPart(
         numerator=S.astype(np.float64),
         denominator=float(denom),
         n_variants_input=int(m),
         n_variants_used=int(m_used),
         chrom=chrom,
+        info={
+            "filter_policy": "legacy_full_chunk_maf_only",
+            "maf_min": float(maf_min),
+            "maf_boundary": "inclusive_greater_than_or_equal",
+            "retained_variant_mask_encoding": "uint8_input_variant_order",
+            "retained_variant_mask_sha256": hashlib.sha256(mask_bytes).hexdigest(),
+        },
     )
 
 
@@ -321,6 +330,7 @@ def compute_grm(chunk: GenoChunk, maf_min: float = 0.01) -> tuple[np.ndarray, di
         "mean_diag": float(np.mean(np.diag(G))),
         "min_offdiag": float(np.min(G - np.diag(np.diag(G)))),
         "max_offdiag": float(np.max(G - np.diag(np.diag(G)))),
+        **part.info,
     }
     return G, info
 

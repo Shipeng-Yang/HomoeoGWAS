@@ -3280,6 +3280,32 @@ def validate_interact_config(cfg: dict) -> None:
         ):
             raise SystemExit(
                 "ERR: interact.burden.feature_seed must be an integer >= 0")
+        benchmark_identity = ic.get("benchmark_identity")
+        if benchmark_identity is not None:
+            if (
+                not isinstance(benchmark_identity, dict)
+                or set(benchmark_identity)
+                != {"panel_id", "sample_context", "feature_seed"}
+                or not isinstance(benchmark_identity["panel_id"], str)
+                or not benchmark_identity["panel_id"]
+                or not isinstance(benchmark_identity["sample_context"], str)
+                or not benchmark_identity["sample_context"]
+                or isinstance(benchmark_identity["feature_seed"], bool)
+                or not isinstance(benchmark_identity["feature_seed"], int)
+                or benchmark_identity["feature_seed"] < 0
+            ):
+                raise SystemExit(
+                    "ERR: interact.benchmark_identity must bind panel_id, "
+                    "sample_context and a non-negative feature_seed"
+                )
+            if (
+                feature_seed is not None
+                and feature_seed != benchmark_identity["feature_seed"]
+            ):
+                raise SystemExit(
+                    "ERR: interact.burden.feature_seed disagrees with "
+                    "interact.benchmark_identity.feature_seed"
+                )
     elif mode not in expected_n:
         raise SystemExit(
             "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
@@ -3779,6 +3805,78 @@ def _validate_canonical_parallel_runtime(
     )
 
 
+def _resolve_group_omnib_evidence(
+    interact_config: dict,
+    *,
+    verified_launch,
+) -> tuple[int | None, str]:
+    """Resolve feature seed and evidence role without using inferential status."""
+
+    burden = interact_config.get("burden") or {}
+    configured = burden.get("feature_seed")
+    identity = interact_config.get("benchmark_identity")
+    if identity is not None:
+        root = identity.get("feature_seed")
+        if configured is not None and configured != root:
+            raise ValueError(
+                "burden feature_seed disagrees with benchmark identity"
+            )
+        return int(root), "benchmark"
+    if verified_launch is not None:
+        if configured is None:
+            raise ValueError("formal group omniB requires an explicit feature_seed")
+        return int(configured), "formal"
+    return (None if configured is None else int(configured)), "legacy"
+
+
+def _build_benchmark_mask_records(
+    interact_config: dict,
+    subdata: dict[str, SubgenomeData],
+    sample_idx: np.ndarray,
+) -> dict[str, dict]:
+    """Derive and bind the executable v5 marker masks for a benchmark context."""
+
+    from .io import plink_bim_sha256
+
+    identity = interact_config["benchmark_identity"]
+    sample_hash = _family_score._array_identity(
+        np.asarray(sample_idx, int)
+    )["sha256"]
+    records = {}
+    for sub in interact_config["subgenomes"]:
+        mask, qc = build_retained_variant_mask(
+            np.asarray(subdata[sub].X, float)[sample_idx],
+            call_rate_min=0.90,
+            maf_min=0.01,
+            mac_min=5,
+        )
+        records[sub] = {
+            "mask": mask,
+            "sha256": qc["retained_variant_mask_sha256"],
+            "panel_id": identity["panel_id"],
+            "sample_context": identity["sample_context"],
+            "subgenome": sub,
+            "ordered_sample_index_sha256": sample_hash,
+            "source_BIM_sha256": plink_bim_sha256(
+                interact_config["genotype"][sub]
+            ),
+            "input_variant_count": qc["n_variants_input"],
+            "thresholds": {
+                "call_rate_min": 0.90,
+                "maf_min": 0.01,
+                "mac_min": 5,
+            },
+            "retained_variant_count": qc["n_variants_retained"],
+            "retained_variant_mask_encoding": qc[
+                "retained_variant_mask_encoding"
+            ],
+            "retained_variant_mask_sha256": qc[
+                "retained_variant_mask_sha256"
+            ],
+        }
+    return records
+
+
 def cmd_interact(args) -> int:
     import yaml
 
@@ -3934,6 +4032,15 @@ def cmd_interact(args) -> int:
         None
         if configured_feature_seed is None else int(configured_feature_seed)
     )
+    evidence_role = "legacy"
+    if mode == "group" and statistic == "omnib":
+        try:
+            feature_seed, evidence_role = _resolve_group_omnib_evidence(
+                ic, verified_launch=verified_launch
+            )
+        except ValueError as exc:
+            print(f"ERROR: group omniB evidence identity invalid: {exc}")
+            return 2
     calibration_qa_only = bool(calib.get("qa_only", False))
     checkpoint_cfg = calib.get("checkpoint") or {}
     checkpoint_dir = (
@@ -3948,6 +4055,15 @@ def cmd_interact(args) -> int:
         else "compute_grm_maf")
     maf_min = float(grm_cfg.get("maf_min", 0.01))
     n_jobs = int(args.n_jobs)
+    retained_variant_masks = None
+    if mode == "group" and statistic == "omnib" and evidence_role == "benchmark":
+        try:
+            retained_variant_masks = _build_benchmark_mask_records(
+                ic, subdata, sample_idx
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: benchmark marker-mask binding failed: {exc}")
+            return 1
 
     # optional fixed-effect covariates (genotype PCs and/or a y-independent covariate file)
     cov_arg, cov_label = _build_cov_arg(ic.get("covariates"), valid)
@@ -4002,6 +4118,8 @@ def cmd_interact(args) -> int:
             checkpoint_manifest_context=(
                 verified_launch.checkpoint_context
                 if verified_launch is not None else None),
+            retained_variant_masks=retained_variant_masks,
+            evidence_role=evidence_role,
         )
         r.trait = trait
         results = {"INT": r.__dict__}

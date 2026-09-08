@@ -14,9 +14,10 @@ from .parallel import run_fork_blocks
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
-PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v2"
+PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v3"
 FEATURE_SEED_SCHEME = "homoeogwas-feature-v1"
 COMPONENT_RANK_ATOL = 1.0e-10
+COMPONENT_RANK_ALGORITHM = "normalized-joint-svd-absolute-v2"
 _OMNIB_WORKER_STATE: dict | None = None
 
 
@@ -144,9 +145,9 @@ def _feature_cache_sha256(feature_identity: dict) -> str:
 def _normalize_retained_variant_masks(
     subdata: dict,
     retained_variant_masks,
-) -> dict[str, np.ndarray] | None:
+) -> tuple[dict[str, np.ndarray] | None, dict[str, dict]]:
     if retained_variant_masks is None:
-        return None
+        return None, {}
     if not isinstance(retained_variant_masks, Mapping):
         raise ValueError("retained_variant_masks must be a subgenome mapping")
     expected_subgenomes = set(subdata)
@@ -161,6 +162,7 @@ def _normalize_retained_variant_masks(
             "retained_variant_masks has unknown subgenomes: " + ", ".join(extra))
 
     normalized = {}
+    identities = {}
     for sub in subdata:
         entry = retained_variant_masks[sub]
         expected_hash = None
@@ -170,8 +172,14 @@ def _normalize_retained_variant_masks(
                     f"retained variant mask record for {sub} requires mask and sha256")
             mask = np.asarray(entry["mask"])
             expected_hash = entry["sha256"]
+            supplied_identity = {
+                str(key): value
+                for key, value in entry.items()
+                if key not in {"mask", "sha256"}
+            }
         else:
             mask = np.asarray(entry)
+            supplied_identity = {}
         if mask.dtype != np.bool_:
             raise ValueError(
                 f"retained variant mask for {sub} must have boolean dtype")
@@ -184,7 +192,86 @@ def _normalize_retained_variant_masks(
         if expected_hash is not None and expected_hash != digest:
             raise ValueError(f"retained variant mask hash mismatch for {sub}")
         normalized[sub] = mask
-    return normalized
+        identity = {
+            "source": (
+                "bound_mask_record" if supplied_identity else "bare_boolean_array"
+            ),
+            "input_variant_count": n_variants,
+            "retained_variant_count": int(mask.sum()),
+            "retained_variant_mask_encoding": "uint8_input_variant_order",
+            "retained_variant_mask_sha256": digest,
+            **supplied_identity,
+        }
+        for identity_field, observed in (
+            ("input_variant_count", n_variants),
+            ("retained_variant_count", int(mask.sum())),
+            ("retained_variant_mask_sha256", digest),
+        ):
+            if identity[identity_field] != observed:
+                raise ValueError(
+                    f"retained variant mask {identity_field} mismatch for {sub}"
+                )
+        if "subgenome" in identity and identity["subgenome"] != sub:
+            raise ValueError(f"retained variant mask subgenome mismatch for {sub}")
+        identities[sub] = identity
+    return normalized, identities
+
+
+def _require_benchmark_mask_bindings(
+    retained_variant_masks,
+    family: MasterGroupFamily,
+    sample_idx: np.ndarray,
+) -> None:
+    """Require the complete v5 publication-evidence mask record."""
+
+    if not isinstance(retained_variant_masks, Mapping):
+        raise ValueError("benchmark evidence requires retained_variant_masks")
+    required = {
+        "mask",
+        "sha256",
+        "panel_id",
+        "sample_context",
+        "subgenome",
+        "ordered_sample_index_sha256",
+        "source_BIM_sha256",
+        "input_variant_count",
+        "thresholds",
+        "retained_variant_count",
+        "retained_variant_mask_encoding",
+    }
+    expected_sample_hash = _array_identity(np.asarray(sample_idx, int))["sha256"]
+    expected_thresholds = {
+        "call_rate_min": 0.90,
+        "maf_min": 0.01,
+        "mac_min": 5,
+    }
+    panel_ids = set()
+    sample_contexts = set()
+    for sub in family.subgenomes:
+        record = retained_variant_masks.get(sub)
+        if not isinstance(record, Mapping) or not required.issubset(record):
+            raise ValueError(
+                f"benchmark retained_variant_masks record is incomplete for {sub}"
+            )
+        if record["subgenome"] != sub:
+            raise ValueError(f"benchmark mask subgenome mismatch for {sub}")
+        if record["ordered_sample_index_sha256"] != expected_sample_hash:
+            raise ValueError(f"benchmark mask sample-index mismatch for {sub}")
+        if record["thresholds"] != expected_thresholds:
+            raise ValueError(f"benchmark mask thresholds mismatch for {sub}")
+        if record["retained_variant_mask_encoding"] != "uint8_input_variant_order":
+            raise ValueError(f"benchmark mask encoding mismatch for {sub}")
+        bim_hash = record["source_BIM_sha256"]
+        if (
+            not isinstance(bim_hash, str)
+            or len(bim_hash) != 64
+            or any(character not in "0123456789abcdef" for character in bim_hash)
+        ):
+            raise ValueError(f"benchmark source BIM SHA-256 is invalid for {sub}")
+        panel_ids.add(record["panel_id"])
+        sample_contexts.add(record["sample_context"])
+    if len(panel_ids) != 1 or len(sample_contexts) != 1:
+        raise ValueError("benchmark mask records disagree on panel/sample context")
 
 
 def _normalized_svd_basis(
@@ -229,17 +316,19 @@ def _component_design_signature(
     for component, (ax, ay) in enumerate(zip(gsx, gsy, strict=True)):
         reduced = np.column_stack((C, ax, ay))
         cross = (ax[:, :, None] * ay[:, None, :]).reshape(n, -1)
-        rank_reduced = _normalized_svd_rank(reduced)
-        rank_full = _normalized_svd_rank(np.column_stack((reduced, cross)))
+        _Qr, _Qa, rank_reduced, added_rank = _normalized_nested_bases(
+            reduced, cross
+        )
+        rank_full = rank_reduced + added_rank
         ranks[component] = rank_reduced
-        numerator_df[component] = rank_full - rank_reduced
+        numerator_df[component] = added_rank
         denominator_df[component] = n - rank_full
     return ranks, numerator_df, denominator_df
 
 
 def _fixed_component_mask_sha256(scores) -> str:
     payload = {
-        "algorithm": "normalized-column-svd-absolute-v1",
+        "algorithm": COMPONENT_RANK_ALGORITHM,
         "atol": COMPONENT_RANK_ATOL,
         "component_names": list(OMNIB_COMPONENT_NAMES),
         "rank_reduced": np.asarray(scores.component_rank_reduced, int).tolist(),
@@ -361,6 +450,7 @@ class OmniBFamilyScores:
     edge_membership: np.ndarray = field(
         default_factory=lambda: np.empty(0, bool), repr=False)
     grm_provenance: dict = field(default_factory=dict)
+    retained_variant_mask_identity: dict = field(default_factory=dict)
     parallel_execution: dict = field(default_factory=dict)
     response_diagnostics: OmniBResponseDiagnostics | None = None
 
@@ -761,8 +851,11 @@ def prepare_omnib_design(
     if missing:
         raise ValueError(
             "master family references missing subgenomes: " + ", ".join(missing))
-    retained_variant_masks = _normalize_retained_variant_masks(
-        subdata, retained_variant_masks)
+    retained_variant_masks, retained_variant_mask_identity = (
+        _normalize_retained_variant_masks(
+            subdata, retained_variant_masks
+        )
+    )
 
     expanded = expand_pair_edges(family)
     if not expanded.edges:
@@ -895,6 +988,7 @@ def prepare_omnib_design(
         null_kernels=kernels,
         edge_membership=edge_membership,
         grm_provenance=grm_provenance,
+        retained_variant_mask_identity=retained_variant_mask_identity,
     )
     scores.fixed_mask_sha256 = _fixed_component_mask_sha256(scores)
     scores.null_fit_identity = {
@@ -912,7 +1006,14 @@ def prepare_omnib_design(
     }
     scores.null_fit_sha256 = _text_identity(scores.null_fit_identity)
     scores.prepared_design_identity = {
-        "schema": "homoeogwas-omnib-prepared-design-v1",
+        "schema": "homoeogwas-omnib-prepared-design-v2",
+        "implementation": {
+            "score_algorithm": PREPARED_SCORE_ALGORITHM,
+            "score_microblock_size": INDEXED_SCORE_MICROBLOCK,
+            "component_rank_algorithm": COMPONENT_RANK_ALGORITHM,
+            "component_rank_atol": COMPONENT_RANK_ATOL,
+            "feature_seed_scheme": FEATURE_SEED_SCHEME,
+        },
         "family": _family_provenance(family, expanded),
         "sample_index": _array_identity(sample_idx),
         "phenotype_analyzed": _array_identity(y),
@@ -923,6 +1024,31 @@ def prepare_omnib_design(
             sub: grm_provenance[sub]["retained_variant_mask_sha256"]
             for sub in sorted(grm_provenance)
         },
+        "retained_variant_masks": (
+            {
+                sub: retained_variant_mask_identity[sub]
+                for sub in sorted(retained_variant_mask_identity)
+            }
+            if retained_variant_mask_identity
+            else {
+                sub: {
+                    "source": "legacy_grm_filter",
+                    "input_variant_count": int(
+                        grm_provenance[sub]["n_variants_input"]
+                    ),
+                    "retained_variant_count": int(
+                        grm_provenance[sub]["n_variants_used"]
+                    ),
+                    "retained_variant_mask_encoding": grm_provenance[sub][
+                        "retained_variant_mask_encoding"
+                    ],
+                    "retained_variant_mask_sha256": grm_provenance[sub][
+                        "retained_variant_mask_sha256"
+                    ],
+                }
+                for sub in sorted(grm_provenance)
+            }
+        ),
         "transform": str(transform),
         "cap": int(cap),
         "n_pc": int(n_pc),
@@ -1219,22 +1345,46 @@ def score_omnib_null_indices(
     return edge_p, group_p
 
 
+def _normalized_nested_bases(
+    reduced: np.ndarray,
+    added: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Resolve the joint nested rank before building the added subspace."""
+
+    reduced = np.asarray(reduced, float)
+    added = np.asarray(added, float)
+    Qr = _normalized_svd_basis(reduced)
+    rank_reduced = int(Qr.shape[1])
+    Qfull = _normalized_svd_basis(np.column_stack((reduced, added)))
+    rank_full = int(Qfull.shape[1])
+    added_rank = rank_full - rank_reduced
+    if added_rank < 0:
+        raise RuntimeError("normalized nested-design rank decreased after adding columns")
+    if added_rank == 0:
+        return Qr, np.empty((reduced.shape[0], 0), float), rank_reduced, 0
+    residual = Qfull - Qr @ (Qr.T @ Qfull) if Qr.size else Qfull
+    U, singular_values, _ = np.linalg.svd(residual, full_matrices=False)
+    if singular_values.size < added_rank or singular_values[added_rank - 1] <= 0.0:
+        raise RuntimeError("nested-design added subspace cannot realize its joint rank")
+    return Qr, U[:, :added_rank], rank_reduced, added_rank
+
+
 def _prepare_omnib_nested_designs(Wh, Cw, gsx, gsy):
     """Cache response-independent nested-model bases for one omniB edge."""
     prepared = []
     for ax, ay in zip(gsx, gsy, strict=True):
         reduced = np.column_stack([Cw, Wh @ ax, Wh @ ay])
-        Qr = _normalized_svd_basis(reduced)
         cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
         added = Wh @ cross
-        added_residual = added - Qr @ (Qr.T @ added) if Qr.size else added
-        Qa = _normalized_svd_basis(added_residual)
+        Qr, Qa, rank_reduced, added_rank = _normalized_nested_bases(
+            reduced, added
+        )
         prepared.append((
             Qr,
             Qa,
-            int(Qr.shape[1]),
-            int(Qa.shape[1]),
-            int(reduced.shape[0] - Qr.shape[1] - Qa.shape[1]),
+            rank_reduced,
+            added_rank,
+            int(reduced.shape[0] - rank_reduced - added_rank),
         ))
     return tuple(prepared)
 
@@ -1705,6 +1855,8 @@ def run_group_scan_omnib(
     checkpoint_dir=None,
     checkpoint_block_size=25,
     checkpoint_manifest_context=None,
+    retained_variant_masks=None,
+    evidence_role="legacy",
 ):
     """Run an edge, group or jointly calibrated omniB family.
 
@@ -1722,6 +1874,16 @@ def run_group_scan_omnib(
         raise ValueError("family_scope must be primary_only or joint")
     if not isinstance(inferential, bool):
         raise ValueError("inferential must be true or false")
+    if evidence_role not in {"legacy", "formal", "benchmark"}:
+        raise ValueError("evidence_role must be legacy, formal or benchmark")
+    if evidence_role != "legacy" and feature_seed is None:
+        raise ValueError(
+            f"{evidence_role} evidence requires an explicit feature_seed"
+        )
+    if evidence_role == "benchmark":
+        _require_benchmark_mask_bindings(
+            retained_variant_masks, family, np.asarray(sample_idx, int)
+        )
     if str(transform).upper() != "INT":
         raise ValueError("formal omniB family calibration requires transform='INT'")
     if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
@@ -1740,7 +1902,8 @@ def run_group_scan_omnib(
             bootstrap_seed=bootstrap_seed, feature_seed=feature_seed,
             n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
-            min_snp=min_snp, covariates=covariates)
+            min_snp=min_snp, covariates=covariates,
+            retained_variant_masks=retained_variant_masks)
         primary_p, identities, family_id, calibrated_layers = (
             _select_primary_family(
                 scores, family, expanded, hypothesis_unit, family_scope))
@@ -1772,7 +1935,8 @@ def run_group_scan_omnib(
             bootstrap_seed=bootstrap_seed, feature_seed=feature_seed,
             n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
-            min_snp=min_snp, covariates=covariates)
+            min_snp=min_snp, covariates=covariates,
+            retained_variant_masks=retained_variant_masks)
         score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(

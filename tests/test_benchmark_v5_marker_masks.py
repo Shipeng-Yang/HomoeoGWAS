@@ -147,3 +147,117 @@ def test_legacy_omitted_mask_is_labelled_maf_only():
         provenance["filter_policy"]
         for provenance in scores.grm_provenance.values()
     } == {"legacy_maf_only"}
+
+
+def test_benchmark_evidence_role_requires_explicit_seed_and_masks():
+    subdata, family, phenotype, sample_idx, masks = _mask_fixture()
+    with pytest.raises(ValueError, match="explicit feature_seed"):
+        F.run_group_scan_omnib(
+            subdata,
+            family,
+            phenotype,
+            sample_idx,
+            evidence_role="benchmark",
+            retained_variant_masks=masks,
+            bootstrap_B=1,
+            n_jobs=1,
+            grm_method="grm_from_X",
+            min_snp=3,
+        )
+    with pytest.raises(ValueError, match="retained_variant_masks"):
+        F.run_group_scan_omnib(
+            subdata,
+            family,
+            phenotype,
+            sample_idx,
+            evidence_role="benchmark",
+            feature_seed=17,
+            bootstrap_B=1,
+            n_jobs=1,
+            grm_method="grm_from_X",
+            min_snp=3,
+        )
+
+
+def test_bound_mask_record_is_retained_in_prepared_design_identity():
+    subdata, family, phenotype, sample_idx, masks = _mask_fixture()
+    records = {}
+    sample_hash = F._array_identity(sample_idx)["sha256"]
+    for sub, mask in masks.items():
+        records[sub] = {
+            "mask": mask,
+            "sha256": _mask_sha256(mask),
+            "panel_id": "REALG.TEST",
+            "sample_context": "full",
+            "subgenome": sub,
+            "ordered_sample_index_sha256": sample_hash,
+            "source_BIM_sha256": ("a" if sub == "A" else "d") * 64,
+            "input_variant_count": 6,
+            "thresholds": {"call_rate_min": 0.90, "maf_min": 0.01, "mac_min": 5},
+            "retained_variant_count": 3,
+        }
+
+    scores, _ = F.prepare_omnib_design(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        feature_seed=17,
+        retained_variant_masks=records,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        burden_maf=0.01,
+        min_snp=3,
+        cap=150,
+        n_pc=3,
+        transform="INT",
+    )
+
+    identity = scores.prepared_design_identity["retained_variant_masks"]
+    assert identity["A"]["panel_id"] == "REALG.TEST"
+    assert identity["A"]["thresholds"] == {
+        "call_rate_min": 0.90,
+        "maf_min": 0.01,
+        "mac_min": 5,
+    }
+    assert identity["D"]["source_BIM_sha256"] == "d" * 64
+    assert "mask" not in identity["A"]
+
+
+def test_cli_benchmark_mask_records_bind_samples_thresholds_and_bim(tmp_path):
+    subdata, family, _phenotype, sample_idx, _masks = _mask_fixture()
+    prefixes = {}
+    for sub in family.subgenomes:
+        prefix = tmp_path / f"panel-{sub}"
+        (tmp_path / f"panel-{sub}.bim").write_text(
+            "".join(
+                f"{sub}\tv{index}\t0\t{index + 1}\tA\tC\n"
+                for index in range(6)
+            ),
+            encoding="utf-8",
+        )
+        prefixes[sub] = str(prefix)
+    config = {
+        "subgenomes": list(family.subgenomes),
+        "genotype": prefixes,
+        "benchmark_identity": {
+            "panel_id": "REALG.TEST",
+            "sample_context": "full",
+            "feature_seed": 17,
+        },
+    }
+
+    records = I._build_benchmark_mask_records(config, subdata, sample_idx)
+
+    expected_sample_hash = F._array_identity(sample_idx)["sha256"]
+    for sub, record in records.items():
+        assert record["panel_id"] == "REALG.TEST"
+        assert record["subgenome"] == sub
+        assert record["ordered_sample_index_sha256"] == expected_sample_hash
+        assert record["thresholds"] == {
+            "call_rate_min": 0.90,
+            "maf_min": 0.01,
+            "mac_min": 5,
+        }
+        assert len(record["source_BIM_sha256"]) == 64
+        assert record["sha256"] == record["retained_variant_mask_sha256"]

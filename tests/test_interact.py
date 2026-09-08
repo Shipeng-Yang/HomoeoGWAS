@@ -1389,6 +1389,31 @@ def test_quartet_formal_group_has_six_edges_and_no_fourth_order_fields(
         assert forbidden not in header
 
 
+def test_group_omnib_evidence_seed_resolution_is_role_aware():
+    base = {"burden": {}, "benchmark_identity": None}
+    assert I._resolve_group_omnib_evidence(base, verified_launch=None) == (
+        None,
+        "legacy",
+    )
+    with pytest.raises(ValueError, match="formal.*feature_seed"):
+        I._resolve_group_omnib_evidence(base, verified_launch=object())
+
+    benchmark = {
+        "burden": {},
+        "benchmark_identity": {
+            "panel_id": "REALG.TEST",
+            "sample_context": "full",
+            "feature_seed": 17,
+        },
+    }
+    assert I._resolve_group_omnib_evidence(
+        benchmark, verified_launch=None
+    ) == (17, "benchmark")
+    benchmark["burden"]["feature_seed"] = 19
+    with pytest.raises(ValueError, match="disagrees"):
+        I._resolve_group_omnib_evidence(benchmark, verified_launch=None)
+
+
 def test_cmd_interact_triad3_bypasses_group_normalization_and_route(
         monkeypatch, tmp_path):
     subs = ("A", "B", "D")
