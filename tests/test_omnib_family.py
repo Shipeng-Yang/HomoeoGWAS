@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import homoeogwas.interact as I
+import homoeogwas.omnib_family as F
 from homoeogwas.group_family import MasterGroupFamily
 from homoeogwas.interact import SubgenomeData, _score_omnib_family, acat
 from homoeogwas.omnib_family import (
@@ -124,6 +125,111 @@ def test_gene_features_are_cached_once_and_parallel_blocks_are_deterministic(mon
         subdata, family, rng.normal(size=n), np.arange(n), bootstrap_B=2,
         n_jobs=2, grm_method="grm_from_X", min_snp=3)
     np.testing.assert_array_equal(one.edge_p, parallel.edge_p)
+
+
+def test_gene_feature_seed_is_keyed_not_call_order():
+    burden = F._gene_feature_seed(17, "A", "g1", "minor_burden")
+    pc = F._gene_feature_seed(17, "A", "g1", "gene_pc")
+
+    assert burden == F._gene_feature_seed(17, "A", "g1", "minor_burden")
+    assert burden != pc
+    assert burden != F._gene_feature_seed(17, "A", "g2", "minor_burden")
+    with pytest.raises(ValueError, match="unknown feature_type"):
+        F._gene_feature_seed(17, "A", "g1", "unsupported")
+
+
+def test_capped_gene_features_survive_family_reordering_and_truncation():
+    rng = np.random.default_rng(921)
+    n = 56
+    subdata = {
+        sub: _subgenome(rng, n, 2, snps_per_gene=160)
+        for sub in ("A", "D")
+    }
+    forward_family = MasterGroupFamily(
+        ("A", "D"), ("over_cap", "other"),
+        (("g0", "g0"), ("g1", "g1")),
+    )
+    reverse_family = MasterGroupFamily(
+        ("A", "D"), ("other", "over_cap"),
+        (("g1", "g1"), ("g0", "g0")),
+    )
+    truncated_family = MasterGroupFamily(
+        ("A", "D"), ("over_cap",), (("g0", "g0"),),
+    )
+    phenotype = rng.normal(size=n)
+    sample_idx = np.arange(n)
+
+    forward, _ = F.score_omnib_family(
+        subdata, forward_family, phenotype, sample_idx,
+        bootstrap_B=0, bootstrap_seed=99, feature_seed=17,
+        n_jobs=1, grm_method="grm_from_X", cap=150, n_pc=3,
+    )
+    reverse, _ = F.score_omnib_family(
+        subdata, reverse_family, phenotype, sample_idx,
+        bootstrap_B=0, bootstrap_seed=101, feature_seed=17,
+        n_jobs=1, grm_method="grm_from_X", cap=150, n_pc=3,
+    )
+    truncated, _ = F.score_omnib_family(
+        subdata, truncated_family, phenotype, sample_idx,
+        bootstrap_B=0, bootstrap_seed=103, feature_seed=17,
+        n_jobs=1, grm_method="grm_from_X", cap=150, n_pc=3,
+    )
+
+    for sub in ("A", "D"):
+        key = (sub, "g0")
+        for candidate in (reverse, truncated):
+            for left, right in zip(
+                forward.feature_cache[key], candidate.feature_cache[key], strict=True,
+            ):
+                np.testing.assert_array_equal(left, right)
+            assert forward.feature_identity[key] == candidate.feature_identity[key]
+        assert forward.feature_identity[key]["retained_global_variant_indices"] == list(
+            range(160)
+        )
+        assert len(
+            forward.feature_identity[key]["selected_global_variant_indices"][
+                "minor_burden"
+            ]
+        ) == 150
+        assert len(
+            forward.feature_identity[key]["selected_global_variant_indices"]["gene_pc"]
+        ) == 150
+
+    assert forward.feature_cache_sha256 == reverse.feature_cache_sha256
+    assert (
+        forward.feature_identity[("A", "g0")]["child_seeds"]["minor_burden"]
+        != forward.feature_identity[("A", "g0")]["child_seeds"]["gene_pc"]
+    )
+
+
+def test_fixed_feature_seed_is_independent_of_bootstrap_seed():
+    rng = np.random.default_rng(922)
+    n = 48
+    subdata = {
+        sub: _subgenome(rng, n, 1, snps_per_gene=12)
+        for sub in ("A", "D")
+    }
+    family = MasterGroupFamily(("A", "D"), ("one",), (("g0", "g0"),))
+    phenotype = rng.normal(size=n)
+
+    first, _ = F.score_omnib_family(
+        subdata, family, phenotype, np.arange(n), cap=4,
+        feature_seed=4103, bootstrap_B=1, bootstrap_seed=11,
+        n_jobs=1, grm_method="grm_from_X", min_snp=3,
+    )
+    second, _ = F.score_omnib_family(
+        subdata, family, phenotype, np.arange(n), cap=4,
+        feature_seed=4103, bootstrap_B=1, bootstrap_seed=29,
+        n_jobs=1, grm_method="grm_from_X", min_snp=3,
+    )
+
+    assert first.feature_cache_sha256 == second.feature_cache_sha256
+    assert first.feature_identity == second.feature_identity
+    for key in first.feature_cache:
+        for left, right in zip(
+            first.feature_cache[key], second.feature_cache[key], strict=True,
+        ):
+            np.testing.assert_array_equal(left, right)
 
 
 def test_group_omnib_fork_is_bit_exact_to_serial():

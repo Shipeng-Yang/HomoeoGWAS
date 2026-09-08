@@ -3186,6 +3186,14 @@ def validate_interact_config(cfg: dict) -> None:
                 "ERR: canonical group omniB requires "
                 "interact.burden.maf_min=0.01; remove the explicit value to "
                 "use the canonical default")
+        feature_seed = burden.get("feature_seed")
+        if feature_seed is not None and (
+            isinstance(feature_seed, bool)
+            or not isinstance(feature_seed, int)
+            or feature_seed < 0
+        ):
+            raise SystemExit(
+                "ERR: interact.burden.feature_seed must be an integer >= 0")
     elif mode not in expected_n:
         raise SystemExit(
             "ERR: interact.mode must be group, pairwise (2 subgenomes), or triad "
@@ -3835,6 +3843,11 @@ def cmd_interact(args) -> int:
     perm_B = int(calib.get("perm_B", calib.get("B", 2000)))
     boot_B = int(calib.get("B", calib.get("perm_B", 2000)))
     boot_seed = int(calib.get("seed", 2026))
+    configured_feature_seed = burden.get("feature_seed")
+    feature_seed = (
+        None
+        if configured_feature_seed is None else int(configured_feature_seed)
+    )
     calibration_qa_only = bool(calib.get("qa_only", False))
     checkpoint_cfg = calib.get("checkpoint") or {}
     checkpoint_dir = (
@@ -3889,6 +3902,7 @@ def cmd_interact(args) -> int:
             transform="INT",
             bootstrap_B=boot_B,
             bootstrap_seed=boot_seed,
+            feature_seed=feature_seed,
             n_jobs=n_jobs,
             grm_method=grm_method,
             maf_min=maf_min,

@@ -1199,6 +1199,14 @@ def test_group_checkpoint_config_is_strict_and_canonical_only(tmp_path):
         I.validate_interact_config(pair)
 
 
+@pytest.mark.parametrize("bad_seed", [True, -1, 1.5, "4103"])
+def test_group_feature_seed_rejects_non_integer_or_negative_values(bad_seed):
+    cfg = _canonical_group_config()
+    cfg["interact"]["burden"]["feature_seed"] = bad_seed
+    with pytest.raises(SystemExit, match="burden.feature_seed"):
+        I.validate_interact_config(cfg)
+
+
 @pytest.mark.parametrize(
     ("legacy_mode", "subgenomes", "table_key", "hypothesis_unit"),
     [
@@ -1252,6 +1260,7 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     )
     cfg["outputs"] = {
         "out_dir": str(out_dir), "full_ranking": True, "plots": False}
+    cfg["interact"]["burden"]["feature_seed"] = 4103
     checkpoint_root = out_dir / "checkpoint"
     cfg["interact"]["calibration"]["checkpoint"] = {
         "enabled": True, "root": str(checkpoint_root), "block_size": 25}
@@ -1302,6 +1311,7 @@ def test_cmd_interact_routes_quartet_to_one_group_fwer_family(
     assert kwargs["hypothesis_unit"] == "group"
     assert kwargs["family_scope"] == "primary_only"
     assert kwargs["bootstrap_B"] == 2000
+    assert kwargs["feature_seed"] == 4103
     assert kwargs["checkpoint_dir"] == str(checkpoint_root)
     assert kwargs["checkpoint_block_size"] == 25
     payload = json.loads((out_dir / "interact_trait.json").read_text())

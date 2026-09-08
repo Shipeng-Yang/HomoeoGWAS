@@ -14,7 +14,129 @@ from .parallel import run_fork_blocks
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
 PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v2"
+FEATURE_SEED_SCHEME = "homoeogwas-feature-v1"
 _OMNIB_WORKER_STATE: dict | None = None
+
+
+def _resolve_feature_seed(feature_seed, bootstrap_seed: int) -> tuple[int, str]:
+    policy = "explicit"
+    if feature_seed is None:
+        feature_seed = bootstrap_seed
+        policy = "legacy_seed_fallback"
+    if isinstance(feature_seed, bool) or not isinstance(
+        feature_seed, (int, np.integer)
+    ) or int(feature_seed) < 0:
+        raise ValueError("feature_seed must be a non-negative integer")
+    return int(feature_seed), policy
+
+
+def _gene_feature_seed(
+    feature_seed: int,
+    subgenome: str,
+    gene_id: str,
+    feature_type: str,
+) -> int:
+    """Derive a stable per-gene, per-feature uint64 RNG seed."""
+    if feature_type not in {"minor_burden", "gene_pc"}:
+        raise ValueError("unknown feature_type")
+    payload = "\0".join((
+        FEATURE_SEED_SCHEME,
+        str(int(feature_seed)),
+        str(subgenome),
+        str(gene_id),
+        feature_type,
+    )).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _select_capped_indices(
+    size: int,
+    cap: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    local = np.arange(size, dtype=int)
+    if cap and local.size > cap:
+        local = np.sort(rng.choice(local, size=cap, replace=False))
+    return local
+
+
+def _little_endian_float64_identity(values: np.ndarray) -> dict:
+    array = np.ascontiguousarray(np.asarray(values, dtype="<f8"))
+    return {
+        "shape": list(array.shape),
+        "dtype": "<f8",
+        "sha256": hashlib.sha256(array.tobytes(order="C")).hexdigest(),
+    }
+
+
+def _build_keyed_gene_feature(
+    interaction_module,
+    Xg: np.ndarray,
+    retained_indices: np.ndarray,
+    *,
+    feature_seed: int,
+    subgenome: str,
+    gene_id: str,
+    cap: int,
+    n_pc: int,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], dict]:
+    burden_seed = _gene_feature_seed(
+        feature_seed, subgenome, gene_id, "minor_burden")
+    pc_seed = _gene_feature_seed(feature_seed, subgenome, gene_id, "gene_pc")
+    burden_rng = np.random.default_rng(burden_seed)
+    pc_rng = np.random.default_rng(pc_seed)
+    burden_local = _select_capped_indices(
+        retained_indices.size, cap, burden_rng)
+    pc_local = _select_capped_indices(
+        retained_indices.size, cap, pc_rng)
+    burden = interaction_module.block_burden_capped(
+        Xg, burden_local, 0, burden_rng, minor=True,
+    ).reshape(-1, 1)
+    pcs = interaction_module.gene_pc_scores(
+        Xg, pc_local, 0, pc_rng, n_pc,
+    )
+    feature = (burden, pcs[:, :1], pcs)
+    identity = {
+        "subgenome": str(subgenome),
+        "gene_id": str(gene_id),
+        "root_feature_seed": int(feature_seed),
+        "child_seeds": {
+            "minor_burden": int(burden_seed),
+            "gene_pc": int(pc_seed),
+        },
+        "cap": int(cap),
+        "n_pc": int(n_pc),
+        "retained_global_variant_indices": [
+            int(value) for value in retained_indices
+        ],
+        "selected_global_variant_indices": {
+            "minor_burden": [
+                int(value) for value in retained_indices[burden_local]
+            ],
+            "gene_pc": [int(value) for value in retained_indices[pc_local]],
+        },
+        "minor_burden": _little_endian_float64_identity(burden),
+        "gene_pc": _little_endian_float64_identity(pcs),
+    }
+    return feature, identity
+
+
+def _feature_cache_sha256(feature_identity: dict) -> str:
+    records = [
+        feature_identity[key]
+        for key in sorted(
+            feature_identity,
+            key=lambda value: (str(value[0]), str(value[1])),
+        )
+    ]
+    payload = json.dumps(
+        records,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _set_omnib_worker_state(state: dict) -> None:
@@ -124,6 +246,9 @@ class OmniBFamilyScores:
     group_partial: np.ndarray = field(default_factory=lambda: np.empty(0, bool))
     gated_snp: dict = field(default_factory=dict, repr=False)
     feature_cache: dict = field(default_factory=dict, repr=False)
+    feature_identity: dict = field(default_factory=dict)
+    feature_cache_sha256: str = ""
+    feature_seed_provenance: dict = field(default_factory=dict)
     covariate_block: np.ndarray | None = field(default=None, repr=False)
     covariate_metadata: dict = field(default_factory=dict)
     null_covariance: np.ndarray | None = field(default=None, repr=False)
@@ -210,6 +335,7 @@ def score_omnib_family(
     transform: str = "INT",
     bootstrap_B: int = 2000,
     bootstrap_seed: int = 2026,
+    feature_seed: int | None = None,
     n_jobs: int = 8,
     grm_method: str = "compute_grm_maf",
     maf_min: float = 0.01,
@@ -231,6 +357,8 @@ def score_omnib_family(
     bootstrap_B = int(bootstrap_B)
     if bootstrap_B < 0:
         raise ValueError("bootstrap_B must be >= 0")
+    feature_seed, feature_seed_policy = _resolve_feature_seed(
+        feature_seed, bootstrap_seed)
     if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
         raise ValueError("n_jobs must be an integer >= 1")
     n_jobs = int(n_jobs)
@@ -274,9 +402,9 @@ def score_omnib_family(
         kernels, y, C, seed=42)
     Cw = W @ C_design
 
-    feature_rng = np.random.default_rng(bootstrap_seed)
     gated: dict[tuple[str, str], np.ndarray] = {}
     features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    feature_identity: dict[tuple[str, str], dict] = {}
 
     def gated_snps(sub: str, gene: str) -> np.ndarray | None:
         key = (sub, gene)
@@ -294,11 +422,16 @@ def score_omnib_family(
         key = (sub, gene)
         if key not in features:
             Xg = subdata[sub].X[np.ix_(sample_idx, indices)]
-            local = np.arange(indices.size)
-            burden = I.block_burden_capped(
-                Xg, local, cap, feature_rng, minor=True).reshape(-1, 1)
-            pcs = I.gene_pc_scores(Xg, local, cap, feature_rng, n_pc)
-            features[key] = burden, pcs[:, :1], pcs
+            features[key], feature_identity[key] = _build_keyed_gene_feature(
+                I,
+                Xg,
+                indices,
+                feature_seed=feature_seed,
+                subgenome=sub,
+                gene_id=gene,
+                cap=cap,
+                n_pc=n_pc,
+            )
         return features[key]
 
     edge_estimable = np.zeros(len(expanded.edges), bool)
@@ -382,6 +515,13 @@ def score_omnib_family(
         group_partial=group_partial,
         gated_snp=gated,
         feature_cache=features,
+        feature_identity=feature_identity,
+        feature_cache_sha256=_feature_cache_sha256(feature_identity),
+        feature_seed_provenance={
+            "scheme": FEATURE_SEED_SCHEME,
+            "root_seed": feature_seed,
+            "policy": feature_seed_policy,
+        },
         covariate_block=C,
         covariate_metadata=covariate_metadata,
         null_covariance=V,
@@ -517,6 +657,7 @@ def _prepare_checkpoint_omnib(
     burden_maf: float,
     min_snp: int,
     covariates: dict | None,
+    feature_seed: int | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Prepare formal null/features/projections without legacy response scoring."""
     from . import interact as I
@@ -527,6 +668,8 @@ def _prepare_checkpoint_omnib(
         raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
     if not np.all(np.isfinite(y_raw)):
         raise ValueError("phenotype contains non-finite values")
+    feature_seed, feature_seed_policy = _resolve_feature_seed(
+        feature_seed, bootstrap_seed)
     if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
         raise ValueError("n_jobs must be an integer >= 1")
     missing = [sub for sub in family.subgenomes if sub not in subdata]
@@ -564,9 +707,9 @@ def _prepare_checkpoint_omnib(
     W, V, beta, covariance_components = I.null_lmm_fit(
         kernels, y, C, seed=42)
 
-    feature_rng = np.random.default_rng(bootstrap_seed)
     gated: dict[tuple[str, str], np.ndarray] = {}
     features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    feature_identity: dict[tuple[str, str], dict] = {}
 
     def gated_snps(sub: str, gene: str) -> np.ndarray | None:
         key = (sub, gene)
@@ -584,11 +727,16 @@ def _prepare_checkpoint_omnib(
         key = (sub, gene)
         if key not in features:
             Xg = subdata[sub].X[np.ix_(sample_idx, indices)]
-            local = np.arange(indices.size)
-            burden = I.block_burden_capped(
-                Xg, local, cap, feature_rng, minor=True).reshape(-1, 1)
-            pcs = I.gene_pc_scores(Xg, local, cap, feature_rng, n_pc)
-            features[key] = burden, pcs[:, :1], pcs
+            features[key], feature_identity[key] = _build_keyed_gene_feature(
+                I,
+                Xg,
+                indices,
+                feature_seed=feature_seed,
+                subgenome=sub,
+                gene_id=gene,
+                cap=cap,
+                n_pc=n_pc,
+            )
         return features[key]
 
     edge_membership = np.zeros(len(expanded.edges), bool)
@@ -617,6 +765,13 @@ def _prepare_checkpoint_omnib(
         group_partial=np.zeros(len(family.group_ids), bool),
         gated_snp=gated,
         feature_cache=features,
+        feature_identity=feature_identity,
+        feature_cache_sha256=_feature_cache_sha256(feature_identity),
+        feature_seed_provenance={
+            "scheme": FEATURE_SEED_SCHEME,
+            "root_seed": feature_seed,
+            "policy": feature_seed_policy,
+        },
         covariate_block=C,
         covariate_metadata=covariate_metadata,
         null_covariance=V,
@@ -1272,6 +1427,10 @@ def _checkpoint_manifest(
         "burden": {
             "cap": int(cap), "n_pc": int(n_pc), "maf_min": float(burden_maf),
             "min_snp": int(min_snp),
+            "feature_seed": int(scores.feature_seed_provenance["root_seed"]),
+            "feature_seed_policy": scores.feature_seed_provenance["policy"],
+            "feature_seed_scheme": scores.feature_seed_provenance["scheme"],
+            "feature_cache_sha256": scores.feature_cache_sha256,
         },
         "subgenome_inputs": subgenome_identity,
         "context": manifest_context or {},
@@ -1297,6 +1456,7 @@ def run_group_scan_omnib(
     transform="INT",
     bootstrap_B=2000,
     bootstrap_seed=2026,
+    feature_seed=None,
     n_jobs=8,
     grm_method="grm_from_X",
     maf_min=0.01,
@@ -1333,6 +1493,7 @@ def run_group_scan_omnib(
     bootstrap_B = int(bootstrap_B)
     if bootstrap_B < 1:
         raise ValueError("formal calibration requires at least one bootstrap replicate")
+    _resolve_feature_seed(feature_seed, bootstrap_seed)
     checkpoint_metadata = None
     if checkpoint_dir is None:
         # Keep the historical, single-stream bootstrap byte-for-byte unchanged
@@ -1340,7 +1501,8 @@ def run_group_scan_omnib(
         scores, expanded = score_omnib_family(
             subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
             transform="INT", bootstrap_B=bootstrap_B,
-            bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+            bootstrap_seed=bootstrap_seed, feature_seed=feature_seed,
+            n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates)
         primary_p, identities, family_id, calibrated_layers = (
@@ -1371,7 +1533,8 @@ def run_group_scan_omnib(
         scores, expanded = _prepare_checkpoint_omnib(
             subdata, family, y_raw, sample_idx, cap=cap, n_pc=n_pc,
             transform="INT",
-            bootstrap_seed=bootstrap_seed, n_jobs=n_jobs,
+            bootstrap_seed=bootstrap_seed, feature_seed=feature_seed,
+            n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates)
         score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
@@ -1577,6 +1740,9 @@ def run_group_scan_omnib(
             "method": grm_method,
             "maf_min": float(maf_min),
             "subgenomes": scores.grm_provenance,
+        },
+        "feature_provenance": scores.feature_seed_provenance | {
+            "feature_cache_sha256": scores.feature_cache_sha256,
         },
     }
     if checkpoint_metadata is not None:

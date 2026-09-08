@@ -244,6 +244,36 @@ def test_checkpoint_observed_artifact_is_written_from_prepared_scorer(
         assert len(provenance["retained_variant_mask_sha256"]) == 64
 
 
+def test_checkpoint_manifest_binds_feature_seed_separately_from_bootstrap_seed(
+    tmp_path,
+):
+    subdata, family, y, sample_idx = _family_fixture()
+    F.run_group_scan_omnib(
+        subdata,
+        family,
+        y,
+        sample_idx,
+        hypothesis_unit="edge",
+        feature_seed=4103,
+        bootstrap_B=1,
+        bootstrap_seed=2026,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        min_snp=3,
+        checkpoint_dir=tmp_path / "checkpoint",
+        checkpoint_block_size=1,
+    )
+
+    manifest = json.loads(
+        (tmp_path / "checkpoint" / "manifest.json").read_text()
+    )["manifest"]
+    assert manifest["bootstrap"] == {"B": 1, "seed": 2026}
+    assert manifest["burden"]["feature_seed"] == 4103
+    assert manifest["burden"]["feature_seed_policy"] == "explicit"
+    assert len(manifest["burden"]["feature_cache_sha256"]) == 64
+
+
 def _subgenome_for_grm(X: np.ndarray) -> SubgenomeData:
     return SubgenomeData(
         X=np.asarray(X, float),
