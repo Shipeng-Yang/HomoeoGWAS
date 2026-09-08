@@ -90,7 +90,7 @@ def test_callable_edge_nonfinite_after_whitening_aborts(monkeypatch):
     family = MasterGroupFamily(("A", "D"), ("g",), (("g0", "g0"),))
 
     monkeypatch.setattr(
-        I, "_omnib_components_over_Y",
+        F, "_prepared_components_over_Y",
         lambda *args, **kwargs: np.full((3, 2), np.nan))
     with pytest.raises(RuntimeError, match="post-whitening.*non-finite"):
         _score_omnib_family(
@@ -368,7 +368,7 @@ def _legacy_pair_matrix(subdata, pairs, y_raw, sample_idx, *, B, seed):
     ])
 
 
-def test_shared_pair_wrapper_is_frozen_legacy_equivalent(tmp_path):
+def test_shared_pair_wrapper_is_numerically_legacy_equivalent(tmp_path):
     rng = np.random.default_rng(920)
     n, group_count, B, seed = 64, 4, 19, 2026
     subdata = {
@@ -387,7 +387,8 @@ def test_shared_pair_wrapper_is_frozen_legacy_equivalent(tmp_path):
     shared, _expanded = _score_omnib_family(
         subdata, family, y, sample_idx, bootstrap_B=B,
         bootstrap_seed=seed, n_jobs=1, grm_method="grm_from_X", min_snp=3)
-    np.testing.assert_array_equal(shared.edge_p[:, 0], old_P[:, 0])
+    np.testing.assert_allclose(
+        shared.edge_p[:, 0], old_P[:, 0], rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(
         shared.edge_p[:, 1:], old_P[:, 1:], rtol=1e-10, atol=1e-14)
 
@@ -406,7 +407,8 @@ def test_shared_pair_wrapper_is_frozen_legacy_equivalent(tmp_path):
 
     assert result.G == result.n_planned == result.n_valid == group_count
     assert result.n_unestimable == 0
-    assert result.min_p == old_P[:, 0].min()
+    assert result.min_p == pytest.approx(
+        old_P[:, 0].min(), rel=1e-12, abs=1e-14)
     assert result.minp_boot_threshold == pytest.approx(
         expected_threshold, rel=1e-10, abs=1e-14)
     assert result.minp_boot_emp == expected_global
@@ -425,7 +427,8 @@ def test_shared_pair_wrapper_is_frozen_legacy_equivalent(tmp_path):
     assert [tuple(record["pair"]) for record in result.sig] == expected_sig
     header, *rows = [line.split("\t") for line in ranking.read_text().splitlines()]
     dumped = [float(row[header.index("p_interaction")]) for row in rows]
-    assert dumped == sorted(old_P[:, 0].tolist())
+    np.testing.assert_allclose(
+        dumped, sorted(old_P[:, 0].tolist()), rtol=1e-12, atol=1e-14)
 
 
 def test_clique_wrapper_full_ranking_keeps_edge_and_component_localization(tmp_path):

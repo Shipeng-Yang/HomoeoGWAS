@@ -15,6 +15,7 @@ import pytest
 from scipy import stats
 
 import homoeogwas.interact as I
+import homoeogwas.omnib_family as F
 from homoeogwas import workflow
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.interact import (
@@ -1011,7 +1012,7 @@ def test_omnib_family_rejects_nonfinite_observed_score_for_callable_edge(monkeyp
     def _nonfinite(*args, **kwargs):
         return np.full((3, 2), np.nan)
 
-    monkeypatch.setattr(I, "_omnib_components_over_Y", _nonfinite)
+    monkeypatch.setattr(F, "_prepared_components_over_Y", _nonfinite)
     with pytest.raises(RuntimeError, match="post-whitening.*non-finite"):
         _score_omnib_family(
             subdata, family, rng.normal(size=n), np.arange(n), bootstrap_B=1,

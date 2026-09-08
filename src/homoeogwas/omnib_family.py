@@ -16,6 +16,7 @@ OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
 PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v2"
 FEATURE_SEED_SCHEME = "homoeogwas-feature-v1"
+COMPONENT_RANK_ATOL = 1.0e-10
 _OMNIB_WORKER_STATE: dict | None = None
 
 
@@ -186,6 +187,71 @@ def _normalize_retained_variant_masks(
     return normalized
 
 
+def _normalized_svd_basis(
+    matrix: np.ndarray,
+    *,
+    atol: float = COMPONENT_RANK_ATOL,
+) -> np.ndarray:
+    matrix = np.asarray(matrix, float)
+    if matrix.ndim != 2:
+        raise ValueError("rank matrix must be two-dimensional")
+    if not np.isfinite(matrix).all():
+        raise ValueError("rank matrix contains non-finite values")
+    if not np.isfinite(atol) or atol < 0.0:
+        raise ValueError("rank atol must be finite and non-negative")
+    if matrix.shape[1] == 0:
+        return np.empty((matrix.shape[0], 0), float)
+    norms = np.linalg.norm(matrix, axis=0)
+    normalized = np.zeros_like(matrix, dtype=float)
+    nonzero = norms > 0.0
+    normalized[:, nonzero] = matrix[:, nonzero] / norms[nonzero]
+    U, singular_values, _ = np.linalg.svd(normalized, full_matrices=False)
+    return U[:, singular_values > atol]
+
+
+def _normalized_svd_rank(
+    matrix: np.ndarray,
+    *,
+    atol: float = COMPONENT_RANK_ATOL,
+) -> int:
+    return int(_normalized_svd_basis(matrix, atol=atol).shape[1])
+
+
+def _component_design_signature(
+    gsx,
+    gsy,
+    C: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ranks = np.empty(len(OMNIB_COMPONENT_NAMES), dtype=int)
+    numerator_df = np.empty(len(OMNIB_COMPONENT_NAMES), dtype=int)
+    denominator_df = np.empty(len(OMNIB_COMPONENT_NAMES), dtype=int)
+    n = int(np.asarray(C).shape[0])
+    for component, (ax, ay) in enumerate(zip(gsx, gsy, strict=True)):
+        reduced = np.column_stack((C, ax, ay))
+        cross = (ax[:, :, None] * ay[:, None, :]).reshape(n, -1)
+        rank_reduced = _normalized_svd_rank(reduced)
+        rank_full = _normalized_svd_rank(np.column_stack((reduced, cross)))
+        ranks[component] = rank_reduced
+        numerator_df[component] = rank_full - rank_reduced
+        denominator_df[component] = n - rank_full
+    return ranks, numerator_df, denominator_df
+
+
+def _fixed_component_mask_sha256(scores) -> str:
+    payload = {
+        "algorithm": "normalized-column-svd-absolute-v1",
+        "atol": COMPONENT_RANK_ATOL,
+        "component_names": list(OMNIB_COMPONENT_NAMES),
+        "rank_reduced": np.asarray(scores.component_rank_reduced, int).tolist(),
+        "numerator_df": np.asarray(scores.component_dfn, int).tolist(),
+        "denominator_df": np.asarray(scores.component_dfd, int).tolist(),
+        "estimable": np.asarray(scores.component_estimable, bool).tolist(),
+    }
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
 def _set_omnib_worker_state(state: dict) -> None:
     global _OMNIB_WORKER_STATE
     _OMNIB_WORKER_STATE = state
@@ -201,30 +267,6 @@ def _require_omnib_worker_state(mode: str) -> dict:
     if state is None or state.get("mode") != mode:
         raise RuntimeError(f"omniB {mode} worker state is not installed")
     return state
-
-
-def _score_family_block(bounds):
-    from . import interact as I
-
-    state = _require_omnib_worker_state("family")
-    lo, hi = bounds
-    indices = state["valid_indices"][lo:hi]
-    response_count = state["response_count"]
-    values = np.full((indices.size, response_count), np.nan)
-    observed = np.full((indices.size, len(OMNIB_COMPONENT_NAMES)), np.nan)
-    for local, edge_index in enumerate(indices):
-        edge = state["expanded"].edges[int(edge_index)]
-        components = I._omnib_components_over_Y(
-            state["W"], state["whitened_responses"], state["Cw"],
-            state["features"][(edge.sub_x, edge.gene_x)],
-            state["features"][(edge.sub_y, edge.gene_y)],
-        )
-        values[local] = np.asarray([
-            I.acat(components[:, column])
-            for column in range(response_count)
-        ], float)
-        observed[local] = components[:, 0]
-    return indices, values, observed
 
 
 def _score_subset_block(bounds):
@@ -296,6 +338,19 @@ class OmniBFamilyScores:
     feature_identity: dict = field(default_factory=dict)
     feature_cache_sha256: str = ""
     feature_seed_provenance: dict = field(default_factory=dict)
+    component_rank_reduced: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), int))
+    component_dfn: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), int))
+    component_dfd: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), int))
+    component_estimable: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), bool))
+    fixed_mask_sha256: str = ""
+    null_fit_identity: dict = field(default_factory=dict, repr=False)
+    null_fit_sha256: str = ""
+    prepared_design_identity: dict = field(default_factory=dict, repr=False)
+    prepared_design_sha256: str = ""
     covariate_block: np.ndarray | None = field(default=None, repr=False)
     covariate_metadata: dict = field(default_factory=dict)
     null_covariance: np.ndarray | None = field(default=None, repr=False)
@@ -333,24 +388,6 @@ def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
         cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
         components.append(I._batch_nested_f(Yw, reduced, Wh @ cross))
     return np.vstack(components)
-
-
-def _edge_design_estimable(gsx, gsy, C: np.ndarray) -> bool:
-    """Predeclare target rank using genotype/covariates only."""
-    from scipy.linalg import orth
-
-    bx, p1x, PX = gsx
-    by, p1y, PY = gsy
-    n = C.shape[0]
-    for ax, ay in ((bx, by), (p1x, p1y), (PX, PY)):
-        reduced = np.column_stack([C, ax, ay])
-        Qr = orth(reduced)
-        cross = (ax[:, :, None] * ay[:, None, :]).reshape(n, -1)
-        residual = cross - Qr @ (Qr.T @ cross) if Qr.size else cross
-        Qa = orth(residual)
-        if Qa.shape[1] and n - Qr.shape[1] - Qa.shape[1] > 0:
-            return True
-    return False
 
 
 def _null_bootstrap_responses(
@@ -391,207 +428,65 @@ def score_omnib_family(
     covariates: dict = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
-    """Score unique edges once, then ACAT-reduce the shared matrix by group."""
-    from . import interact as I
-
-    sample_idx = np.asarray(sample_idx, int)
-    y_raw = np.asarray(y_raw, float)
-    if y_raw.ndim != 1 or y_raw.size != sample_idx.size:
-        raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
-    if not np.all(np.isfinite(y_raw)):
-        raise ValueError("phenotype contains non-finite values")
+    """Prepare once, then score observed and optional bootstrap responses."""
     if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
         raise ValueError("bootstrap_B must be an integer")
     bootstrap_B = int(bootstrap_B)
     if bootstrap_B < 0:
         raise ValueError("bootstrap_B must be >= 0")
-    feature_seed, feature_seed_policy = _resolve_feature_seed(
+    resolved_feature_seed, feature_seed_policy = _resolve_feature_seed(
         feature_seed, bootstrap_seed)
     if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
         raise ValueError("n_jobs must be an integer >= 1")
     n_jobs = int(n_jobs)
-    missing = [sub for sub in family.subgenomes if sub not in subdata]
-    if missing:
-        raise ValueError(
-            "master family references missing subgenomes: " + ", ".join(missing))
-    retained_variant_masks = _normalize_retained_variant_masks(
-        subdata, retained_variant_masks)
-
-    expanded = expand_pair_edges(family)
-    if not expanded.edges:
-        raise ValueError("master homoeolog family contains no pair edges")
-
-    # All supplied subgenomes enter one null fit. This preserves the historical
-    # pair wrapper's all-kernel behavior and gives canonical AB/AD/BD edges the
-    # exact same whitener and bootstrap response columns.
-    subs = list(subdata)
-    n = sample_idx.size
-    kernels = {}
-    grm_provenance = {}
-    for sub in subs:
-        kernel, provenance = I._build_grm(
-            subdata[sub], sample_idx, grm_method, maf_min,
-            retained_variant_mask=(
-                None
-                if retained_variant_masks is None
-                else retained_variant_masks[sub]
-            ),
-            return_provenance=True)
-        kernels[sub] = kernel
-        # The full retained mask is useful to direct callers but would make a
-        # formal manifest scale with every input variant. Its deterministic
-        # hash and counts are the immutable checkpoint identity.
-        grm_provenance[sub] = {
-            key: value for key, value in provenance.items()
-            if key != "retained_variant_mask"
-        }
-    C = None
-    covariate_metadata = {"policy": "none"}
-    if covariates:
-        C, covariate_metadata = I.build_covariate_block(
-            kernels, n, n_pcs=int(covariates.get("n_pcs", 0)),
-            extra=covariates.get("extra"))
-    C_design = np.ones((n, 1)) if C is None else np.asarray(C, float).reshape(n, -1)
-    y = I.rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
-    W, V, beta, covariance_components = I.null_lmm_fit(
-        kernels, y, C, seed=42)
-    Cw = W @ C_design
-
-    gated: dict[tuple[str, str], np.ndarray] = {}
-    features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    feature_identity: dict[tuple[str, str], dict] = {}
-
-    def gated_snps(sub: str, gene: str) -> np.ndarray | None:
-        key = (sub, gene)
-        if key in gated:
-            return gated[key]
-        if gene not in subdata[sub].gene_snp:
-            return None
-        indices = np.asarray(subdata[sub].gene_snp[gene], int)
-        if retained_variant_masks is not None:
-            indices = indices[retained_variant_masks[sub][indices]]
-        if indices.size == 0:
-            gated[key] = indices
-            return gated[key]
-        means = np.nanmean(
-            subdata[sub].X[np.ix_(sample_idx, indices)], axis=0) / 2.0
-        gated[key] = indices[np.minimum(means, 1.0 - means) >= burden_maf]
-        return gated[key]
-
-    def feature(sub: str, gene: str, indices: np.ndarray):
-        key = (sub, gene)
-        if key not in features:
-            Xg = subdata[sub].X[np.ix_(sample_idx, indices)]
-            features[key], feature_identity[key] = _build_keyed_gene_feature(
-                I,
-                Xg,
-                indices,
-                feature_seed=feature_seed,
-                subgenome=sub,
-                gene_id=gene,
-                cap=cap,
-                n_pc=n_pc,
-            )
-        return features[key]
-
-    edge_estimable = np.zeros(len(expanded.edges), bool)
-    for edge_index, edge in enumerate(expanded.edges):
-        ix = gated_snps(edge.sub_x, edge.gene_x)
-        iy = gated_snps(edge.sub_y, edge.gene_y)
-        if ix is None or iy is None or ix.size < min_snp or iy.size < min_snp:
-            continue
-        fx = feature(edge.sub_x, edge.gene_x, ix)
-        fy = feature(edge.sub_y, edge.gene_y, iy)
-        edge_estimable[edge_index] = _edge_design_estimable(fx, fy, C_design)
-
+    scores, expanded = prepare_omnib_design(
+        subdata,
+        family,
+        y_raw,
+        sample_idx,
+        cap=cap,
+        n_pc=n_pc,
+        transform=transform,
+        feature_seed=resolved_feature_seed,
+        retained_variant_masks=retained_variant_masks,
+        grm_method=grm_method,
+        maf_min=maf_min,
+        burden_maf=burden_maf,
+        min_snp=min_snp,
+        covariates=covariates,
+    )
+    scores.feature_seed_provenance["policy"] = feature_seed_policy
     response_count = bootstrap_B + 1
-    responses = np.empty((n, response_count), float)
-    responses[:, 0] = y
+    responses = np.empty((scores.y.size, response_count), float)
+    responses[:, 0] = scores.y
     if bootstrap_B:
         responses[:, 1:] = _null_bootstrap_responses(
-            V, np.asarray(beta, float), C_design, bootstrap_B, bootstrap_seed)
-    whitened_responses = W @ responses
-
-    edge_p = np.full((len(expanded.edges), response_count), np.nan)
-    edge_components_obs = np.full(
-        (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan)
-    valid_indices = np.flatnonzero(edge_estimable)
-
-    step = max(1, valid_indices.size // (n_jobs * 8))
-    blocks = [
-        (lo, min(lo + step, valid_indices.size))
-        for lo in range(0, valid_indices.size, step)
-    ]
-    worker_state = {
-        "mode": "family",
-        "valid_indices": valid_indices,
-        "response_count": response_count,
-        "expanded": expanded,
-        "W": W,
-        "whitened_responses": whitened_responses,
-        "Cw": Cw,
-        "features": features,
-    }
-    results, execution = run_fork_blocks(
-        blocks, _score_family_block, n_jobs=n_jobs,
-        state_setter=lambda: _set_omnib_worker_state(worker_state),
-        state_clearer=_clear_omnib_worker_state,
-    )
-    for indices, values, observed in results:
-        edge_p[indices] = values
-        edge_components_obs[indices] = observed
-
-    failed = edge_estimable & ~np.isfinite(edge_p[:, 0])
+            scores.null_covariance,
+            scores.null_beta,
+            scores.null_design,
+            bootstrap_B,
+            bootstrap_seed,
+        )
+    edge_p, group_p, edge_components = score_omnib_responses(
+        scores, family, expanded, responses, n_jobs=n_jobs)
+    failed = scores.edge_estimable & ~np.isfinite(edge_p[:, 0])
     if failed.any():
         failed_ids = [expanded.edges[i].edge_id for i in np.flatnonzero(failed)[:5]]
         raise RuntimeError(
             "design-valid edge produced a post-whitening non-finite observed "
             f"omniB score: {', '.join(failed_ids)}")
-
-    group_p = np.full((len(family.group_ids), response_count), np.nan)
-    group_partial = np.zeros(len(family.group_ids), bool)
-    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
-        indices = np.asarray(edge_indices, int)
-        valid_count = int(edge_estimable[indices].sum())
-        group_partial[group_index] = 0 < valid_count < indices.size
-        if indices.size == 1:
-            group_p[group_index] = edge_p[indices[0]]
-        else:
-            for column in range(response_count):
-                group_p[group_index, column] = I.acat(edge_p[indices, column])
-
-    return OmniBFamilyScores(
-        edge_p=edge_p,
-        group_p=group_p,
-        edge_components_obs=edge_components_obs,
-        edge_estimable=edge_estimable,
-        group_estimable=np.isfinite(group_p[:, 0]),
-        W=W,
-        y=y,
-        covariance_components={
-            str(name): float(value)
-            for name, value in covariance_components.items()
-        },
-        group_partial=group_partial,
-        gated_snp=gated,
-        feature_cache=features,
-        feature_identity=feature_identity,
-        feature_cache_sha256=_feature_cache_sha256(feature_identity),
-        feature_seed_provenance={
-            "scheme": FEATURE_SEED_SCHEME,
-            "root_seed": feature_seed,
-            "policy": feature_seed_policy,
-        },
-        covariate_block=C,
-        covariate_metadata=covariate_metadata,
-        null_covariance=V,
-        null_beta=np.asarray(beta, float),
-        null_design=C_design,
-        null_kernels=kernels,
-        edge_membership=edge_estimable.copy(),
-        grm_provenance=grm_provenance,
-        parallel_execution=execution.as_dict(),
-    ), expanded
+    failed_groups = scores.group_estimable & ~np.isfinite(group_p[:, 0])
+    if failed_groups.any():
+        failed_ids = [
+            family.group_ids[i] for i in np.flatnonzero(failed_groups)[:5]
+        ]
+        raise RuntimeError(
+            "design-valid group produced a post-whitening non-finite observed "
+            f"omniB score: {', '.join(failed_ids)}")
+    scores.edge_p = edge_p
+    scores.group_p = group_p
+    scores.edge_components_obs = edge_components[:, :, 0]
+    return scores, expanded
 
 
 def score_omnib_subset(
@@ -701,7 +596,7 @@ def score_omnib_subset(
     )
 
 
-def _prepare_checkpoint_omnib(
+def prepare_omnib_design(
     subdata: dict,
     family: MasterGroupFamily,
     y_raw: np.ndarray,
@@ -710,17 +605,15 @@ def _prepare_checkpoint_omnib(
     cap: int,
     n_pc: int,
     transform: str,
-    bootstrap_seed: int,
-    n_jobs: int,
+    feature_seed: int,
     grm_method: str,
     maf_min: float,
     burden_maf: float,
     min_snp: int,
-    covariates: dict | None,
-    feature_seed: int | None = None,
+    covariates: dict | None = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
-    """Prepare formal null/features/projections without legacy response scoring."""
+    """Prepare one immutable raw-family/null/feature omniB design."""
     from . import interact as I
 
     sample_idx = np.asarray(sample_idx, int)
@@ -729,10 +622,9 @@ def _prepare_checkpoint_omnib(
         raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
     if not np.all(np.isfinite(y_raw)):
         raise ValueError("phenotype contains non-finite values")
-    feature_seed, feature_seed_policy = _resolve_feature_seed(
-        feature_seed, bootstrap_seed)
-    if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
-        raise ValueError("n_jobs must be an integer >= 1")
+    if feature_seed is None:
+        raise ValueError("prepare_omnib_design requires an explicit feature_seed")
+    feature_seed, feature_seed_policy = _resolve_feature_seed(feature_seed, 0)
     missing = [sub for sub in family.subgenomes if sub not in subdata]
     if missing:
         raise ValueError(
@@ -772,8 +664,6 @@ def _prepare_checkpoint_omnib(
         if C is None else np.asarray(C, float).reshape(n, -1)
     )
     y = I.rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
-    W, V, beta, covariance_components = I.null_lmm_fit(
-        kernels, y, C, seed=42)
 
     gated: dict[tuple[str, str], np.ndarray] = {}
     features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
@@ -812,15 +702,31 @@ def _prepare_checkpoint_omnib(
             )
         return features[key]
 
-    edge_membership = np.zeros(len(expanded.edges), bool)
+    component_rank_reduced = np.full(
+        (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), -1, int)
+    component_dfn = np.full_like(component_rank_reduced, -1)
+    component_dfd = np.full_like(component_rank_reduced, -1)
+    component_estimable = np.zeros_like(component_rank_reduced, dtype=bool)
     for edge_index, edge in enumerate(expanded.edges):
         ix = gated_snps(edge.sub_x, edge.gene_x)
         iy = gated_snps(edge.sub_y, edge.gene_y)
         if ix is None or iy is None or ix.size < min_snp or iy.size < min_snp:
             continue
-        feature(edge.sub_x, edge.gene_x, ix)
-        feature(edge.sub_y, edge.gene_y, iy)
-        edge_membership[edge_index] = True
+        fx = feature(edge.sub_x, edge.gene_x, ix)
+        fy = feature(edge.sub_y, edge.gene_y, iy)
+        ranks, dfn, dfd = _component_design_signature(fx, fy, C_design)
+        component_rank_reduced[edge_index] = ranks
+        component_dfn[edge_index] = dfn
+        component_dfd[edge_index] = dfd
+        component_estimable[edge_index] = (dfn >= 1) & (dfd >= 1)
+
+    edge_membership = component_estimable.any(axis=1)
+    group_estimable = np.asarray([
+        bool(edge_membership[np.asarray(indices, int)].any())
+        for indices in expanded.group_edge_indices
+    ])
+    W, V, beta, covariance_components = I.null_lmm_fit(
+        kernels, y, C, seed=42)
 
     scores = OmniBFamilyScores(
         edge_p=np.full((len(expanded.edges), 0), np.nan),
@@ -828,7 +734,7 @@ def _prepare_checkpoint_omnib(
         edge_components_obs=np.full(
             (len(expanded.edges), len(OMNIB_COMPONENT_NAMES)), np.nan),
         edge_estimable=edge_membership.copy(),
-        group_estimable=np.zeros(len(family.group_ids), bool),
+        group_estimable=group_estimable,
         W=W,
         y=y,
         covariance_components={
@@ -845,6 +751,10 @@ def _prepare_checkpoint_omnib(
             "root_seed": feature_seed,
             "policy": feature_seed_policy,
         },
+        component_rank_reduced=component_rank_reduced,
+        component_dfn=component_dfn,
+        component_dfd=component_dfd,
+        component_estimable=component_estimable,
         covariate_block=C,
         covariate_metadata=covariate_metadata,
         null_covariance=V,
@@ -854,8 +764,87 @@ def _prepare_checkpoint_omnib(
         edge_membership=edge_membership,
         grm_provenance=grm_provenance,
     )
-    scores.edge_estimable = _prepare_projection_cache(scores, expanded)
+    scores.fixed_mask_sha256 = _fixed_component_mask_sha256(scores)
+    scores.null_fit_identity = {
+        "W": _array_identity(W),
+        "covariance": _array_identity(V),
+        "beta": _array_identity(np.asarray(beta, float)),
+        "design": _array_identity(C_design),
+        "kernels": {
+            sub: _array_identity(kernels[sub]) for sub in sorted(kernels)
+        },
+        "components": {
+            str(key): float(value)
+            for key, value in sorted(covariance_components.items())
+        },
+    }
+    scores.null_fit_sha256 = _text_identity(scores.null_fit_identity)
+    scores.prepared_design_identity = {
+        "schema": "homoeogwas-omnib-prepared-design-v1",
+        "family": _family_provenance(family, expanded),
+        "sample_index": _array_identity(sample_idx),
+        "phenotype_analyzed": _array_identity(y),
+        "feature_cache_sha256": scores.feature_cache_sha256,
+        "fixed_mask_sha256": scores.fixed_mask_sha256,
+        "null_fit_sha256": scores.null_fit_sha256,
+        "retained_variant_mask_sha256": {
+            sub: grm_provenance[sub]["retained_variant_mask_sha256"]
+            for sub in sorted(grm_provenance)
+        },
+        "transform": str(transform),
+        "cap": int(cap),
+        "n_pc": int(n_pc),
+        "maf_min": float(maf_min),
+        "burden_maf": float(burden_maf),
+        "min_snp": int(min_snp),
+    }
+    scores.prepared_design_sha256 = _text_identity(
+        scores.prepared_design_identity)
+    _prepare_projection_cache(scores, expanded)
     _update_group_partial(scores, expanded)
+    return scores, expanded
+
+
+def _prepare_checkpoint_omnib(
+    subdata: dict,
+    family: MasterGroupFamily,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int,
+    n_pc: int,
+    transform: str,
+    bootstrap_seed: int,
+    n_jobs: int,
+    grm_method: str,
+    maf_min: float,
+    burden_maf: float,
+    min_snp: int,
+    covariates: dict | None,
+    feature_seed: int | None = None,
+    retained_variant_masks: Mapping[str, np.ndarray] | None = None,
+) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
+    """Compatibility wrapper around :func:`prepare_omnib_design`."""
+    if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
+        raise ValueError("n_jobs must be an integer >= 1")
+    resolved_seed, policy = _resolve_feature_seed(feature_seed, bootstrap_seed)
+    scores, expanded = prepare_omnib_design(
+        subdata,
+        family,
+        y_raw,
+        sample_idx,
+        cap=cap,
+        n_pc=n_pc,
+        transform=transform,
+        feature_seed=resolved_seed,
+        retained_variant_masks=retained_variant_masks,
+        grm_method=grm_method,
+        maf_min=maf_min,
+        burden_maf=burden_maf,
+        min_snp=min_snp,
+        covariates=covariates,
+    )
+    scores.feature_seed_provenance["policy"] = policy
     return scores, expanded
 
 
@@ -863,15 +852,13 @@ def _prepare_projection_cache(
     scores: OmniBFamilyScores,
     expanded: ExpandedEdgeFamily,
 ) -> np.ndarray:
-    """Prepare frozen whitened projections and derive their estimability mask."""
+    """Prepare projections and assert agreement with the immutable raw mask."""
     Cw = scores.W @ scores.null_design
-    membership = (
-        scores.edge_membership
-        if scores.edge_membership.size == len(expanded.edges)
-        else scores.edge_estimable
-    )
-    estimable = np.zeros(len(expanded.edges), bool)
-    for edge_index in np.flatnonzero(membership):
+    if scores.component_estimable.shape != (
+        len(expanded.edges), len(OMNIB_COMPONENT_NAMES)
+    ):
+        raise RuntimeError("prepared omniB context lacks a fixed component mask")
+    for edge_index in np.flatnonzero(scores.edge_estimable):
         edge = expanded.edges[int(edge_index)]
         cache_key = int(edge_index)
         if cache_key not in scores.projection_cache:
@@ -881,11 +868,26 @@ def _prepare_projection_cache(
                 scores.feature_cache[(edge.sub_x, edge.gene_x)],
                 scores.feature_cache[(edge.sub_y, edge.gene_y)],
             )
-        estimable[edge_index] = any(
-            dfn >= 1 and dfd >= 1
-            for _Qr, _Qa, dfn, dfd in scores.projection_cache[cache_key]
-        )
-    return estimable
+        for component, prepared in enumerate(scores.projection_cache[cache_key]):
+            _Qr, _Qa, rank_reduced, dfn, dfd = prepared
+            observed = (
+                int(rank_reduced),
+                int(dfn),
+                int(dfd),
+                bool(dfn >= 1 and dfd >= 1),
+            )
+            expected = (
+                int(scores.component_rank_reduced[edge_index, component]),
+                int(scores.component_dfn[edge_index, component]),
+                int(scores.component_dfd[edge_index, component]),
+                bool(scores.component_estimable[edge_index, component]),
+            )
+            if observed != expected:
+                raise RuntimeError(
+                    "raw/whitened component rank mismatch for "
+                    f"{edge.edge_id}/{OMNIB_COMPONENT_NAMES[component]}: "
+                    f"expected={expected}, observed={observed}")
+    return scores.edge_estimable.copy()
 
 
 def _update_group_partial(
@@ -943,7 +945,7 @@ def _score_prepared_responses(
         (len(expanded.edges), len(OMNIB_COMPONENT_NAMES), response_count),
         np.nan,
     )
-    scores.edge_estimable = _prepare_projection_cache(scores, expanded)
+    _prepare_projection_cache(scores, expanded)
     _update_group_partial(scores, expanded)
     valid_indices = np.flatnonzero(scores.edge_estimable)
 
@@ -1011,7 +1013,6 @@ def score_omnib_observed(
     scores.edge_p = edge_p
     scores.group_p = group_p
     scores.edge_components_obs = components[:, :, 0]
-    scores.group_estimable = np.isfinite(group_p[:, 0])
     return edge_p, group_p, components
 
 
@@ -1064,18 +1065,21 @@ def score_omnib_null_indices(
 
 def _prepare_omnib_nested_designs(Wh, Cw, gsx, gsy):
     """Cache response-independent nested-model bases for one omniB edge."""
-    from scipy.linalg import orth
-
     prepared = []
     for ax, ay in zip(gsx, gsy, strict=True):
         reduced = np.column_stack([Cw, Wh @ ax, Wh @ ay])
-        Qr = orth(reduced)
+        Qr = _normalized_svd_basis(reduced)
         cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
         added = Wh @ cross
         added_residual = added - Qr @ (Qr.T @ added) if Qr.size else added
-        Qa = orth(added_residual)
-        prepared.append((Qr, Qa, int(Qa.shape[1]), int(
-            reduced.shape[0] - Qr.shape[1] - Qa.shape[1])))
+        Qa = _normalized_svd_basis(added_residual)
+        prepared.append((
+            Qr,
+            Qa,
+            int(Qr.shape[1]),
+            int(Qa.shape[1]),
+            int(reduced.shape[0] - Qr.shape[1] - Qa.shape[1]),
+        ))
     return tuple(prepared)
 
 
@@ -1085,7 +1089,7 @@ def _prepared_components_over_Y(Yw, prepared):
 
     Yw = np.asarray(Yw, float)
     output = np.full((len(prepared), Yw.shape[1]), np.nan)
-    for component, (Qr, Qa, dfn, dfd) in enumerate(prepared):
+    for component, (Qr, Qa, _rank_reduced, dfn, dfd) in enumerate(prepared):
         if dfn < 1 or dfd < 1:
             continue
         if Qr.size:
@@ -1505,6 +1509,9 @@ def _checkpoint_manifest(
             "feature_seed_scheme": scores.feature_seed_provenance["scheme"],
             "feature_cache_sha256": scores.feature_cache_sha256,
         },
+        "prepared_design": scores.prepared_design_identity | {
+            "sha256": scores.prepared_design_sha256,
+        },
         "subgenome_inputs": subgenome_identity,
         "context": manifest_context or {},
     }
@@ -1816,6 +1823,11 @@ def run_group_scan_omnib(
         },
         "feature_provenance": scores.feature_seed_provenance | {
             "feature_cache_sha256": scores.feature_cache_sha256,
+        },
+        "prepared_design": {
+            "sha256": scores.prepared_design_sha256,
+            "fixed_mask_sha256": scores.fixed_mask_sha256,
+            "null_fit_sha256": scores.null_fit_sha256,
         },
     }
     if checkpoint_metadata is not None:

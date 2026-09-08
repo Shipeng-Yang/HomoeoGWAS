@@ -169,16 +169,9 @@ def test_checkpoint_setup_never_executes_legacy_observed_scorer(
     assert result.G == 1
 
 
-def test_checkpoint_estimability_is_derived_from_prepared_projections(
-    monkeypatch, tmp_path,
-):
-    """The formal gate must not inherit the raw legacy rank decision."""
+def test_checkpoint_estimability_is_bound_to_shared_raw_component_mask(tmp_path):
+    """Checkpoint scoring must expose the authoritative raw design identity."""
     subdata, family, y, sample_idx = _family_fixture(rank_stressed=True)
-
-    def forbidden_legacy_gate(*_args, **_kwargs):
-        raise AssertionError("checkpoint executed legacy estimability gate")
-
-    monkeypatch.setattr(F, "_edge_design_estimable", forbidden_legacy_gate)
     result = F.run_group_scan_omnib(
         subdata,
         family,
@@ -194,6 +187,13 @@ def test_checkpoint_estimability_is_derived_from_prepared_projections(
         checkpoint_block_size=1,
     )
     assert result.G == 1
+    manifest = json.loads(
+        (tmp_path / "checkpoint" / "manifest.json").read_text()
+    )["manifest"]
+    prepared = result.model_diagnostics["prepared_design"]
+    assert manifest["prepared_design"]["sha256"] == prepared["sha256"]
+    assert len(prepared["fixed_mask_sha256"]) == 64
+    assert len(prepared["null_fit_sha256"]) == 64
 
 
 def test_checkpoint_observed_artifact_is_written_from_prepared_scorer(
