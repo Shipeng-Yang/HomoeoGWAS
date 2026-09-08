@@ -8,8 +8,8 @@ real omniB contexts have passed the released validators.
 from __future__ import annotations
 
 import argparse
-import csv
 import concurrent.futures
+import csv
 import hashlib
 import json
 import resource
