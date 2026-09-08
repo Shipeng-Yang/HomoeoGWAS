@@ -362,6 +362,42 @@ class OmniBFamilyScores:
         default_factory=lambda: np.empty(0, bool), repr=False)
     grm_provenance: dict = field(default_factory=dict)
     parallel_execution: dict = field(default_factory=dict)
+    response_diagnostics: OmniBResponseDiagnostics | None = None
+
+
+@dataclass(frozen=True)
+class OmniBResponseDiagnostics:
+    """Response-level failures over the fixed edge-component family."""
+
+    failed_response_mask: np.ndarray
+    failed_response_indices: tuple[int, ...]
+    failed_response_indices_by_component: Mapping[str, tuple[int, ...]]
+    nonfinite_component_counts: tuple[int, ...]
+    attempted: int
+    successful: int
+    retried: int
+    terminal_failures: int
+
+    def __post_init__(self) -> None:
+        mask = np.array(self.failed_response_mask, dtype=bool, copy=True)
+        if mask.ndim != 1 or mask.size != self.attempted:
+            raise ValueError("failed_response_mask must align to attempted responses")
+        mask.setflags(write=False)
+        object.__setattr__(self, "failed_response_mask", mask)
+
+    def as_dict(self) -> dict:
+        return {
+            "failed_response_indices": list(self.failed_response_indices),
+            "failed_response_indices_by_component": {
+                key: list(value)
+                for key, value in self.failed_response_indices_by_component.items()
+            },
+            "nonfinite_component_counts": list(self.nonfinite_component_counts),
+            "attempted": self.attempted,
+            "successful": self.successful,
+            "retried": self.retried,
+            "terminal_failures": self.terminal_failures,
+        }
 
 
 @dataclass(frozen=True)
@@ -372,6 +408,45 @@ class OmniBSubsetScores:
     group_p: np.ndarray
     edge_components: np.ndarray
     covariance_components: dict[str, float]
+
+
+def _response_failure_diagnostics(
+    scores: OmniBFamilyScores,
+    edge_components: np.ndarray,
+) -> OmniBResponseDiagnostics:
+    values = np.asarray(edge_components, float)
+    expected = (
+        scores.component_estimable.shape[0],
+        scores.component_estimable.shape[1],
+    )
+    if values.ndim != 3 or values.shape[:2] != expected:
+        raise ValueError("edge component responses do not match the fixed family")
+    fixed = np.asarray(scores.component_estimable, bool)[:, :, None]
+    failed_cells = fixed & ~np.isfinite(values)
+    failed_mask = failed_cells.any(axis=(0, 1))
+    by_component = {
+        name: tuple(
+            int(index)
+            for index in np.flatnonzero(failed_cells[:, component, :].any(axis=0))
+        )
+        for component, name in enumerate(OMNIB_COMPONENT_NAMES)
+    }
+    attempted = int(values.shape[2])
+    terminal = int(failed_mask.sum())
+    return OmniBResponseDiagnostics(
+        failed_response_mask=failed_mask,
+        failed_response_indices=tuple(
+            int(index) for index in np.flatnonzero(failed_mask)
+        ),
+        failed_response_indices_by_component=by_component,
+        nonfinite_component_counts=tuple(
+            int(value) for value in failed_cells.sum(axis=(0, 1))
+        ),
+        attempted=attempted,
+        successful=attempted - terminal,
+        retried=0,
+        terminal_failures=terminal,
+    )
 
 
 def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
@@ -467,8 +542,15 @@ def score_omnib_family(
             bootstrap_B,
             bootstrap_seed,
         )
-    edge_p, group_p, edge_components = score_omnib_responses(
-        scores, family, expanded, responses, n_jobs=n_jobs)
+    edge_p, group_p, edge_components, diagnostics = score_omnib_responses(
+        scores,
+        family,
+        expanded,
+        responses,
+        n_jobs=n_jobs,
+        return_diagnostics=True,
+    )
+    scores.response_diagnostics = diagnostics
     failed = scores.edge_estimable & ~np.isfinite(edge_p[:, 0])
     if failed.any():
         failed_ids = [expanded.edges[i].edge_id for i in np.flatnonzero(failed)[:5]]
@@ -990,14 +1072,22 @@ def score_omnib_responses(
     responses: np.ndarray,
     *,
     n_jobs: int = 8,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return_diagnostics: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[
+    np.ndarray, np.ndarray, np.ndarray, OmniBResponseDiagnostics
+]:
     """Score an explicit response bank through one frozen production design.
 
     This returns raw edge/group/component p-value matrices. It does not create
     a discovery family; callers must calibrate a predeclared matrix separately.
     """
-    return _score_prepared_responses(
+    edge_p, group_p, components = _score_prepared_responses(
         scores, family, expanded, responses, n_jobs=n_jobs)
+    diagnostics = _response_failure_diagnostics(scores, components)
+    scores.response_diagnostics = diagnostics
+    if return_diagnostics:
+        return edge_p, group_p, components, diagnostics
+    return edge_p, group_p, components
 
 
 def score_omnib_observed(
@@ -1008,8 +1098,16 @@ def score_omnib_observed(
     n_jobs: int = 8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Score and retain the observed response through the prepared API."""
-    edge_p, group_p, components = _score_prepared_responses(
-        scores, family, expanded, scores.y.reshape(-1, 1), n_jobs=n_jobs)
+    edge_p, group_p, components, diagnostics = score_omnib_responses(
+        scores,
+        family,
+        expanded,
+        scores.y.reshape(-1, 1),
+        n_jobs=n_jobs,
+        return_diagnostics=True,
+    )
+    if diagnostics.failed_response_mask[0]:
+        raise RuntimeError("native observed omniB response failed")
     scores.edge_p = edge_p
     scores.group_p = group_p
     scores.edge_components_obs = components[:, :, 0]
@@ -1056,8 +1154,14 @@ def score_omnib_null_indices(
         scores.null_kernels, scores.y, scores.null_design,
         indices=requested, base_seed=base_seed, null_fit=null_fit)
     responses = np.column_stack(response_list)
-    edge_p, group_p, components = _score_prepared_responses(
-        scores, family, expanded, responses, n_jobs=n_jobs)
+    edge_p, group_p, components, _diagnostics = score_omnib_responses(
+        scores,
+        family,
+        expanded,
+        responses,
+        n_jobs=n_jobs,
+        return_diagnostics=True,
+    )
     if return_components:
         return edge_p, group_p, components
     return edge_p, group_p

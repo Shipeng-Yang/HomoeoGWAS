@@ -51,6 +51,8 @@ _ROLE_ALIASES = {
 }
 _FORMAL_BOOTSTRAP_MINIMUM = 2_000
 _DEFAULT_DESIGN_HASH = "0" * 64
+_BINDING_GAUSSIAN_FAILURE_RATE_MAX = 0.002
+_DIAGNOSTIC_FAILURE_RATE_MAX = 0.01
 
 
 @dataclass(frozen=True)
@@ -1345,10 +1347,21 @@ def _bank_from_prepared(
             "message": str(error),
         }
         raise RuntimeError(f"conditional bank scoring failed: {error}") from error
+    diagnostics = prepared.scores.response_diagnostics
+    if diagnostics is None or diagnostics.attempted != count:
+        raise RuntimeError("omniB response failure diagnostics are missing")
+    component_failures = diagnostics.failed_response_indices_by_component
     nonfinite_by_method = {
         method: np.flatnonzero(~np.isfinite(values).all(axis=0)).astype(int).tolist()
         for method, values in score_bank.p_by_method.items()
     }
+    nonfinite_by_method.update({
+        "omnib": list(diagnostics.failed_response_indices),
+        "minor_burden": list(component_failures["minor_burden"]),
+        "pc1": list(component_failures["pc1"]),
+        "kernel_hadamard": list(component_failures["kernel_hadamard"]),
+        "legacy_burden_product": list(component_failures["minor_burden"]),
+    })
     all_nan_by_method = {
         method: np.flatnonzero(~np.isfinite(values).any(axis=0)).astype(int).tolist()
         for method, values in score_bank.p_by_method.items()
@@ -1359,6 +1372,11 @@ def _bank_from_prepared(
             for indices in nonfinite_by_method.values()
             for index in indices
         }
+    )
+    failure_rate_max = (
+        _BINDING_GAUSSIAN_FAILURE_RATE_MAX
+        if null_model == "gaussian" and canonical_role in {"calibration", "heldout"}
+        else _DIAGNOSTIC_FAILURE_RATE_MAX
     )
     failure.update(
         {
@@ -1372,6 +1390,18 @@ def _bank_from_prepared(
             "nonfinite_response_indices_by_method": nonfinite_by_method,
             "all_nan_response_indices_by_method": all_nan_by_method,
             "any_nonfinite": bool(failed_indices),
+            "attempted": count,
+            "successful": count - len(failed_indices),
+            "retried": 0,
+            "terminal_failures": len(failed_indices),
+            "terminal_failure_rate": len(failed_indices) / count,
+            "failure_rate_max": failure_rate_max,
+            "within_failure_ceiling": len(failed_indices) / count <= failure_rate_max,
+            "worst_case_mapping": (
+                "failure_counts_as_rejection"
+                if canonical_role in {"calibration", "heldout"}
+                else "failure_counts_as_non_detection"
+            ),
         }
     )
     members = _tested_family_members(prepared)
@@ -1689,7 +1719,12 @@ def run_global_vc_bank(
     return _json_safe(payload)
 
 
-def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None:
+def empirical_threshold(
+    p_null: np.ndarray,
+    alpha: float = 0.05,
+    *,
+    failed_mask: np.ndarray | None = None,
+) -> float | None:
     """Learn one strict experiment-wide min-P threshold from calibration only."""
 
     values = np.asarray(p_null, dtype=float)
@@ -1698,13 +1733,22 @@ def empirical_threshold(p_null: np.ndarray, alpha: float = 0.05) -> float | None
     if not 0.0 < float(alpha) < 1.0:
         raise ValueError("alpha must be strictly between zero and one")
     finite = np.isfinite(values)
-    all_nan_columns = np.flatnonzero(~finite.any(axis=0)).astype(int).tolist()
+    if failed_mask is None:
+        failed = np.zeros(values.shape[1], bool)
+    else:
+        failed = np.asarray(failed_mask)
+        if failed.dtype != np.bool_ or failed.shape != (values.shape[1],):
+            raise ValueError("failed_mask must be a response-aligned boolean vector")
+    all_nan_columns = np.flatnonzero(
+        ~finite.any(axis=0) & ~failed
+    ).astype(int).tolist()
     if all_nan_columns:
         raise ValueError(
             "calibration contains all-NaN response columns: "
             + ",".join(str(index) for index in all_nan_columns)
         )
     family_min = np.where(finite, values, np.inf).min(axis=0)
+    family_min[failed] = 0.0
     k = int(np.floor(float(alpha) * (family_min.size + 1)))
     return None if k < 1 else float(np.sort(family_min)[k - 1])
 
@@ -1724,6 +1768,65 @@ def apply_threshold(p_bank: np.ndarray, threshold: float | None) -> np.ndarray:
     minimum[~finite.any(axis=0)] = np.nan
     decisions = minimum < float(threshold)
     return decisions
+
+
+def apply_failure_policy(
+    decisions: np.ndarray,
+    failed_mask: np.ndarray,
+    *,
+    response_role: str,
+) -> np.ndarray:
+    """Map terminal response failures to the predeclared conservative outcome."""
+    decisions = np.asarray(decisions)
+    failed_mask = np.asarray(failed_mask)
+    if decisions.dtype != np.bool_ or failed_mask.dtype != np.bool_:
+        raise ValueError("decisions and failed_mask must have boolean dtype")
+    if decisions.ndim != 1 or failed_mask.shape != decisions.shape:
+        raise ValueError("decisions and failed_mask must be aligned vectors")
+    output = decisions.copy()
+    if response_role in {"calibration", "heldout", "null"}:
+        output[failed_mask] = True
+    elif response_role == "power":
+        output[failed_mask] = False
+    else:
+        raise ValueError("response_role must be calibration, heldout/null, or power")
+    return output
+
+
+def _method_failure_mask(bank: ConditionalBank, method: str) -> np.ndarray:
+    by_method = bank.failure.get("nonfinite_response_indices_by_method")
+    if not isinstance(by_method, Mapping) or method not in by_method:
+        raise RuntimeError(f"conditional bank lacks failure indices for {method}")
+    mask = np.zeros(len(bank.seed_ids), dtype=bool)
+    indices = np.asarray(by_method[method], dtype=int)
+    if indices.size:
+        if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= mask.size):
+            raise RuntimeError(f"conditional bank has invalid failure indices for {method}")
+        mask[indices] = True
+    return mask
+
+
+def _bank_failure_envelope(failure: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate response diagnostics into outer-shard failure semantics."""
+    output = dict(failure)
+    response_failures = bool(failure.get("failed"))
+    contract_failed = failure.get("within_failure_ceiling") is not True
+    output.update(
+        {
+            "failed": contract_failed,
+            "response_failures_present": response_failures,
+            "status": (
+                "failed_response_ceiling"
+                if contract_failed
+                else (
+                    "completed_with_worst_case_response_failures"
+                    if response_failures
+                    else "completed"
+                )
+            ),
+        }
+    )
+    return output
 
 
 def _base_replicate_payload(
@@ -1909,6 +2012,22 @@ def run_end_to_end_null(
             )
         if len(expanded.group_edge_indices) != len(context.family.group_ids):
             raise RuntimeError("production scorer changed the frozen group family")
+        diagnostics = scores.response_diagnostics
+        if diagnostics is None or diagnostics.attempted != bootstrap_B + 1:
+            raise RuntimeError("native response failure diagnostics are missing")
+        if diagnostics.failed_response_mask[0]:
+            raise RuntimeError("native observed response failed fixed-mask scoring")
+        bootstrap_failed = [
+            index - 1
+            for index in diagnostics.failed_response_indices
+            if index > 0
+        ]
+        bootstrap_failure_rate = len(bootstrap_failed) / bootstrap_B
+        bootstrap_failure_rate_max = (
+            _BINDING_GAUSSIAN_FAILURE_RATE_MAX
+            if null_model == "gaussian"
+            else _DIAGNOSTIC_FAILURE_RATE_MAX
+        )
         calibration = bootstrap_minp_calibration(
             scores.group_p[:, 0],
             scores.group_p[:, 1:],
@@ -1955,7 +2074,30 @@ def run_end_to_end_null(
                 "parallel_backend": execution.get("backend", "serial"),
                 "worker_pids": list(execution.get("worker_pids", [])),
                 "parallel_execution": execution,
-                "failure": {"failed": False, "error_type": None, "message": None},
+                "failure": {
+                    "failed": False,
+                    "status": (
+                        "completed_with_degenerate_bootstrap"
+                        if bootstrap_failed else "completed"
+                    ),
+                    "error_type": None,
+                    "message": None,
+                    "observed_failed": False,
+                    "response_diagnostics": diagnostics.as_dict(),
+                    "bootstrap_attempted": bootstrap_B,
+                    "bootstrap_successful": bootstrap_B - len(bootstrap_failed),
+                    "bootstrap_retried": 0,
+                    "bootstrap_terminal_failures": len(bootstrap_failed),
+                    "bootstrap_terminal_failure_rate": bootstrap_failure_rate,
+                    "bootstrap_failure_rate_max": bootstrap_failure_rate_max,
+                    "bootstrap_within_failure_ceiling": (
+                        bootstrap_failure_rate <= bootstrap_failure_rate_max
+                    ),
+                    "bootstrap_failed_response_indices": bootstrap_failed,
+                    "bootstrap_degenerate_policy": (
+                        "any_nonfinite_statistic_sets_null_min_to_zero"
+                    ),
+                },
             }
         )
     except Exception as error:
@@ -2058,7 +2200,7 @@ def run_power_replicate(
         or len(calibration_bank.seed_ids) != calibration_count
         or calibration_bank.family_ids != context.family.group_ids
         or calibration_bank.family_hash != _family_hash(context.family)
-        or calibration_bank.failure.get("failed") is not False
+        or calibration_bank.failure.get("within_failure_ceiling") is not True
         or any(
             metadata.get("canonical_kind") != null_model
             for metadata in calibration_bank.response_metadata
@@ -2156,25 +2298,37 @@ def run_power_replicate(
     threshold_failures: dict[str, str] = {}
     for method in METHOD_NAMES:
         try:
-            thresholds[method] = empirical_threshold(calibration.p_by_method[method])
+            thresholds[method] = empirical_threshold(
+                calibration.p_by_method[method],
+                failed_mask=_method_failure_mask(calibration, method),
+            )
         except ValueError as error:
             thresholds[method] = None
             threshold_failures[method] = str(error)
+    negative_control = architecture in {"additive_only", "mispaired"}
+    target_failure_role = "heldout" if negative_control else "power"
     rejections = {
-        method: apply_threshold(target.p_by_method[method], thresholds[method]).tolist()
+        method: apply_failure_policy(
+            apply_threshold(target.p_by_method[method], thresholds[method]),
+            _method_failure_mask(target, method),
+            response_role=target_failure_role,
+        ).tolist()
         for method in METHOD_NAMES
     }
     causal_index = np.array(
         [context.family.group_ids.index(group_id) for group_id in causal_ids], dtype=int
     )
-    negative_control = architecture in {"additive_only", "mispaired"}
     causal_detection = {} if negative_control else {
-        method: (
-            np.nanmin(target.p_by_method[method][causal_index], axis=0)
-            < thresholds[method]
+        method: apply_failure_policy(
+            (
+                np.nanmin(target.p_by_method[method][causal_index], axis=0)
+                < thresholds[method]
+            )
+            if thresholds[method] is not None
+            else np.zeros(response_count, bool),
+            _method_failure_mask(target, method),
+            response_role="power",
         ).tolist()
-        if thresholds[method] is not None
-        else [False] * response_count
         for method in METHOD_NAMES
     }
     calibration_minima = {
@@ -2211,7 +2365,11 @@ def run_power_replicate(
     }
     recall = {} if negative_control else {
         method: (
-            np.mean(causal_minima[method] < thresholds[method], axis=0).tolist()
+            np.where(
+                _method_failure_mask(target, method),
+                0.0,
+                np.mean(causal_minima[method] < thresholds[method], axis=0),
+            ).tolist()
             if thresholds[method] is not None
             else [0.0] * response_count
         )
@@ -2270,16 +2428,25 @@ def run_power_replicate(
             },
             "failure": {
                 "failed": bool(
-                    calibration.failure.get("failed")
-                    or target.failure.get("failed")
+                    calibration.failure.get("within_failure_ceiling") is not True
+                    or target.failure.get("within_failure_ceiling") is not True
                     or threshold_failures
                 ),
-                "status": (
-                    "partial_failure"
-                    if calibration.failure.get("failed")
+                "response_failures_present": bool(
+                    calibration.failure.get("failed")
                     or target.failure.get("failed")
+                ),
+                "status": (
+                    "failed_response_ceiling_or_threshold"
+                    if calibration.failure.get("within_failure_ceiling") is not True
+                    or target.failure.get("within_failure_ceiling") is not True
                     or threshold_failures
-                    else "completed"
+                    else (
+                        "completed_with_worst_case_response_failures"
+                        if calibration.failure.get("failed")
+                        or target.failure.get("failed")
+                        else "completed"
+                    )
                 ),
                 "threshold_failures": threshold_failures,
                 "calibration": dict(calibration.failure),
@@ -3278,7 +3445,7 @@ def run_omnib_replicate(
                 ),
                 "experiment": "conditional",
                 "bank": bank.to_payload(),
-                "failure": dict(bank.failure),
+                "failure": _bank_failure_envelope(bank.failure),
             }
         elif experiment == "global_vc":
             payload = run_global_vc_bank(

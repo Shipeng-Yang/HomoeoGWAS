@@ -31,6 +31,8 @@ ACCEPTANCE_RULES = {
     "wilson_level": 0.95,
     "core_fwer_upper_wilson_max": 0.075,
     "core_failure_rate_max": 0.01,
+    "binding_gaussian_failure_rate_max": 0.002,
+    "diagnostic_failure_rate_max": 0.01,
     "stress_contributes_to_overall": False,
     "pilot_inference_status": "noninferential_do_not_threshold",
 }
@@ -1444,6 +1446,18 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             raise BenchmarkAggregateError(
                 "conditional method set differs from locked comparators"
             )
+        failure = bank.get("failure")
+        failed_by_method = (
+            failure.get("nonfinite_response_indices_by_method")
+            if isinstance(failure, Mapping) else None
+        )
+        if (
+            not isinstance(failed_by_method, Mapping)
+            or set(failed_by_method) != set(METHOD_NAMES)
+        ):
+            raise BenchmarkAggregateError(
+                "conditional response failure evidence is incomplete"
+            )
         tested_members = bank.get("tested_family_members")
         tested_sizes = bank.get("tested_family_sizes")
         tested_hashes = bank.get("tested_family_hashes")
@@ -1458,6 +1472,15 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             )
         for method in METHOD_NAMES:
             matrix = matrices[method]
+            method_failed = set(failed_by_method[method])
+            if any(
+                isinstance(index, bool) or not isinstance(index, int)
+                or index < 0 or index >= len(seed_ids)
+                for index in method_failed
+            ):
+                raise BenchmarkAggregateError(
+                    "conditional response failure indices are invalid"
+                )
             members = tested_members[method]
             size = tested_sizes[method]
             tested = tested_hashes[method]
@@ -1466,15 +1489,20 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             for index in range(len(seed_ids)):
                 column = [row[index] for row in matrix]
                 finite = [value for value in column if value is not None]
+                failed = index in method_failed
                 output[name].append(_empty(name, common, method=method,
                     null_model=registry.parameters.get("null_model", "gaussian"),
                     stress=bool(registry.parameters.get("stress", False)),
                     bank_role=bank.get("canonical_role"), response_index=index,
-                    minimum_p=min(finite) if finite else None,
+                    minimum_p=(0.0 if failed else min(finite) if finite else None),
                     family_size=len(matrix), family_hash=family_hash,
                     score_family_size=len(matrix), tested_family_size=size,
                     tested_family_hash=tested,
-                    family_order_hash=order_hash, response_seed_id=seed_ids[index]))
+                    family_order_hash=order_hash, response_seed_id=seed_ids[index],
+                    failed=failed,
+                    failure_type=(
+                        "nonfinite_fixed_family_score" if failed else None
+                    )))
             if not isinstance(members, list) or size != len(members):
                 raise BenchmarkAggregateError(
                     "conditional tested-family manifest mismatch"

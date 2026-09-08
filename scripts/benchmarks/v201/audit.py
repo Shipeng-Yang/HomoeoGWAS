@@ -22,6 +22,7 @@ from scipy.stats import spearmanr
 from homoeogwas.diagnostics import NestedREMLComparison, boundary_lrt
 
 from .aggregate import (
+    ACCEPTANCE_RULES,
     TABLE_SCHEMAS,
     BenchmarkAggregateError,
     LoadedEvidence,
@@ -173,19 +174,23 @@ def core_fwer_gate(
     *,
     stage: str,
     evidence_path: str,
+    failure_rate_max: float | None = None,
 ) -> AuditGate:
     summary = summarize_binomial(rejections, total)
     if isinstance(failures, bool) or not isinstance(failures, int) or not 0 <= failures <= total:
         raise ValueError("invalid failed-replicate count")
     failure_rate = failures / total
-    scientific_pass = summary["ci_high"] <= 0.075 and failure_rate <= 0.01
+    if failure_rate_max is None:
+        failure_rate_max = ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+    scientific_pass = (
+        summary["ci_high"] <= 0.075 and failure_rate <= failure_rate_max)
     if stage == "formal":
         passed, qa_passed = scientific_pass, None
         status = "PASS" if scientific_pass else "FAIL"
     else:
         # Pilot output is schema/runtime QA only.  The formal Wilson acceptance
         # threshold is reported numerically but is never applied as a pilot gate.
-        qa_gate = failure_rate <= 0.01
+        qa_gate = failure_rate <= failure_rate_max
         passed, qa_passed = None, qa_gate
         status = "QA_PASS" if qa_gate else "QA_FAIL"
     return AuditGate(
@@ -194,9 +199,11 @@ def core_fwer_gate(
         float(summary["ci_high"]), failures, failure_rate, passed, qa_passed,
         status, evidence_path,
         (
-            "FWER upper Wilson <= 0.075 and failed replicates / declared replicates <= 0.01"
+            "FWER upper Wilson <= 0.075 and failed-replicate rate <= "
+            f"{failure_rate_max:g}"
             if stage == "formal"
-            else "QA only: failed replicates / declared replicates <= 0.01; Wilson interval is descriptive"
+            else "QA only: failed-replicate rate <= "
+            f"{failure_rate_max:g}; Wilson interval is descriptive"
         ),
     )
 
@@ -671,6 +678,60 @@ def _audit_end2end_decisions(payload: Mapping[str, Any]) -> bool:
         or payload.get("bootstrap_B") != declared_b
     ):
         raise BenchmarkAuditError("bootstrap null-minimum count differs from B")
+    failure = payload.get("failure")
+    diagnostics = (
+        failure.get("response_diagnostics")
+        if isinstance(failure, Mapping) else None
+    )
+    failed_responses = (
+        diagnostics.get("failed_response_indices")
+        if isinstance(diagnostics, Mapping) else None
+    )
+    bootstrap_failed = (
+        failure.get("bootstrap_failed_response_indices")
+        if isinstance(failure, Mapping) else None
+    )
+    if (
+        not isinstance(failed_responses, list)
+        or not isinstance(bootstrap_failed, list)
+        or any(
+            isinstance(index, bool) or not isinstance(index, int)
+            or index < 0 or index > declared_b
+            for index in failed_responses
+        )
+        or len(set(failed_responses)) != len(failed_responses)
+        or bootstrap_failed != [
+            index - 1 for index in failed_responses if index > 0
+        ]
+        or failure.get("observed_failed") is not False
+        or 0 in failed_responses
+        or diagnostics.get("attempted") != declared_b + 1
+        or diagnostics.get("successful") != declared_b + 1 - len(failed_responses)
+        or diagnostics.get("retried") != 0
+        or diagnostics.get("terminal_failures") != len(failed_responses)
+        or failure.get("bootstrap_attempted") != declared_b
+        or failure.get("bootstrap_successful") != declared_b - len(bootstrap_failed)
+        or failure.get("bootstrap_retried") != 0
+        or failure.get("bootstrap_terminal_failures") != len(bootstrap_failed)
+    ):
+        raise BenchmarkAuditError("native bootstrap failure accounting is invalid")
+    failure_rate = len(bootstrap_failed) / declared_b
+    failure_rate_max = (
+        ACCEPTANCE_RULES["binding_gaussian_failure_rate_max"]
+        if payload.get("null_model") == "gaussian"
+        else ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+    )
+    if (
+        failure.get("bootstrap_terminal_failure_rate") != failure_rate
+        or failure.get("bootstrap_failure_rate_max") != failure_rate_max
+        or failure.get("bootstrap_within_failure_ceiling") is not (
+            failure_rate <= failure_rate_max
+        )
+        or failure.get("bootstrap_within_failure_ceiling") is not True
+        or failure.get("bootstrap_degenerate_policy")
+        != "any_nonfinite_statistic_sets_null_min_to_zero"
+    ):
+        raise BenchmarkAuditError("native bootstrap failure accounting is invalid")
     if not all(isinstance(value, bool) for value in adjusted_decisions):
         raise BenchmarkAuditError("serialized adjusted decisions are invalid")
     alpha = _finite_probability(calibration.get("alpha", 0.05), "alpha")
@@ -783,6 +844,32 @@ def _validate_bank_envelope(
         or failure["failed"] is not bool(failed)
     ):
         raise BenchmarkAuditError("conditional failed response indices are invalid")
+    failure_rate = len(failed) / expected
+    expected_ceiling = (
+        ACCEPTANCE_RULES["binding_gaussian_failure_rate_max"]
+        if all(
+            isinstance(record, Mapping)
+            and record.get("canonical_kind") == "gaussian"
+            for record in metadata
+        ) and role in {"calibration", "heldout"}
+        else ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+    )
+    if (
+        failure.get("attempted") != expected
+        or failure.get("successful") != expected - len(failed)
+        or failure.get("retried") != 0
+        or failure.get("terminal_failures") != len(failed)
+        or failure.get("terminal_failure_rate") != failure_rate
+        or failure.get("failure_rate_max") != expected_ceiling
+        or failure.get("within_failure_ceiling") is not (
+            failure_rate <= expected_ceiling)
+        or failure.get("worst_case_mapping") != (
+            "failure_counts_as_rejection"
+            if role in {"calibration", "heldout"}
+            else "failure_counts_as_non_detection"
+        )
+    ):
+        raise BenchmarkAuditError("conditional response failure accounting is invalid")
     return failed, seed_ids
 
 
@@ -922,6 +1009,11 @@ def _conditional_gates(
             gate = core_fwer_gate(
                 base, 0, total, total, stage=evidence.stage,
                 evidence_path="tables/omnib_null_replicates.tsv",
+                failure_rate_max=(
+                    ACCEPTANCE_RULES["binding_gaussian_failure_rate_max"]
+                    if ".gaussian" in base
+                    else ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+                ),
             )
             failed_registry = [
                 row for row in evidence.registry
@@ -994,9 +1086,17 @@ def _conditional_gates(
             held_matrix = held_scores[method]
             if len(cal_matrix) != len(held_matrix):
                 raise BenchmarkAuditError("conditional tested family size changed")
-            calibration_valid = not cal_failed
+            cal_method_failed = set(
+                cal_bank["failure"]["nonfinite_response_indices_by_method"][method]
+            )
+            held_method_failed = set(
+                held_bank["failure"]["nonfinite_response_indices_by_method"][method]
+            )
+            calibration_valid = cal_bank["failure"]["within_failure_ceiling"]
             cal_minima = [
-                min(value for row in cal_matrix if (value := row[index]) is not None)
+                0.0 if index in cal_method_failed else min(
+                    value for row in cal_matrix if (value := row[index]) is not None
+                )
                 for index in range(expected)
             ] if calibration_valid else []
             if not calibration_valid or not cal_minima:
@@ -1005,7 +1105,7 @@ def _conditional_gates(
                 k = int(math.floor(0.05 * (len(cal_minima) + 1)))
                 threshold = None if k < 1 else sorted(cal_minima)[k - 1]
             decisions = [
-                False if index in set(held_failed) else (
+                True if index in held_method_failed else (
                     threshold is not None
                     and min(
                         value for row in held_matrix if (value := row[index]) is not None
@@ -1016,12 +1116,17 @@ def _conditional_gates(
             # Held-out failure rate uses its own fixed denominator. Calibration
             # failures invalidate the frozen threshold rather than being merged
             # by coincident numeric response indices.
-            failures = len(held_failed)
+            failures = len(held_method_failed)
             scenario_key = f"{held_payload['scenario_id']}.{method}"
             gate = core_fwer_gate(
                 scenario_key, sum(decisions), len(decisions), failures,
                 stage=evidence.stage,
                 evidence_path="tables/omnib_null_replicates.tsv",
+                failure_rate_max=(
+                    ACCEPTANCE_RULES["binding_gaussian_failure_rate_max"]
+                    if declared_null == "gaussian"
+                    else ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+                ),
             )
             if not calibration_valid:
                 gate = AuditGate(
@@ -2850,7 +2955,9 @@ def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
             payload["calibration_response_ids"]
         )
         if role == "calibration":
-            ok = failures / len(flags) <= 0.01
+            ok = failures / len(flags) <= ACCEPTANCE_RULES[
+                "binding_gaussian_failure_rate_max"
+            ]
             summary = summarize_binomial(len(flags) - failures, len(flags))
             gate = AuditGate(
                 f"B.global_vc_calibration.{scenario_id}", "omnib", scenario_id,
@@ -2871,18 +2978,29 @@ def _global_vc_gates(evidence: LoadedEvidence) -> dict[str, AuditGate]:
                 scenario_id, successes, len(flags), failures,
                 stage=evidence.stage,
                 evidence_path="tables/omnib_null_replicates.tsv",
+                failure_rate_max=ACCEPTANCE_RULES[
+                    "binding_gaussian_failure_rate_max"
+                ],
             )
             gate = replace(
                 gate, gate_id=f"B.global_vc_fwer.{scenario_id}",
                 gate_kind="global_vc_fwer",
-                passed=(gate.passed and calibration_failure_rate <= 0.01
+                passed=(gate.passed and calibration_failure_rate <= ACCEPTANCE_RULES[
+                            "binding_gaussian_failure_rate_max"
+                        ]
                         if evidence.stage == "formal" else None),
-                qa_passed=(gate.qa_passed and calibration_failure_rate <= 0.01
+                qa_passed=(gate.qa_passed and calibration_failure_rate <= ACCEPTANCE_RULES[
+                               "binding_gaussian_failure_rate_max"
+                           ]
                            if evidence.stage == "pilot" else None),
                 status=(
-                    ("PASS" if gate.passed and calibration_failure_rate <= 0.01 else "FAIL")
+                    ("PASS" if gate.passed and calibration_failure_rate <= ACCEPTANCE_RULES[
+                        "binding_gaussian_failure_rate_max"
+                    ] else "FAIL")
                     if evidence.stage == "formal" else
-                    ("QA_PASS" if gate.qa_passed and calibration_failure_rate <= 0.01
+                    ("QA_PASS" if gate.qa_passed and calibration_failure_rate <= ACCEPTANCE_RULES[
+                        "binding_gaussian_failure_rate_max"
+                    ]
                      else "QA_FAIL")
                 ),
                 reason="standalone global VC heldout FWER uses a frozen calibration bank; "
@@ -3365,6 +3483,11 @@ def _audit_benchmark_locked(root: str | Path) -> AuditReport:
             scenario_id, rejections, len(payloads), failures,
             stage=evidence.stage,
             evidence_path="tables/omnib_null_replicates.tsv",
+            failure_rate_max=(
+                ACCEPTANCE_RULES["binding_gaussian_failure_rate_max"]
+                if not stress and null_model == "gaussian"
+                else ACCEPTANCE_RULES["diagnostic_failure_rate_max"]
+            ),
         )
         if stress:
             gate = AuditGate(

@@ -276,7 +276,35 @@ def _write_null_shards(
             "null_minima": null_minima,
             "qa_diagnostic_rejections": family_ids if rejected else [],
             "runtime_seconds": 0.1,
-            "failure": {"failed": False, "error_type": None, "message": None},
+            "failure": {
+                "failed": False,
+                "status": "completed",
+                "error_type": None,
+                "message": None,
+                "observed_failed": False,
+                "response_diagnostics": {
+                    "failed_response_indices": [],
+                    "failed_response_indices_by_component": {
+                        "minor_burden": [], "pc1": [], "kernel_hadamard": [],
+                    },
+                    "nonfinite_component_counts": [],
+                    "attempted": bootstrap_b + 1,
+                    "successful": bootstrap_b + 1,
+                    "retried": 0,
+                    "terminal_failures": 0,
+                },
+                "bootstrap_attempted": bootstrap_b,
+                "bootstrap_successful": bootstrap_b,
+                "bootstrap_retried": 0,
+                "bootstrap_terminal_failures": 0,
+                "bootstrap_terminal_failure_rate": 0.0,
+                "bootstrap_failure_rate_max": 0.002,
+                "bootstrap_within_failure_ceiling": True,
+                "bootstrap_failed_response_indices": [],
+                "bootstrap_degenerate_policy": (
+                    "any_nonfinite_statistic_sets_null_min_to_zero"
+                ),
+            },
             **(
                 {
                     "adjusted_decisions": [rejected],
