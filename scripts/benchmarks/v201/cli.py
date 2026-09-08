@@ -95,6 +95,14 @@ def _resource_snapshot() -> tuple[float, int]:
     return cpu, peak
 
 
+def _self_peak_rss_bytes() -> int:
+    """Return the current process lifetime RSS high-water mark in bytes."""
+
+    own = resource.getrusage(resource.RUSAGE_SELF)
+    rss_scale = 1 if sys.platform == "darwin" else 1_024
+    return int(own.ru_maxrss * rss_scale)
+
+
 def _measure_operation(operation: Callable[[], Any]) -> tuple[Any, dict[str, Any]]:
     """Measure one complete replicate, including reaped subprocess descendants."""
 
@@ -120,11 +128,28 @@ def _process_tree(root_pid: int) -> set[int]:
         if pid in found or not Path(f"/proc/{pid}").exists():
             continue
         found.add(pid)
-        children = Path(f"/proc/{pid}/task/{pid}/children")
+        task_root = Path(f"/proc/{pid}/task")
         try:
-            pending.extend(int(value) for value in children.read_text().split())
-        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            task_directories = list(task_root.iterdir())
+        except (FileNotFoundError, ProcessLookupError):
             continue
+        except (PermissionError, OSError) as error:
+            raise RuntimeError(
+                f"cannot enumerate live process tasks for PID {pid}"
+            ) from error
+        for task_directory in task_directories:
+            children = task_directory / "children"
+            try:
+                child_pids = [int(value) for value in children.read_text().split()]
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (PermissionError, OSError, ValueError) as error:
+                if Path(f"/proc/{pid}").exists():
+                    raise RuntimeError(
+                        f"cannot enumerate live process children for PID {pid}"
+                    ) from error
+                continue
+            pending.extend(child_pids)
     return found
 
 
@@ -135,7 +160,11 @@ def _process_memory(pid: int) -> tuple[int, int] | None:
     pss: int | None = None
     try:
         lines = Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines()
-    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except (PermissionError, OSError) as error:
+        if Path(f"/proc/{pid}").exists():
+            raise RuntimeError(f"cannot read live process memory for PID {pid}") from error
         return None
     for line in lines:
         if line.startswith("Rss:"):
@@ -143,6 +172,8 @@ def _process_memory(pid: int) -> tuple[int, int] | None:
         elif line.startswith("Pss:"):
             pss = int(line.split()[1]) * 1_024
     if rss is None or pss is None or rss < 1 or pss < 1:
+        if Path(f"/proc/{pid}").exists():
+            raise RuntimeError(f"live process memory is incomplete for PID {pid}")
         return None
     return rss, pss
 
@@ -210,6 +241,7 @@ def _measure_comparator_operation(
     sample_once()
     if sample_error:
         raise RuntimeError("comparator resource monitor failed") from sample_error[0]
+    peak_parent_rss = max(peak_parent_rss, _self_peak_rss_bytes())
     return result, {
         "scorer_cpu_seconds": max(0.0, cpu_after - cpu_before),
         "scorer_wall_seconds": max(0.0, wall_seconds),

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import copy
+import os
+import subprocess
+import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -126,6 +130,50 @@ def test_probe_series_rejects_time_nonlinearity_and_safety_adjusted_memory():
         resource_contracts.validate_comparator_probe_series(memory)
 
 
+def test_probe_series_projects_width_varying_memory_with_upper_envelope():
+    records = [_probe(width) for width in (1, 5, 20)]
+    base_parent = 1 * GIB
+    parent_slope = 1 * 1024 ** 2
+    base_pss = 2 * GIB
+    pss_slope = 2 * 1024 ** 2
+    for record in records:
+        width = int(record["response_width"])
+        record["peak_parent_rss_bytes"] = base_parent + parent_slope * width
+        record["peak_aggregate_pss_bytes"] = base_pss + pss_slope * width
+
+    projection = resource_contracts.validate_comparator_probe_series(records)
+
+    assert projection["projected"]["peak_parent_rss_bytes"] == 2 * (
+        base_parent + 2_000 * parent_slope
+    )
+    assert projection["projected"]["peak_aggregate_pss_bytes"] == 2 * (
+        base_pss + 2_000 * pss_slope
+    )
+    assert projection["memory_projection_models"]["peak_parent_rss_bytes"] == {
+        "anchor_bytes_by_width": {
+            "1": base_parent + parent_slope,
+            "5": base_parent + 5 * parent_slope,
+            "20": base_parent + 20 * parent_slope,
+        },
+        "intercept_bytes": base_parent,
+        "slope_bytes_per_response": parent_slope,
+        "target_without_safety_bytes": base_parent + 2_000 * parent_slope,
+    }
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["peak_parent_rss_bytes", "peak_aggregate_pss_bytes"],
+)
+def test_probe_series_rejects_nonmonotone_memory_anchors(field):
+    records = [_probe(width) for width in (1, 5, 20)]
+    records[0][field] = 4 * GIB
+    records[1][field] = 3 * GIB
+    records[2][field] = 5 * GIB
+    with pytest.raises(ValueError, match="nonmonotone.*memory"):
+        resource_contracts.validate_comparator_probe_series(records)
+
+
 def test_probe_series_rejects_a_detached_design_or_pair_family():
     records = [_probe(width) for width in (1, 5, 20)]
     records[-1] = copy.deepcopy(records[-1])
@@ -173,3 +221,46 @@ def test_track_rejects_an_unfrozen_context_before_scoring(
     )
     with pytest.raises(ValueError, match="unfrozen"):
         track_omnib._snpxsnp_pair_ceiling(context)
+
+
+def test_comparator_measurement_uses_self_high_water_rss_backstop(monkeypatch):
+    from scripts.benchmarks.v201 import cli
+
+    monkeypatch.setattr(cli, "_comparator_memory_snapshot", lambda _pid: (100, 200))
+    monkeypatch.setattr(cli, "_self_peak_rss_bytes", lambda: 8 * GIB)
+    _result, measurement = cli._measure_comparator_operation(
+        lambda: "done", sample_interval_seconds=0.001
+    )
+    assert measurement["peak_parent_rss_bytes"] == 8 * GIB
+    assert measurement["peak_aggregate_pss_bytes"] == 200
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")
+def test_process_tree_finds_child_spawned_by_non_main_thread():
+    from scripts.benchmarks.v201 import cli
+
+    ready = threading.Event()
+    release = threading.Event()
+    holder = {}
+
+    def spawn_child():
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        holder["process"] = process
+        ready.set()
+        release.wait(timeout=10)
+        process.terminate()
+        process.wait(timeout=10)
+
+    worker = threading.Thread(target=spawn_child)
+    worker.start()
+    try:
+        assert ready.wait(timeout=10)
+        assert holder["process"].pid in cli._process_tree(os.getpid())
+    finally:
+        release.set()
+        worker.join(timeout=15)
+        if worker.is_alive():
+            holder["process"].kill()
+            worker.join(timeout=5)

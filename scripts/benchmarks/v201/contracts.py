@@ -5,6 +5,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from fractions import Fraction
 from numbers import Integral
 from types import MappingProxyType
 from typing import Any, Literal
@@ -323,16 +324,53 @@ def validate_comparator_probe_series(
     width20 = by_width[20]
     scale = COMPARATOR_TARGET_RESPONSE_COUNT / width20.response_width
     safety = COMPARATOR_PROJECTION_SAFETY_FACTOR
+
+    def memory_upper_envelope(field_name: str) -> tuple[int, dict[str, Any]]:
+        points = [
+            (width, int(getattr(by_width[width], field_name)))
+            for width in COMPARATOR_PROBE_WIDTHS
+        ]
+        if any(
+            right[1] < left[1]
+            for left, right in zip(points, points[1:], strict=True)
+        ):
+            raise ValueError(
+                f"nonmonotone comparator memory anchors for {field_name}"
+            )
+        slopes = [
+            Fraction(right_value - left_value, right_width - left_width)
+            for left_index, (left_width, left_value) in enumerate(points)
+            for right_width, right_value in points[left_index + 1:]
+        ]
+        slope = max(slopes, default=Fraction(0, 1))
+        intercept = max(
+            Fraction(value, 1) - slope * width for width, value in points
+        )
+        intercept = max(intercept, Fraction(0, 1))
+        target = intercept + slope * COMPARATOR_TARGET_RESPONSE_COUNT
+        target_bytes = math.ceil(target)
+        model = {
+            "anchor_bytes_by_width": {
+                str(width): value for width, value in points
+            },
+            "intercept_bytes": math.ceil(intercept),
+            "slope_bytes_per_response": float(slope),
+            "target_without_safety_bytes": target_bytes,
+        }
+        return int(math.ceil(target_bytes * safety)), model
+
+    projected_parent_rss, parent_model = memory_upper_envelope(
+        "peak_parent_rss_bytes"
+    )
+    projected_aggregate_pss, pss_model = memory_upper_envelope(
+        "peak_aggregate_pss_bytes"
+    )
     projected = {
         "scorer_cpu_seconds": width20.scorer_cpu_seconds * scale * safety,
         "elapsed_seconds": width20.scorer_wall_seconds * scale * safety,
         "output_bytes": int(math.ceil(width20.output_bytes * scale * safety)),
-        "peak_parent_rss_bytes": int(math.ceil(
-            max(record.peak_parent_rss_bytes for record in records) * safety
-        )),
-        "peak_aggregate_pss_bytes": int(math.ceil(
-            max(record.peak_aggregate_pss_bytes for record in records) * safety
-        )),
+        "peak_parent_rss_bytes": projected_parent_rss,
+        "peak_aggregate_pss_bytes": projected_aggregate_pss,
     }
     limits = {
         "scorer_cpu_seconds": int(FORMAL_BUDGET.cpu_hours * 3_600),
@@ -354,7 +392,7 @@ def validate_comparator_probe_series(
                 f"safety-adjusted {labels[field_name]} projection exceeds its ceiling"
             )
     return {
-        "schema": "homoeogwas-snpxsnp-resource-projection-v1",
+        "schema": "homoeogwas-snpxsnp-resource-projection-v2",
         "panel_id": anchor.panel_id,
         "sample_context": anchor.sample_context,
         "family_size": anchor.family_size,
@@ -362,6 +400,10 @@ def validate_comparator_probe_series(
         "target_response_count": COMPARATOR_TARGET_RESPONSE_COUNT,
         "time_per_response_relative_deviation_5_vs_20": relative_deviation,
         "safety_factor": safety,
+        "memory_projection_models": {
+            "peak_parent_rss_bytes": parent_model,
+            "peak_aggregate_pss_bytes": pss_model,
+        },
         "projected": projected,
         "limits": limits,
         "accepted": True,
