@@ -12,10 +12,12 @@ import concurrent.futures
 import csv
 import hashlib
 import json
+import os
 import resource
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -69,6 +71,7 @@ _TARGET_RELEASE = {
 }
 _INPUT_SPEC_SCHEMA = "homoeogwas-v201-benchmark-inputs-v1"
 _LOCK_SCHEMA = "homoeogwas-v201-benchmark-lock-v1"
+_FORMAL_PROJECTION_SAFETY_FACTOR = 2.0
 _HEX = frozenset("0123456789abcdef")
 _OMNIB_PANEL_IDENTITIES = {
     "cotton": ("REALG.CGVD1245", 5_177_468_918_036_905_819),
@@ -104,6 +107,114 @@ def _measure_operation(operation: Callable[[], Any]) -> tuple[Any, dict[str, Any
         "cpu_seconds": max(0.0, cpu_after - cpu_before),
         "wall_seconds": max(0.0, wall_seconds),
         "peak_rss_bytes": max(peak_before, peak_after),
+    }
+
+
+def _process_tree(root_pid: int) -> set[int]:
+    """Return the live Linux process tree rooted at ``root_pid``."""
+
+    found: set[int] = set()
+    pending = [root_pid]
+    while pending:
+        pid = pending.pop()
+        if pid in found or not Path(f"/proc/{pid}").exists():
+            continue
+        found.add(pid)
+        children = Path(f"/proc/{pid}/task/{pid}/children")
+        try:
+            pending.extend(int(value) for value in children.read_text().split())
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            continue
+    return found
+
+
+def _process_memory(pid: int) -> tuple[int, int] | None:
+    """Return current RSS and PSS bytes for one Linux process."""
+
+    rss: int | None = None
+    pss: int | None = None
+    try:
+        lines = Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines()
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+    for line in lines:
+        if line.startswith("Rss:"):
+            rss = int(line.split()[1]) * 1_024
+        elif line.startswith("Pss:"):
+            pss = int(line.split()[1]) * 1_024
+    if rss is None or pss is None or rss < 1 or pss < 1:
+        return None
+    return rss, pss
+
+
+def _comparator_memory_snapshot(root_pid: int) -> tuple[int, int]:
+    """Return parent RSS and aggregate process-tree PSS in bytes."""
+
+    parent = _process_memory(root_pid)
+    if parent is None:
+        raise RuntimeError("cannot read parent RSS/PSS from Linux /proc")
+    aggregate_pss = 0
+    for pid in _process_tree(root_pid):
+        measured = _process_memory(pid)
+        if measured is not None:
+            aggregate_pss += measured[1]
+    if aggregate_pss < 1:
+        raise RuntimeError("cannot read aggregate process-tree PSS from Linux /proc")
+    return parent[0], aggregate_pss
+
+
+def _measure_comparator_operation(
+    operation: Callable[[], Any],
+    *,
+    sample_interval_seconds: float = 0.01,
+) -> tuple[Any, dict[str, Any]]:
+    """Measure scorer CPU/wall plus peak parent RSS and process-tree PSS."""
+
+    if sample_interval_seconds <= 0:
+        raise ValueError("memory sample interval must be positive")
+    root_pid = os.getpid()
+    peak_parent_rss = 0
+    peak_aggregate_pss = 0
+    sample_error: list[Exception] = []
+    finished = threading.Event()
+    lock = threading.Lock()
+
+    def sample_once() -> None:
+        nonlocal peak_parent_rss, peak_aggregate_pss
+        parent_rss, aggregate_pss = _comparator_memory_snapshot(root_pid)
+        with lock:
+            peak_parent_rss = max(peak_parent_rss, parent_rss)
+            peak_aggregate_pss = max(peak_aggregate_pss, aggregate_pss)
+
+    def monitor() -> None:
+        while not finished.wait(sample_interval_seconds):
+            try:
+                sample_once()
+            except Exception as error:  # surfaced after the worker is joined
+                sample_error.append(error)
+                finished.set()
+                return
+
+    sample_once()
+    cpu_before, _peak_before = _resource_snapshot()
+    wall_before = time.perf_counter()
+    worker = threading.Thread(target=monitor, name="snpxsnp-resource-monitor")
+    worker.start()
+    try:
+        result = operation()
+    finally:
+        finished.set()
+        worker.join()
+    wall_seconds = time.perf_counter() - wall_before
+    cpu_after, _peak_after = _resource_snapshot()
+    sample_once()
+    if sample_error:
+        raise RuntimeError("comparator resource monitor failed") from sample_error[0]
+    return result, {
+        "scorer_cpu_seconds": max(0.0, cpu_after - cpu_before),
+        "scorer_wall_seconds": max(0.0, wall_seconds),
+        "peak_parent_rss_bytes": peak_parent_rss,
+        "peak_aggregate_pss_bytes": peak_aggregate_pss,
     }
 
 
@@ -1672,13 +1783,17 @@ def _add_peak_memory_projection(
     measurements: Sequence[Mapping[str, Any]],
     effective_workers: int,
 ) -> dict[str, Any]:
+    projection["projection_safety_factor"] = _FORMAL_PROJECTION_SAFETY_FACTOR
     observed = max(int(row["peak_rss_bytes"]) for row in measurements)
-    projected = observed * effective_workers
+    projected = int(
+        observed * effective_workers * _FORMAL_PROJECTION_SAFETY_FACTOR
+    )
     memory = {
         "observed_max_peak_rss_bytes": observed,
         "observed_max_peak_memory_gb": observed / 1_000_000_000,
         "projected_peak_memory_bytes": projected,
         "projected_peak_memory_gb": projected / 1_000_000_000,
+        "safety_factor": _FORMAL_PROJECTION_SAFETY_FACTOR,
         "cap_gb": None,
         "threshold_status": "not_evaluated_no_formal_memory_cap",
     }
@@ -1697,10 +1812,27 @@ def _add_peak_memory_projection(
     return projection
 
 
+def _formal_projection_measurements(
+    measurements: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply the frozen safety factor to work, time and output projections."""
+
+    return [
+        {
+            **dict(row),
+            "scenario_multiplier": (
+                float(row["scenario_multiplier"])
+                * _FORMAL_PROJECTION_SAFETY_FACTOR
+            ),
+        }
+        for row in measurements
+    ]
+
+
 def command_project_formal(args: argparse.Namespace) -> int:
     root = _canonical_root(args.root).resolve()
     _validate_sealed_design(root)
-    measurements = _pilot_measurements(root)
+    measurements = _formal_projection_measurements(_pilot_measurements(root))
     try:
         projection = project_budget(
             "formal", measurements,

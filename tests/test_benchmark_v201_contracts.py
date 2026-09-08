@@ -184,6 +184,33 @@ def test_registry_has_global_vc_and_locked_family_size_stress_matrix():
     assert all(list(_expected_replicates(row)) == [0] for row in stress)
 
 
+def test_registry_binds_only_primary_real_comparator_resource_contexts():
+    rows = [row for row in build_scenarios("pilot") if row.track == "omnib"]
+    for row in rows:
+        parameters = row.parameters
+        family_size = int(parameters.get("family_size", 80))
+        applicable = parameters["experiment"] != "global_vc"
+        eligible = (
+            applicable
+            and parameters["backbone"] in {"cotton", "wheat"}
+            and family_size == 80
+        )
+        assert parameters["snpxsnp_resource_status"] == (
+            "frozen_probe_required"
+            if eligible else (
+                "unfrozen_not_authorized"
+                if applicable else "not_applicable_detection_only"
+            )
+        )
+        assert parameters["snpxsnp_probe_widths"] == (
+            [1, 5, 20] if eligible else []
+        )
+        assert parameters["snpxsnp_max_offered_pairs"] == (
+            {"cotton": 10_000, "wheat": 750_000}[parameters["backbone"]]
+            if eligible else None
+        )
+
+
 def test_cotton_never_registers_multi_edge_group_and_negative_controls_are_explicit():
     power = [
         row for row in build_scenarios("formal")

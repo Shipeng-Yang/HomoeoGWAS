@@ -46,7 +46,12 @@ from .comparators import (
     score_global_hadamard_vc,
     score_snpxsnp_family,
 )
-from .contracts import Scenario, derive_seed, sha256_payload
+from .contracts import (
+    Scenario,
+    comparator_resource_limit,
+    derive_seed,
+    sha256_payload,
+)
 from .shards import ShardConflict, ShardKey, load_shard, write_shard_exclusive
 from .simulation import compose_exact_pve, draw_null, interaction_signal, standardize
 
@@ -61,7 +66,10 @@ _DEFAULT_DESIGN_HASH = "0" * 64
 _BINDING_GAUSSIAN_FAILURE_RATE_MAX = 0.002
 _DIAGNOSTIC_FAILURE_RATE_MAX = 0.01
 _DEFAULT_SYNTHETIC_FEATURE_SEED = 20_260_830
-_TASK7_MAX_OFFERED_SNP_PAIRS = 750_000
+_SYNTHETIC_FIXTURE_MAX_OFFERED_SNP_PAIRS = 750_000
+_SNPXSNP_FIXTURE_PANEL_IDS = frozenset({
+    "SYNTHETIC", "FIXTURE", "SYNTH.OVERCAP",
+})
 
 
 @dataclass(frozen=True)
@@ -1191,6 +1199,22 @@ def _prepare_scenario(
     )
 
 
+def _snpxsnp_pair_ceiling(context: OmniBBenchmarkContext) -> int:
+    """Resolve the frozen real-panel ceiling before any SNP-pair scoring."""
+
+    if context.panel_id in _SNPXSNP_FIXTURE_PANEL_IDS:
+        # These identities are reserved for bounded unit-test fixtures.
+        # Explicit benchmark identities, including SYNTH.QUARTET, remain
+        # fail-closed through comparator_resource_limit.
+        return _SYNTHETIC_FIXTURE_MAX_OFFERED_SNP_PAIRS
+    limit = comparator_resource_limit(
+        context.panel_id,
+        family_size=len(context.family.group_ids),
+        copies=len(context.family.subgenomes),
+    )
+    return limit.max_offered_pairs
+
+
 def _method_scores(
     prepared: _PreparedScenario,
     responses: np.ndarray,
@@ -1215,7 +1239,7 @@ def _method_scores(
         prepared.expanded,
         prepared.gene_blocks,
         responses,
-        max_offered_pairs=_TASK7_MAX_OFFERED_SNP_PAIRS,
+        max_offered_pairs=_snpxsnp_pair_ceiling(prepared.context),
     )
     group_count = len(prepared.context.family.group_ids)
     return (

@@ -536,19 +536,28 @@ def test_project_formal_reports_observed_and_projected_peak_memory(
     }]
     monkeypatch.setattr(cli, "_validate_sealed_design", lambda *_a, **_k: None)
     monkeypatch.setattr(cli, "_pilot_measurements", lambda *_a, **_k: measurements)
-    monkeypatch.setattr(cli, "project_budget", lambda *_a, **_k: {
-        "stage": "formal", "totals": {}, "limits": {}, "breakdown": {},
-    })
+    projected_inputs = []
+
+    def capture_projection(_stage, projected, **_kwargs):
+        projected_inputs.extend(projected)
+        return {
+            "stage": "formal", "totals": {}, "limits": {}, "breakdown": {},
+        }
+
+    monkeypatch.setattr(cli, "project_budget", capture_projection)
 
     assert main([
         "project-formal", "--root", str(root), "--effective-workers", "3",
     ]) == 0
     projected = json.loads(capsys.readouterr().out)
+    assert projected_inputs[0]["scenario_multiplier"] == 6.0
+    assert projected["projection_safety_factor"] == 2.0
     assert projected["peak_memory_projection"] == {
         "observed_max_peak_rss_bytes": 2_000_000_000,
         "observed_max_peak_memory_gb": 2.0,
-        "projected_peak_memory_bytes": 6_000_000_000,
-        "projected_peak_memory_gb": 6.0,
+        "projected_peak_memory_bytes": 12_000_000_000,
+        "projected_peak_memory_gb": 12.0,
+        "safety_factor": 2.0,
         "cap_gb": None,
         "threshold_status": "not_evaluated_no_formal_memory_cap",
     }
@@ -566,6 +575,21 @@ def test_execution_measurement_keeps_process_cpu_distinct_from_wall(monkeypatch)
     assert measurement == {
         "cpu_seconds": 2.0, "wall_seconds": 9.0, "peak_rss_bytes": 150,
     }
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/smaps_rollup").is_file(), reason="Linux /proc required",
+)
+def test_comparator_measurement_reports_parent_rss_and_process_tree_pss():
+    result, measurement = cli._measure_comparator_operation(
+        lambda: bytearray(2_000_000), sample_interval_seconds=0.001,
+    )
+
+    assert len(result) == 2_000_000
+    assert measurement["scorer_wall_seconds"] > 0
+    assert measurement["scorer_cpu_seconds"] >= 0
+    assert measurement["peak_parent_rss_bytes"] > 0
+    assert measurement["peak_aggregate_pss_bytes"] > 0
 
 
 def test_project_formal_fails_when_wall_based_elapsed_projection_exceeds_cap(
@@ -589,4 +613,4 @@ def test_project_formal_fails_when_wall_based_elapsed_projection_exceeds_cap(
         "project-formal", "--root", str(root), "--effective-workers", "2",
     ]) == 2
     projected = json.loads(capsys.readouterr().out)
-    assert projected["totals"]["elapsed_hours"] == 2.0
+    assert projected["totals"]["elapsed_hours"] == 4.0

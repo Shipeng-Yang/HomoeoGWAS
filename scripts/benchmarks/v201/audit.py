@@ -32,7 +32,13 @@ from .aggregate import (
     write_tables,
 )
 from .comparators import METHOD_NAMES, SNPxSNPScoreResult
-from .contracts import ScalingAnchor, canonical_json, derive_seed, sha256_payload
+from .contracts import (
+    ScalingAnchor,
+    canonical_json,
+    derive_seed,
+    sha256_payload,
+    validate_comparator_probe_series,
+)
 from .track_scaling import ScalingAnchorRun, summarize_anchor
 
 _APPLICATION_ACCEPTED = {
@@ -164,6 +170,19 @@ def summarize_binomial(successes: int, total: int) -> dict[str, int | float]:
         "estimate": float(successes / total), "ci_low": float(low),
         "ci_high": float(high),
     }
+
+
+def _audit_comparator_probe_series(
+    payloads: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate a noninferential comparator resource series fail-closed."""
+
+    try:
+        return validate_comparator_probe_series(payloads)
+    except (KeyError, TypeError, ValueError) as error:
+        raise BenchmarkAuditError(
+            "SNPxSNP resource probe series is invalid"
+        ) from error
 
 
 def core_fwer_gate(

@@ -11,6 +11,7 @@ from .contracts import (
     ScalingAnchor,
     Scenario,
     canonical_json,
+    comparator_resource_limit,
 )
 
 __all__ = [
@@ -38,6 +39,38 @@ def _scenario(
 
 def _pve_label(value: float) -> str:
     return f"{value:g}".replace(".", "p")
+
+
+def _snpxsnp_resource_parameters(
+    backbone: str,
+    *,
+    family_size: int = 80,
+    applicable: bool = True,
+) -> dict[str, object]:
+    if not applicable:
+        return {
+            "snpxsnp_resource_status": "not_applicable_detection_only",
+            "snpxsnp_probe_widths": [],
+            "snpxsnp_max_offered_pairs": None,
+        }
+    identity = {
+        "cotton": ("REALG.CGVD1245", 2),
+        "wheat": ("REALG.WATKINS_F2143", 3),
+    }.get(backbone)
+    if identity is None or family_size != 80:
+        return {
+            "snpxsnp_resource_status": "unfrozen_not_authorized",
+            "snpxsnp_probe_widths": [],
+            "snpxsnp_max_offered_pairs": None,
+        }
+    limit = comparator_resource_limit(
+        identity[0], family_size=family_size, copies=identity[1],
+    )
+    return {
+        "snpxsnp_resource_status": "frozen_probe_required",
+        "snpxsnp_probe_widths": [1, 5, 20],
+        "snpxsnp_max_offered_pairs": limit.max_offered_pairs,
+    }
 
 
 def _fit_scenarios(stage: str) -> list[Scenario]:
@@ -89,11 +122,16 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
 
     def omnib_row(scenario_id: str, replicates: int, bootstrap_B: int, **parameters: object) -> Scenario:
         copies, edges = {"cotton": (2, 1), "wheat": (3, 3), "quartet": (4, 6)}[parameters["backbone"]]
+        resources = _snpxsnp_resource_parameters(
+            str(parameters["backbone"]),
+            family_size=int(parameters.get("family_size", 80)),
+        )
         return _scenario(
             scenario_id, "omnib", stage, replicates, bootstrap_B,
             mode="group", statistic="omniB", hypothesis_unit="group",
             subset_order=2, pair_edges="common_primitive", copies=copies,
-            edges_per_group=edges, direct_four_way=False, **parameters,
+            edges_per_group=edges, direct_four_way=False, **resources,
+            **parameters,
         )
 
     for backbone in core_backbones:
@@ -167,6 +205,7 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
                 null_model="gaussian", method="global_hadamard_variance_component",
                 hypothesis_unit="global", detection_only=True,
                 copies=copies, edges_per_group=edges, direct_four_way=False,
+                **_snpxsnp_resource_parameters(backbone, applicable=False),
             ))
         rows.append(_scenario(
             f"B.global_vc.{backbone}.gaussian.power", "omnib", stage,
@@ -179,6 +218,7 @@ def _omnib_scenarios(stage: str) -> list[Scenario]:
             calibration_count=20 if stage == "pilot" else 2_000,
             report_metric="detection_power", copies=copies,
             edges_per_group=edges, direct_four_way=False,
+            **_snpxsnp_resource_parameters(backbone, applicable=False),
         ))
 
     # Statistical family-size stress is separate from machine-scaling Track C.

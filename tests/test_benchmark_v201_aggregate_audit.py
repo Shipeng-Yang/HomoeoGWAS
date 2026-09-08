@@ -29,6 +29,7 @@ from scripts.benchmarks.v201.audit import (
     AuditGate,
     BenchmarkAuditError,
     _audit_application_scenario,
+    _audit_comparator_probe_series,
     _audit_families_and_parallel,
     _audit_fit_scenario,
     _audit_power_evidence,
@@ -65,6 +66,50 @@ from scripts.benchmarks.v201.track_scaling import (
     ScalingAnchorRun,
     summarize_anchor,
 )
+
+
+def _comparator_probe(width: int) -> dict[str, object]:
+    return {
+        "schema": "homoeogwas-snpxsnp-resource-probe-v1",
+        "panel_id": "REALG.CGVD1245",
+        "sample_context": "full",
+        "family_size": 80,
+        "copies": 2,
+        "response_width": width,
+        "design_hash": "a" * 64,
+        "context_fingerprint": "b" * 64,
+        "prepared_design_sha256": "c" * 64,
+        "member_family_sha256": "d" * 64,
+        "scorer_wall_seconds": float(width),
+        "scorer_cpu_seconds": float(width * 2),
+        "peak_parent_rss_bytes": 4 * 1024 ** 3,
+        "peak_aggregate_pss_bytes": 8 * 1024 ** 3,
+        "output_bytes": width * 100,
+        "offered_pair_count": 7_405,
+        "design_nonestimable_pair_count": 5,
+        "tested_pair_count": 7_400,
+        "nonfinite_pair_score_count": 0,
+        "failed_response_indices": [],
+        "gated_marker_count_by_gene": {"A|g1": 11, "D|g1": 9},
+        "requested_jobs": 1,
+        "effective_jobs": 1,
+        "parallel_backend": "serial",
+        "worker_pids": [12345],
+        "inference_status": "noninferential_resource_probe",
+        "execution_authorized": False,
+    }
+
+
+def test_audit_wraps_comparator_resource_probe_validation_fail_closed():
+    projection = _audit_comparator_probe_series(
+        [_comparator_probe(width) for width in (1, 5, 20)]
+    )
+    assert projection["accepted"] is True
+
+    malformed = [_comparator_probe(width) for width in (1, 5, 20)]
+    malformed[-1].pop("peak_aggregate_pss_bytes")
+    with pytest.raises(BenchmarkAuditError, match="resource probe"):
+        _audit_comparator_probe_series(malformed)
 
 
 def _write_registry(root: Path, *, stage: str, total: int) -> Path:

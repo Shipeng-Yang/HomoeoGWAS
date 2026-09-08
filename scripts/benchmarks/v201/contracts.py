@@ -2,11 +2,371 @@
 
 import hashlib
 import json
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from numbers import Integral
+from types import MappingProxyType
 from typing import Any, Literal
 
 Stage = Literal["pilot", "formal"]
 Track = Literal["fit", "omnib", "scaling", "application"]
+GIB = 1024 ** 3
+COMPARATOR_PROBE_WIDTHS = (1, 5, 20)
+COMPARATOR_TARGET_RESPONSE_COUNT = 2_000
+COMPARATOR_PROJECTION_SAFETY_FACTOR = 2.0
+COMPARATOR_TIME_PER_RESPONSE_TOLERANCE = 0.20
+
+
+@dataclass(frozen=True)
+class ComparatorResourceLimit:
+    """Frozen exhaustive-SNP×SNP resource boundary for one real panel."""
+
+    panel_id: str
+    family_size: int
+    copies: int
+    max_offered_pairs: int
+    max_parent_rss_bytes: int = 32 * GIB
+    max_aggregate_pss_bytes: int = 128 * GIB
+
+    def __post_init__(self) -> None:
+        values = (
+            self.family_size,
+            self.copies,
+            self.max_offered_pairs,
+            self.max_parent_rss_bytes,
+            self.max_aggregate_pss_bytes,
+        )
+        if (
+            not isinstance(self.panel_id, str)
+            or not self.panel_id
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, Integral)
+                or int(value) < 1
+                for value in values
+            )
+        ):
+            raise ValueError("invalid comparator resource limit")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+_COMPARATOR_RESOURCE_LIMITS = {
+    "REALG.CGVD1245": ComparatorResourceLimit(
+        "REALG.CGVD1245", family_size=80, copies=2,
+        max_offered_pairs=10_000,
+    ),
+    "REALG.WATKINS_F2143": ComparatorResourceLimit(
+        "REALG.WATKINS_F2143", family_size=80, copies=3,
+        max_offered_pairs=750_000,
+    ),
+}
+
+
+def comparator_resource_limit(
+    panel_id: str,
+    *,
+    family_size: int,
+    copies: int,
+) -> ComparatorResourceLimit:
+    """Return the exact reviewed real-panel limit or fail as unfrozen."""
+
+    limit = _COMPARATOR_RESOURCE_LIMITS.get(panel_id)
+    if (
+        limit is None
+        or isinstance(family_size, bool)
+        or not isinstance(family_size, Integral)
+        or isinstance(copies, bool)
+        or not isinstance(copies, Integral)
+        or int(family_size) != limit.family_size
+        or int(copies) != limit.copies
+    ):
+        raise ValueError(
+            "SNPxSNP comparator context is unfrozen and not authorized"
+        )
+    return limit
+
+
+def _finite_number(value: Any, field_name: str, *, positive: bool) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        or (positive and value <= 0)
+    ):
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{field_name} must be a finite {qualifier} number")
+    return float(value)
+
+
+def _sha256_string(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+@dataclass(frozen=True)
+class ComparatorProbeRecord:
+    """One noninferential exhaustive-SNP×SNP cost-probe measurement."""
+
+    schema: str
+    panel_id: str
+    sample_context: str
+    family_size: int
+    copies: int
+    response_width: int
+    design_hash: str
+    context_fingerprint: str
+    prepared_design_sha256: str
+    member_family_sha256: str
+    scorer_wall_seconds: float
+    scorer_cpu_seconds: float
+    peak_parent_rss_bytes: int
+    peak_aggregate_pss_bytes: int
+    output_bytes: int
+    offered_pair_count: int
+    design_nonestimable_pair_count: int
+    tested_pair_count: int
+    nonfinite_pair_score_count: int
+    failed_response_indices: tuple[int, ...]
+    gated_marker_count_by_gene: Mapping[str, int]
+    requested_jobs: int
+    effective_jobs: int
+    parallel_backend: str
+    worker_pids: tuple[int, ...]
+    inference_status: str
+    execution_authorized: bool
+
+    def __post_init__(self) -> None:
+        limit = comparator_resource_limit(
+            self.panel_id, family_size=self.family_size, copies=self.copies,
+        )
+        integer_fields = {
+            "response_width": self.response_width,
+            "peak_parent_rss_bytes": self.peak_parent_rss_bytes,
+            "peak_aggregate_pss_bytes": self.peak_aggregate_pss_bytes,
+            "output_bytes": self.output_bytes,
+            "offered_pair_count": self.offered_pair_count,
+            "design_nonestimable_pair_count": self.design_nonestimable_pair_count,
+            "tested_pair_count": self.tested_pair_count,
+            "nonfinite_pair_score_count": self.nonfinite_pair_score_count,
+            "requested_jobs": self.requested_jobs,
+            "effective_jobs": self.effective_jobs,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, Integral)
+            or int(value) < (1 if name in {
+                "response_width", "peak_parent_rss_bytes",
+                "peak_aggregate_pss_bytes", "offered_pair_count",
+                "tested_pair_count", "requested_jobs", "effective_jobs",
+            } else 0)
+            for name, value in integer_fields.items()
+        ):
+            raise ValueError("comparator probe integer fields are invalid")
+        if (
+            self.schema != "homoeogwas-snpxsnp-resource-probe-v1"
+            or self.sample_context != "full"
+            or self.response_width not in COMPARATOR_PROBE_WIDTHS
+            or self.inference_status != "noninferential_resource_probe"
+            or self.execution_authorized is not False
+            or not all(_sha256_string(value) for value in (
+                self.design_hash,
+                self.context_fingerprint,
+                self.prepared_design_sha256,
+                self.member_family_sha256,
+            ))
+        ):
+            raise ValueError("comparator probe identity or role is invalid")
+        wall = _finite_number(
+            self.scorer_wall_seconds, "scorer_wall_seconds", positive=True,
+        )
+        cpu = _finite_number(
+            self.scorer_cpu_seconds, "scorer_cpu_seconds", positive=False,
+        )
+        if self.offered_pair_count > limit.max_offered_pairs:
+            raise ValueError("SNPxSNP offered pair ceiling exceeded")
+        if self.peak_parent_rss_bytes > limit.max_parent_rss_bytes:
+            raise ValueError("SNPxSNP parent RSS ceiling exceeded")
+        if self.peak_aggregate_pss_bytes > limit.max_aggregate_pss_bytes:
+            raise ValueError("SNPxSNP aggregate PSS ceiling exceeded")
+        if (
+            self.offered_pair_count - self.design_nonestimable_pair_count
+            != self.tested_pair_count
+        ):
+            raise ValueError("comparator probe pair counts are inconsistent")
+        failed = tuple(self.failed_response_indices)
+        if (
+            any(
+                isinstance(index, bool)
+                or not isinstance(index, Integral)
+                or int(index) < 0
+                or int(index) >= self.response_width
+                for index in failed
+            )
+            or tuple(sorted(int(index) for index in failed))
+            != tuple(int(index) for index in failed)
+            or len(set(failed)) != len(failed)
+            or failed
+            or self.nonfinite_pair_score_count != 0
+        ):
+            raise ValueError("resource probe must complete every response")
+        markers = self.gated_marker_count_by_gene
+        if (
+            not isinstance(markers, Mapping)
+            or not markers
+            or any(
+                not isinstance(key, str)
+                or not key
+                or isinstance(value, bool)
+                or not isinstance(value, Integral)
+                or int(value) < 1
+                for key, value in markers.items()
+            )
+        ):
+            raise ValueError("gated marker counts are invalid")
+        pids = tuple(self.worker_pids)
+        if (
+            self.requested_jobs != 1
+            or self.effective_jobs != 1
+            or self.parallel_backend != "serial"
+            or len(pids) != 1
+            or isinstance(pids[0], bool)
+            or not isinstance(pids[0], Integral)
+            or int(pids[0]) < 1
+        ):
+            raise ValueError("comparator probe execution provenance is invalid")
+        object.__setattr__(self, "scorer_wall_seconds", wall)
+        object.__setattr__(self, "scorer_cpu_seconds", cpu)
+        object.__setattr__(
+            self,
+            "failed_response_indices",
+            tuple(int(index) for index in failed),
+        )
+        object.__setattr__(
+            self,
+            "gated_marker_count_by_gene",
+            MappingProxyType({
+                key: int(value) for key, value in sorted(markers.items())
+            }),
+        )
+        object.__setattr__(self, "worker_pids", tuple(int(pid) for pid in pids))
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ComparatorProbeRecord":
+        if not isinstance(payload, Mapping):
+            raise ValueError("comparator probe must be a mapping")
+        fields = set(cls.__dataclass_fields__)
+        if set(payload) != fields:
+            raise ValueError("comparator probe schema fields differ")
+        return cls(
+            **{
+                **dict(payload),
+                "failed_response_indices": tuple(payload["failed_response_indices"]),
+                "worker_pids": tuple(payload["worker_pids"]),
+            }
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            field_name: (
+                dict(value) if field_name == "gated_marker_count_by_gene"
+                else list(value) if field_name in {
+                    "failed_response_indices", "worker_pids",
+                }
+                else value
+            )
+            for field_name in self.__dataclass_fields__
+            for value in (getattr(self, field_name),)
+        }
+
+
+def validate_comparator_probe_series(
+    payloads: Sequence[Mapping[str, Any] | ComparatorProbeRecord],
+) -> dict[str, Any]:
+    """Validate the width anchors and return a safety-adjusted projection."""
+
+    records = tuple(
+        value if isinstance(value, ComparatorProbeRecord)
+        else ComparatorProbeRecord.from_payload(value)
+        for value in payloads
+    )
+    by_width = {record.response_width: record for record in records}
+    if len(records) != 3 or tuple(sorted(by_width)) != COMPARATOR_PROBE_WIDTHS:
+        raise ValueError("comparator probes require widths 1, 5 and 20")
+    identity_fields = (
+        "panel_id", "sample_context", "family_size", "copies", "design_hash",
+        "context_fingerprint", "prepared_design_sha256", "member_family_sha256",
+        "offered_pair_count", "design_nonestimable_pair_count",
+        "tested_pair_count", "gated_marker_count_by_gene",
+    )
+    anchor = records[0]
+    if any(
+        any(getattr(record, field_name) != getattr(anchor, field_name)
+            for field_name in identity_fields)
+        for record in records[1:]
+    ):
+        raise ValueError("comparator probes do not use the same frozen context")
+    per_response_5 = by_width[5].scorer_wall_seconds / 5
+    per_response_20 = by_width[20].scorer_wall_seconds / 20
+    relative_deviation = abs(per_response_20 - per_response_5) / per_response_5
+    if relative_deviation > COMPARATOR_TIME_PER_RESPONSE_TOLERANCE:
+        raise ValueError("comparator probe time per response differs by more than 20%")
+    limit = comparator_resource_limit(
+        anchor.panel_id, family_size=anchor.family_size, copies=anchor.copies,
+    )
+    width20 = by_width[20]
+    scale = COMPARATOR_TARGET_RESPONSE_COUNT / width20.response_width
+    safety = COMPARATOR_PROJECTION_SAFETY_FACTOR
+    projected = {
+        "scorer_cpu_seconds": width20.scorer_cpu_seconds * scale * safety,
+        "elapsed_seconds": width20.scorer_wall_seconds * scale * safety,
+        "output_bytes": int(math.ceil(width20.output_bytes * scale * safety)),
+        "peak_parent_rss_bytes": int(math.ceil(
+            max(record.peak_parent_rss_bytes for record in records) * safety
+        )),
+        "peak_aggregate_pss_bytes": int(math.ceil(
+            max(record.peak_aggregate_pss_bytes for record in records) * safety
+        )),
+    }
+    limits = {
+        "scorer_cpu_seconds": int(FORMAL_BUDGET.cpu_hours * 3_600),
+        "elapsed_seconds": int(FORMAL_BUDGET.elapsed_hours * 3_600),
+        "output_bytes": int(FORMAL_BUDGET.output_gb * GIB),
+        "peak_parent_rss_bytes": limit.max_parent_rss_bytes,
+        "peak_aggregate_pss_bytes": limit.max_aggregate_pss_bytes,
+    }
+    labels = {
+        "scorer_cpu_seconds": "CPU",
+        "elapsed_seconds": "elapsed",
+        "output_bytes": "storage",
+        "peak_parent_rss_bytes": "parent RSS",
+        "peak_aggregate_pss_bytes": "aggregate PSS",
+    }
+    for field_name, value in projected.items():
+        if value > limits[field_name]:
+            raise ValueError(
+                f"safety-adjusted {labels[field_name]} projection exceeds its ceiling"
+            )
+    return {
+        "schema": "homoeogwas-snpxsnp-resource-projection-v1",
+        "panel_id": anchor.panel_id,
+        "sample_context": anchor.sample_context,
+        "family_size": anchor.family_size,
+        "response_widths": list(COMPARATOR_PROBE_WIDTHS),
+        "target_response_count": COMPARATOR_TARGET_RESPONSE_COUNT,
+        "time_per_response_relative_deviation_5_vs_20": relative_deviation,
+        "safety_factor": safety,
+        "projected": projected,
+        "limits": limits,
+        "accepted": True,
+        "inference_status": "noninferential_resource_projection",
+    }
 
 
 def canonical_json(value: Any) -> str:
