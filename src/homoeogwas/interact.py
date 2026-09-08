@@ -1635,7 +1635,13 @@ def run_pair_scan(
                  "same hypotheses, so exactly one of them is inferential"))
 
 
-def _batch_nested_f(Yw: np.ndarray, Xred: np.ndarray, Xadd: np.ndarray) -> np.ndarray:
+def _batch_nested_f(
+    Yw: np.ndarray,
+    Xred: np.ndarray,
+    Xadd: np.ndarray,
+    *,
+    response_axis_stable: bool = False,
+) -> np.ndarray:
     """Whitened nested-F p for the ``Xadd`` block over EVERY column of ``Yw`` at once.
 
     The designs depend only on genotypes, so a single orthonormalization serves all phenotype columns
@@ -1655,10 +1661,38 @@ def _batch_nested_f(Yw: np.ndarray, Xred: np.ndarray, Xadd: np.ndarray) -> np.nd
         return np.full(Yw.shape[1], np.nan)
     # Explicit residual norms avoid catastrophic cancellation from
     # ||Y||^2 - ||Q'Y||^2 when the fitted model explains almost all variation.
-    Yres = Yw - Qr @ (Qr.T @ Yw) if Qr.size else Yw.copy()
-    added_ss = ((Qa.T @ Yres) ** 2).sum(0)
-    full_resid = Yres - Qa @ (Qa.T @ Yres)
-    rss_f = (full_resid ** 2).sum(0)
+    if response_axis_stable:
+        def ordered_sum_rows(values: np.ndarray) -> np.ndarray:
+            work = np.array(values, dtype=float, copy=True)
+            np.add.accumulate(work, axis=0, out=work)
+            return work[-1]
+
+        def stable_projection(
+            basis: np.ndarray, values: np.ndarray,
+        ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
+            projection = np.zeros_like(values)
+            coefficients = []
+            for column in range(basis.shape[1]):
+                coefficient = ordered_sum_rows(
+                    basis[:, column, None] * values
+                )
+                projection += basis[:, column, None] * coefficient[None, :]
+                coefficients.append(coefficient)
+            return projection, tuple(coefficients)
+
+        reduced_fit, _ = stable_projection(Qr, Yw)
+        Yres = Yw - reduced_fit
+        added_fit, added_coefficients = stable_projection(Qa, Yres)
+        added_ss = np.zeros(Yw.shape[1], dtype=float)
+        for coefficient in added_coefficients:
+            added_ss += coefficient * coefficient
+        full_resid = Yres - added_fit
+        rss_f = ordered_sum_rows(full_resid * full_resid)
+    else:
+        Yres = Yw - Qr @ (Qr.T @ Yw) if Qr.size else Yw.copy()
+        added_ss = ((Qa.T @ Yres) ** 2).sum(0)
+        full_resid = Yres - Qa @ (Qa.T @ Yres)
+        rss_f = (full_resid ** 2).sum(0)
     denom = rss_f / dfd
     bad = denom <= 1e-300
     f = added_ss / dfn / np.where(bad, 1.0, denom)

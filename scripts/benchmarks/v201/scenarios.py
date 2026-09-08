@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .contracts import (
+    COMPARATOR_PROBE_WIDTHS,
     FORMAL_BUDGET,
     PILOT_BUDGET,
     Budget,
@@ -68,7 +69,7 @@ def _snpxsnp_resource_parameters(
     )
     return {
         "snpxsnp_resource_status": "frozen_probe_required",
-        "snpxsnp_probe_widths": [1, 5, 20],
+        "snpxsnp_probe_widths": list(COMPARATOR_PROBE_WIDTHS),
         "snpxsnp_max_offered_pairs": limit.max_offered_pairs,
     }
 

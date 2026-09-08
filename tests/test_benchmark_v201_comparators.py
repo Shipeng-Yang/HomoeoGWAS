@@ -337,7 +337,11 @@ def _raw_snpxsnp_p(
             y = right[:, right_index]
             reduced = np.column_stack((cw, scores.W @ x, scores.W @ y))
             added = scores.W @ (x * y)[:, None]
-            rows.append(I._batch_nested_f(yw, reduced, added))
+            rows.append(
+                I._batch_nested_f(
+                    yw, reduced, added, response_axis_stable=True
+                )
+            )
     return np.asarray(rows)
 
 
@@ -350,6 +354,10 @@ def test_snpxsnp_returns_raw_complete_pair_family_minimum():
     family = MasterGroupFamily(("A", "B"), ("g0",), (("gA", "gB"),))
     expanded = expand_pair_edges(family)
     scores = _minimal_scores(n)
+    scores.gated_snp = {
+        ("A", "gA"): np.arange(left.shape[1]),
+        ("B", "gB"): np.arange(right.shape[1]),
+    }
 
     result = score_snpxsnp_family(
         scores,

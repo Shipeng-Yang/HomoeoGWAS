@@ -6,6 +6,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
+from itertools import pairwise
 from numbers import Integral
 from types import MappingProxyType
 from typing import Any, Literal
@@ -332,7 +333,7 @@ def validate_comparator_probe_series(
         ]
         if any(
             right[1] < left[1]
-            for left, right in zip(points, points[1:], strict=True)
+            for left, right in pairwise(points)
         ):
             raise ValueError(
                 f"nonmonotone comparator memory anchors for {field_name}"

@@ -33,6 +33,50 @@ def _family():
     return family, expand_pair_edges(family)
 
 
+def _three_copy_shared_edge_fixture():
+    rng = np.random.default_rng(9210)
+    n = 56
+    a_marker = rng.binomial(2, 0.31, n).astype(float)
+    blocks = {
+        ("A", "a0"): np.column_stack((a_marker, a_marker)),
+        ("B", "b0"): rng.binomial(2, (0.37, 0.22), size=(n, 2)).astype(float),
+        ("D", "d0"): rng.binomial(2, 0.28, size=(n, 1)).astype(float),
+        ("D", "d1"): rng.binomial(2, 0.43, size=(n, 1)).astype(float),
+    }
+    family = MasterGroupFamily(
+        ("A", "B", "D"),
+        ("g0", "g1"),
+        (("a0", "b0", "d0"), ("a0", "b0", "d1")),
+    )
+    expanded = expand_pair_edges(family)
+    scores = omnib_module.OmniBFamilyScores(
+        edge_p=np.empty((len(expanded.edges), 0)),
+        group_p=np.empty((len(family.group_ids), 0)),
+        edge_components_obs=np.empty((len(expanded.edges), 3)),
+        edge_estimable=np.ones(len(expanded.edges), dtype=bool),
+        group_estimable=np.ones(len(family.group_ids), dtype=bool),
+        W=np.eye(n),
+        y=np.zeros(n),
+        covariance_components={"e": 1.0},
+        null_design=np.ones((n, 1)),
+        gated_snp={
+            ("A", "a0"): np.asarray((9, 3), dtype=int),
+            ("B", "b0"): np.asarray((8, 2), dtype=int),
+            ("D", "d0"): np.asarray((7,), dtype=int),
+            ("D", "d1"): np.asarray((6,), dtype=int),
+        },
+    )
+    signal_responses = np.column_stack(
+        (
+            blocks[("A", "a0")][:, 0] * blocks[("B", "b0")][:, 0],
+            blocks[("A", "a0")][:, 0] * blocks[("D", "d1")][:, 0],
+            blocks[("B", "b0")][:, 1] * blocks[("D", "d0")][:, 0],
+        )
+    ) + rng.normal(scale=0.01, size=(n, 3))
+    responses = np.column_stack((signal_responses, rng.normal(size=(n, 28))))
+    return scores, family, expanded, blocks, responses
+
+
 def test_streamed_raw_score_matches_direct_nested_f_and_counts_skips():
     rng = np.random.default_rng(9201)
     n = 40
@@ -210,8 +254,136 @@ def test_inner_calibration_arguments_are_not_part_of_the_raw_api():
         )
 
 
-def test_raw_outer_decisions_match_legacy_inner_then_outer_fixture():
-    """One-member fixture proves the removed nesting preserves decisions."""
+def test_missing_gated_snp_identity_fails_closed():
+    rng = np.random.default_rng(9208)
+    n = 32
+    left = rng.binomial(2, 0.3, size=(n, 1)).astype(float)
+    right = rng.binomial(2, 0.4, size=(n, 1)).astype(float)
+    scores = _scores(n, left_ids=(1,), right_ids=(2,))
+    scores.gated_snp.pop(("B", "gB"))
+    family, expanded = _family()
+
+    with pytest.raises(ValueError, match="missing gated SNP indices"):
+        comparator_module.score_snpxsnp_family(
+            scores,
+            family,
+            expanded,
+            {("A", "gA"): left, ("B", "gB"): right},
+            rng.normal(size=(n, 2)),
+            max_offered_pairs=1,
+        )
+
+
+def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invariance():
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    assert expanded.group_edge_indices == ((0, 1, 2), (0, 3, 4))
+    assert expanded.edges[0].source_group_ids == ("g0", "g1")
+
+    result = comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        blocks,
+        responses,
+        max_offered_pairs=12,
+    )
+
+    assert result.offered_pair_count == 12
+    assert result.design_nonestimable_pair_count == 0
+    assert result.tested_pair_count == 12
+    assert result.offered_pair_count_by_group == (8, 8)
+    assert result.design_nonestimable_pair_count_by_group == (0, 0)
+    assert result.tested_pair_count_by_group == (8, 8)
+    assert result.group_memberships[:4] == ((0, 1),) * 4
+    assert result.member_family_sha256 == comparator_module._snpxsnp_member_family_hash(
+        result.member_ids, result.group_memberships
+    )
+
+    expected_p = np.full_like(result.group_p, np.inf)
+    expected_ids = np.full(result.group_p.shape, "", dtype=object)
+    for edge_index, edge in enumerate(expanded.edges):
+        memberships = tuple(
+            group_index
+            for group_index, edge_indices in enumerate(expanded.group_edge_indices)
+            if edge_index in edge_indices
+        )
+        left_key = (edge.sub_x, edge.gene_x)
+        right_key = (edge.sub_y, edge.gene_y)
+        left = blocks[left_key]
+        right = blocks[right_key]
+        for left_index, left_id in enumerate(scores.gated_snp[left_key]):
+            for right_index, right_id in enumerate(scores.gated_snp[right_key]):
+                design = comparator_module._nested_snp_product_design(
+                    scores.W,
+                    scores.W @ scores.null_design,
+                    left[:, left_index],
+                    right[:, right_index],
+                )
+                assert design is not None
+                pair_p = interact_module._batch_nested_f(
+                    scores.W @ responses, design[0], design[1]
+                )
+                member_id = f"{edge.edge_id}|{int(left_id)}|{int(right_id)}"
+                for group_index in memberships:
+                    for response_index, value in enumerate(pair_p):
+                        if value < expected_p[group_index, response_index] or (
+                            value == expected_p[group_index, response_index]
+                            and member_id < expected_ids[group_index, response_index]
+                        ):
+                            expected_p[group_index, response_index] = value
+                            expected_ids[group_index, response_index] = member_id
+
+    observed_ids = np.asarray(result.member_ids, dtype=object)[
+        result.argmin_member_index
+    ]
+    np.testing.assert_allclose(result.group_p, expected_p)
+    np.testing.assert_array_equal(observed_ids, expected_ids)
+    assert observed_ids[0, 0] == f"{expanded.edges[0].edge_id}|3|8"
+    assert observed_ids[1, 1] == f"{expanded.edges[3].edge_id}|3|6"
+    assert observed_ids[0, 2] == f"{expanded.edges[2].edge_id}|2|7"
+
+    chunks = [
+        comparator_module.score_snpxsnp_family(
+            scores,
+            family,
+            expanded,
+            blocks,
+            responses[:, start:stop],
+            max_offered_pairs=12,
+        )
+        for start, stop in ((0, 7), (7, 26), (26, 31))
+    ]
+    for chunk in chunks:
+        assert chunk.member_ids == result.member_ids
+        assert chunk.group_memberships == result.group_memberships
+        assert chunk.member_family_sha256 == result.member_family_sha256
+    np.testing.assert_array_equal(
+        np.concatenate([chunk.group_p for chunk in chunks], axis=1), result.group_p
+    )
+    np.testing.assert_array_equal(
+        np.concatenate([chunk.argmin_member_index for chunk in chunks], axis=1),
+        result.argmin_member_index,
+    )
+
+    reversed_result = comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        blocks,
+        responses[:, ::-1],
+        max_offered_pairs=12,
+    )
+    assert reversed_result.member_ids == result.member_ids
+    assert reversed_result.group_memberships == result.group_memberships
+    assert reversed_result.member_family_sha256 == result.member_family_sha256
+    np.testing.assert_array_equal(reversed_result.group_p[:, ::-1], result.group_p)
+    np.testing.assert_array_equal(
+        reversed_result.argmin_member_index[:, ::-1], result.argmin_member_index
+    )
+
+
+def test_one_member_fixture_is_only_a_legacy_compatibility_limit():
+    """One tested member is the narrow limit where both calibrations agree."""
     rng = np.random.default_rng(9207)
     n = 40
     left = rng.binomial(2, 0.3, size=(n, 1)).astype(float)
@@ -238,6 +410,8 @@ def test_raw_outer_decisions_match_legacy_inner_then_outer_fixture():
         target_responses,
         max_offered_pairs=1,
     ).group_p
+    assert raw_calibration.shape[0] == 1
+    assert raw_target.shape[0] == 1
 
     def legacy_inner_adjust(raw: np.ndarray) -> np.ndarray:
         adjusted = np.empty_like(raw)

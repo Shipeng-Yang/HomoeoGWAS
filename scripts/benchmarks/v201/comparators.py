@@ -181,6 +181,11 @@ class MethodScoreBank:
     statistic; infinities and finite values outside the probability range are
     rejected. Arrays and mappings are copied and made read-only so later
     benchmark stages cannot silently change the audited bank.
+
+    ``tested_family_sizes`` is provenance, not a multiplicity denominator:
+    group-scoring methods record the number of groups, while ``snpxsnp``
+    records the number of genotype-estimable raw SNP pairs whose minimum is
+    calibrated by the independent outer response bank.
     """
 
     family_ids: tuple[str, ...]
@@ -635,6 +640,11 @@ def score_snpxsnp_family(
     extra = sorted(set(gene_blocks) - required)
     if extra:
         raise ValueError(f"unexpected genotype block for {extra[0]!r}")
+    if not isinstance(scores.gated_snp, Mapping):
+        raise ValueError("scores must retain gated SNP indices for every genotype block")
+    missing_gated = sorted(required - set(scores.gated_snp))
+    if missing_gated:
+        raise ValueError(f"missing gated SNP indices for {missing_gated[0]!r}")
 
     checked_blocks: dict[tuple[str, str], np.ndarray] = {}
     for key in sorted(required):
@@ -672,12 +682,8 @@ def score_snpxsnp_family(
         right_key = (edge.sub_y, edge.gene_y)
         left = checked_blocks[left_key]
         right = checked_blocks[right_key]
-        left_columns = np.asarray(
-            scores.gated_snp.get(left_key, np.arange(left.shape[1])), dtype=int,
-        )
-        right_columns = np.asarray(
-            scores.gated_snp.get(right_key, np.arange(right.shape[1])), dtype=int,
-        )
+        left_columns = np.asarray(scores.gated_snp[left_key], dtype=int)
+        right_columns = np.asarray(scores.gated_snp[right_key], dtype=int)
         if (
             left_columns.shape != (left.shape[1],)
             or right_columns.shape != (right.shape[1],)
@@ -737,7 +743,15 @@ def score_snpxsnp_family(
                 _snpxsnp_member_digest_update(member_digest, member_id, memberships)
                 for group_index in memberships:
                     tested_by_group[group_index] += 1
-                pair_p = np.asarray(_batch_nested_f(target_w, reduced, added), dtype=float)
+                pair_p = np.asarray(
+                    _batch_nested_f(
+                        target_w,
+                        reduced,
+                        added,
+                        response_axis_stable=True,
+                    ),
+                    dtype=float,
+                )
                 if pair_p.shape != (target.shape[1],):
                     raise RuntimeError("nested SNPxSNP scorer returned an invalid shape")
                 finite = np.isfinite(pair_p)
