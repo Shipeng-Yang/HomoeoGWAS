@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -137,6 +138,52 @@ def _feature_cache_sha256(feature_identity: dict) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _normalize_retained_variant_masks(
+    subdata: dict,
+    retained_variant_masks,
+) -> dict[str, np.ndarray] | None:
+    if retained_variant_masks is None:
+        return None
+    if not isinstance(retained_variant_masks, Mapping):
+        raise ValueError("retained_variant_masks must be a subgenome mapping")
+    expected_subgenomes = set(subdata)
+    supplied_subgenomes = set(retained_variant_masks)
+    missing = sorted(expected_subgenomes - supplied_subgenomes)
+    if missing:
+        raise ValueError(
+            "retained_variant_masks missing subgenomes: " + ", ".join(missing))
+    extra = sorted(supplied_subgenomes - expected_subgenomes)
+    if extra:
+        raise ValueError(
+            "retained_variant_masks has unknown subgenomes: " + ", ".join(extra))
+
+    normalized = {}
+    for sub in subdata:
+        entry = retained_variant_masks[sub]
+        expected_hash = None
+        if isinstance(entry, Mapping):
+            if "mask" not in entry or "sha256" not in entry:
+                raise ValueError(
+                    f"retained variant mask record for {sub} requires mask and sha256")
+            mask = np.asarray(entry["mask"])
+            expected_hash = entry["sha256"]
+        else:
+            mask = np.asarray(entry)
+        if mask.dtype != np.bool_:
+            raise ValueError(
+                f"retained variant mask for {sub} must have boolean dtype")
+        n_variants = int(np.asarray(subdata[sub].X).shape[1])
+        if mask.ndim != 1 or mask.size != n_variants:
+            raise ValueError(
+                f"retained variant mask length for {sub} must equal {n_variants}")
+        mask = np.ascontiguousarray(mask, dtype=bool)
+        digest = hashlib.sha256(mask.astype(np.uint8).tobytes()).hexdigest()
+        if expected_hash is not None and expected_hash != digest:
+            raise ValueError(f"retained variant mask hash mismatch for {sub}")
+        normalized[sub] = mask
+    return normalized
 
 
 def _set_omnib_worker_state(state: dict) -> None:
@@ -342,6 +389,7 @@ def score_omnib_family(
     burden_maf: float = 0.01,
     min_snp: int = 3,
     covariates: dict = None,
+    retained_variant_masks: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Score unique edges once, then ACAT-reduce the shared matrix by group."""
     from . import interact as I
@@ -366,6 +414,8 @@ def score_omnib_family(
     if missing:
         raise ValueError(
             "master family references missing subgenomes: " + ", ".join(missing))
+    retained_variant_masks = _normalize_retained_variant_masks(
+        subdata, retained_variant_masks)
 
     expanded = expand_pair_edges(family)
     if not expanded.edges:
@@ -381,6 +431,11 @@ def score_omnib_family(
     for sub in subs:
         kernel, provenance = I._build_grm(
             subdata[sub], sample_idx, grm_method, maf_min,
+            retained_variant_mask=(
+                None
+                if retained_variant_masks is None
+                else retained_variant_masks[sub]
+            ),
             return_provenance=True)
         kernels[sub] = kernel
         # The full retained mask is useful to direct callers but would make a
@@ -413,6 +468,11 @@ def score_omnib_family(
         if gene not in subdata[sub].gene_snp:
             return None
         indices = np.asarray(subdata[sub].gene_snp[gene], int)
+        if retained_variant_masks is not None:
+            indices = indices[retained_variant_masks[sub][indices]]
+        if indices.size == 0:
+            gated[key] = indices
+            return gated[key]
         means = np.nanmean(
             subdata[sub].X[np.ix_(sample_idx, indices)], axis=0) / 2.0
         gated[key] = indices[np.minimum(means, 1.0 - means) >= burden_maf]
@@ -658,6 +718,7 @@ def _prepare_checkpoint_omnib(
     min_snp: int,
     covariates: dict | None,
     feature_seed: int | None = None,
+    retained_variant_masks: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Prepare formal null/features/projections without legacy response scoring."""
     from . import interact as I
@@ -676,6 +737,8 @@ def _prepare_checkpoint_omnib(
     if missing:
         raise ValueError(
             "master family references missing subgenomes: " + ", ".join(missing))
+    retained_variant_masks = _normalize_retained_variant_masks(
+        subdata, retained_variant_masks)
 
     expanded = expand_pair_edges(family)
     if not expanded.edges:
@@ -687,6 +750,11 @@ def _prepare_checkpoint_omnib(
     for sub in subdata:
         kernel, provenance = I._build_grm(
             subdata[sub], sample_idx, grm_method, maf_min,
+            retained_variant_mask=(
+                None
+                if retained_variant_masks is None
+                else retained_variant_masks[sub]
+            ),
             return_provenance=True)
         kernels[sub] = kernel
         grm_provenance[sub] = {
@@ -718,6 +786,11 @@ def _prepare_checkpoint_omnib(
         if gene not in subdata[sub].gene_snp:
             return None
         indices = np.asarray(subdata[sub].gene_snp[gene], int)
+        if retained_variant_masks is not None:
+            indices = indices[retained_variant_masks[sub][indices]]
+        if indices.size == 0:
+            gated[key] = indices
+            return gated[key]
         means = np.nanmean(
             subdata[sub].X[np.ix_(sample_idx, indices)], axis=0) / 2.0
         gated[key] = indices[np.minimum(means, 1.0 - means) >= burden_maf]

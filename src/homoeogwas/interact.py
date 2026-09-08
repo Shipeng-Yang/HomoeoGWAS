@@ -300,10 +300,69 @@ def scols_safe(M: np.ndarray) -> np.ndarray:
     return (M - mu) / sd
 
 
+def build_retained_variant_mask(
+    X: np.ndarray,
+    *,
+    call_rate_min: float,
+    maf_min: float,
+    mac_min: float,
+) -> tuple[np.ndarray, dict]:
+    """Build the formal inclusive call-rate/MAF/MAC marker-QC mask."""
+    X = np.asarray(X, float)
+    if X.ndim != 2 or X.shape[0] < 1:
+        raise ValueError(
+            "marker-QC dosage matrix must be two-dimensional with samples")
+    call_rate_min = float(call_rate_min)
+    maf_min = float(maf_min)
+    mac_min = float(mac_min)
+    if not np.isfinite(call_rate_min) or not 0.0 <= call_rate_min <= 1.0:
+        raise ValueError("call_rate_min must be finite and in [0, 1]")
+    if not np.isfinite(maf_min) or not 0.0 <= maf_min <= 0.5:
+        raise ValueError("maf_min must be finite and in [0, 0.5]")
+    if not np.isfinite(mac_min) or mac_min < 0.0:
+        raise ValueError("mac_min must be finite and non-negative")
+    finite = np.isfinite(X)
+    finite_values = X[finite]
+    if finite_values.size and not np.isin(finite_values, (0.0, 1.0, 2.0)).all():
+        raise ValueError("marker QC requires finite hard-call A1 dosages 0, 1 or 2")
+    n_called = finite.sum(axis=0)
+    allele_sum = np.where(finite, X, 0.0).sum(axis=0)
+    call_rate = n_called / X.shape[0]
+    af = np.divide(
+        allele_sum,
+        2.0 * n_called,
+        out=np.full(X.shape[1], np.nan),
+        where=n_called > 0,
+    )
+    maf = np.minimum(af, 1.0 - af)
+    mac = np.minimum(allele_sum, 2.0 * n_called - allele_sum)
+    retained = (
+        (call_rate >= call_rate_min)
+        & (maf >= maf_min)
+        & (mac >= mac_min)
+    )
+    mask_bytes = np.ascontiguousarray(retained, dtype=np.uint8).tobytes()
+    return retained, {
+        "n_samples": int(X.shape[0]),
+        "n_variants_input": int(X.shape[1]),
+        "n_variants_retained": int(retained.sum()),
+        "call_rate_min": call_rate_min,
+        "maf_min": maf_min,
+        "mac_min": mac_min,
+        "call_rate_boundary": "inclusive_greater_than_or_equal",
+        "maf_boundary": "inclusive_greater_than_or_equal",
+        "mac_boundary": "inclusive_greater_than_or_equal",
+        "genotype_policy": "finite_hard_call_A1_dosage",
+        "retained_variant_mask_encoding": "uint8_input_variant_order",
+        "retained_variant_mask_sha256": hashlib.sha256(mask_bytes).hexdigest(),
+    }
+
+
 def grm_from_X(
     X: np.ndarray,
     maf_min: float = 0.0,
     *,
+    retained_variant_mask: np.ndarray | None = None,
     return_provenance: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict]:
     """Build the standardized additive GRM and optionally bind its SNP filter.
@@ -318,7 +377,11 @@ def grm_from_X(
         raise ValueError("GRM dosage matrix must be two-dimensional")
     if X.shape[0] < 1:
         raise ValueError("GRM dosage matrix must contain at least one sample")
-    if not return_provenance and float(maf_min) == 0.0:
+    if (
+        retained_variant_mask is None
+        and not return_provenance
+        and float(maf_min) == 0.0
+    ):
         # Frozen direct-call compatibility path.
         mu = np.nanmean(X, axis=0)
         mu = np.where(np.isfinite(mu), mu, 0.0)
@@ -347,11 +410,25 @@ def grm_from_X(
     )
     allele_frequency = means / 2.0
     maf = np.minimum(allele_frequency, 1.0 - allele_frequency)
-    retained = (
-        (finite_count > 0)
-        & np.isfinite(allele_frequency)
-        & (maf >= maf_min)
-    )
+    if retained_variant_mask is None:
+        retained = (
+            (finite_count > 0)
+            & np.isfinite(allele_frequency)
+            & (maf >= maf_min)
+        )
+        filter_policy = "legacy_maf_only"
+    else:
+        retained = np.asarray(retained_variant_mask)
+        if retained.dtype != np.bool_:
+            raise ValueError("retained_variant_mask must have boolean dtype")
+        if retained.ndim != 1 or retained.size != X.shape[1]:
+            raise ValueError(
+                "retained_variant_mask length must equal the GRM variant count")
+        retained = retained.copy()
+        if np.any(retained & (finite_count == 0)):
+            raise ValueError(
+                "retained_variant_mask selects an all-missing GRM variant")
+        filter_policy = "explicit_retained_variant_mask"
     n_used = int(retained.sum())
     if n_used == 0:
         raise ValueError(
@@ -382,6 +459,7 @@ def grm_from_X(
         "n_variants_used": n_used,
         "maf_min": maf_min,
         "maf_boundary": "inclusive_greater_than_or_equal",
+        "filter_policy": filter_policy,
         "missing_value_policy": "analysis_sample_finite_mean_imputation",
         "retained_variant_mask_encoding": "uint8_input_variant_order",
         "retained_variant_mask": retained.astype(np.uint8).tolist(),
@@ -1115,12 +1193,16 @@ def _build_grm(
     method: str,
     maf_min: float,
     *,
+    retained_variant_mask: np.ndarray | None = None,
     return_provenance: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict]:
     """Subgenome GRM restricted to valid samples, trace-normed. ``compute_grm_maf`` reuses the
     package GRM; ``grm_from_X`` is the all-SNP PSD-clipped variant (sensitivity)."""
     n_t = sample_idx.size
     if method == "compute_grm_maf":
+        if retained_variant_mask is not None:
+            raise ValueError(
+                "explicit retained_variant_mask requires grm_from_X")
         from .grm import compute_grm
         K, info = compute_grm(sd.chunk, maf_min=maf_min)
         K = np.asarray(K)[np.ix_(sample_idx, sample_idx)]
@@ -1131,7 +1213,11 @@ def _build_grm(
         # decision. Held-out FAM rows therefore cannot alter the formal null.
         analysis_X = np.asarray(sd.X, float)[np.asarray(sample_idx, int), :]
         K, provenance = grm_from_X(
-            analysis_X, maf_min=maf_min, return_provenance=True)
+            analysis_X,
+            maf_min=maf_min,
+            retained_variant_mask=retained_variant_mask,
+            return_provenance=True,
+        )
         K = K / (np.trace(K) / n_t)
         return (K, provenance) if return_provenance else K
     raise ValueError(f"unknown grm.method '{method}' (use compute_grm_maf | grm_from_X)")
