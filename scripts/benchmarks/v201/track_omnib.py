@@ -1215,24 +1215,51 @@ def _snpxsnp_pair_ceiling(context: OmniBBenchmarkContext) -> int:
     return limit.max_offered_pairs
 
 
+def _poison_failed_omnib_method_columns(
+    group: np.ndarray,
+    component_scores: Sequence[np.ndarray],
+    diagnostics: Any,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Make every recorded fixed-component failure explicit in score banks."""
+
+    group = np.asarray(group, dtype=float).copy()
+    failed = np.asarray(diagnostics.failed_response_mask, dtype=bool)
+    if failed.shape != (group.shape[1],):
+        raise RuntimeError("omniB response diagnostics are not response-aligned")
+    group[:, failed] = np.nan
+    components = [np.asarray(values, dtype=float).copy() for values in component_scores]
+    by_component = diagnostics.failed_response_indices_by_component
+    for method, values in zip(
+        ("minor_burden", "pc1", "kernel_hadamard"), components, strict=True
+    ):
+        indices = np.asarray(by_component[method], dtype=int)
+        if indices.size:
+            values[:, indices] = np.nan
+    return group, components
+
+
 def _method_scores(
     prepared: _PreparedScenario,
     responses: np.ndarray,
     *,
     n_jobs: int,
 ) -> tuple[MethodScoreBank, dict[str, Any], SNPxSNPScoreResult]:
-    _edge, group, components = score_omnib_responses(
+    _edge, group, components, diagnostics = score_omnib_responses(
         prepared.scores,
         prepared.context.family,
         prepared.expanded,
         responses,
         n_jobs=n_jobs,
+        return_diagnostics=True,
     )
     response_execution = dict(prepared.scores.parallel_execution)
     component_scores = [
         group_component_p(components, prepared.expanded, component_index=index)
         for index in range(3)
     ]
+    group, component_scores = _poison_failed_omnib_method_columns(
+        group, component_scores, diagnostics
+    )
     snpxsnp_result = score_snpxsnp_family(
         prepared.scores,
         prepared.context.family,
@@ -1271,14 +1298,17 @@ def _local_component_scores(
     *,
     n_jobs: int,
 ) -> dict[str, np.ndarray]:
-    _edge, group, components = score_omnib_responses(
+    _edge, group, components, diagnostics = score_omnib_responses(
         prepared.scores, prepared.context.family, prepared.expanded,
-        responses, n_jobs=n_jobs,
+        responses, n_jobs=n_jobs, return_diagnostics=True,
     )
     component = [
         group_component_p(components, prepared.expanded, component_index=index)
         for index in range(3)
     ]
+    group, component = _poison_failed_omnib_method_columns(
+        group, component, diagnostics
+    )
     return {
         "omnib": group,
         "minor_burden": component[0],
@@ -2275,13 +2305,20 @@ def run_end_to_end_null(
                 )[0]
                 for _ in range(bootstrap_B)
             ])
-            edge_p, group_p, components = score_omnib_responses(
+            edge_p, group_p, components, diagnostics = score_omnib_responses(
                 prepared.scores, context.family, prepared.expanded,
                 np.column_stack([phenotype, bootstrap]), n_jobs=n_jobs,
+                return_diagnostics=True,
             )
+            if diagnostics.failed_response_mask[0]:
+                raise RuntimeError("native observed response failed fixed-mask scoring")
+            failed = np.asarray(diagnostics.failed_response_mask, dtype=bool)
+            edge_p[:, failed] = np.nan
+            group_p[:, failed] = np.nan
             scores = replace(
                 prepared.scores, edge_p=edge_p, group_p=group_p,
                 edge_components_obs=components[:, :, 0], y=phenotype,
+                response_diagnostics=diagnostics,
             )
             expanded = prepared.expanded
         else:

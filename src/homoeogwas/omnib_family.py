@@ -449,6 +449,54 @@ def _response_failure_diagnostics(
     )
 
 
+def _apply_native_response_failure_policy(
+    edge_p: np.ndarray,
+    group_p: np.ndarray,
+    diagnostics: OmniBResponseDiagnostics,
+    *,
+    includes_observed: bool,
+) -> None:
+    """Fail observed data and conservatively poison failed null columns in place."""
+    failed = np.asarray(diagnostics.failed_response_mask, dtype=bool)
+    if includes_observed and failed.size and failed[0]:
+        raise RuntimeError(
+            "native observed omniB response failed: post-whitening fixed-mask "
+            "component produced a non-finite score"
+        )
+    null_failed = failed.copy()
+    if includes_observed and null_failed.size:
+        null_failed[0] = False
+    if null_failed.any():
+        edge_p[:, null_failed] = np.nan
+        group_p[:, null_failed] = np.nan
+
+
+def _native_response_failure_summary(
+    bootstrap_B: int,
+    bootstrap_failed_response_indices,
+) -> dict:
+    failed = sorted({int(index) for index in bootstrap_failed_response_indices})
+    if any(index < 0 or index >= int(bootstrap_B) for index in failed):
+        raise ValueError("bootstrap failure index is outside the declared response bank")
+    terminal = len(failed)
+    return {
+        "schema": "homoeogwas-native-response-failure-v1",
+        "attempted": int(bootstrap_B) + 1,
+        "successful": int(bootstrap_B) + 1 - terminal,
+        "retried": 0,
+        "terminal_failures": terminal,
+        "observed_failed": False,
+        "bootstrap_failed_response_indices": failed,
+        "bootstrap_failure_reason": "fixed_component_nonfinite",
+        "worst_case_mapping": {
+            "observed": "abort_without_scientific_result",
+            "bootstrap": (
+                "set_null_family_column_nonfinite_for_null_minimum_zero"
+            ),
+        },
+    }
+
+
 def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
     """Return minor-burden, PC1 and kernel-Hadamard p-values by response."""
     # Delayed import avoids a module cycle while keeping the established
@@ -551,6 +599,8 @@ def score_omnib_family(
         return_diagnostics=True,
     )
     scores.response_diagnostics = diagnostics
+    _apply_native_response_failure_policy(
+        edge_p, group_p, diagnostics, includes_observed=True)
     failed = scores.edge_estimable & ~np.isfinite(edge_p[:, 0])
     if failed.any():
         failed_ids = [expanded.edges[i].edge_id for i in np.flatnonzero(failed)[:5]]
@@ -1154,7 +1204,7 @@ def score_omnib_null_indices(
         scores.null_kernels, scores.y, scores.null_design,
         indices=requested, base_seed=base_seed, null_fit=null_fit)
     responses = np.column_stack(response_list)
-    edge_p, group_p, components, _diagnostics = score_omnib_responses(
+    edge_p, group_p, components, diagnostics = score_omnib_responses(
         scores,
         family,
         expanded,
@@ -1162,6 +1212,8 @@ def score_omnib_null_indices(
         n_jobs=n_jobs,
         return_diagnostics=True,
     )
+    _apply_native_response_failure_policy(
+        edge_p, group_p, diagnostics, includes_observed=False)
     if return_components:
         return edge_p, group_p, components
     return edge_p, group_p
@@ -1786,6 +1838,17 @@ def run_group_scan_omnib(
             ).hexdigest(),
         }
 
+    bootstrap_failed = np.flatnonzero(
+        ~np.isfinite(primary_p[finite, 1:]).all(axis=0)
+    ).astype(int).tolist()
+    response_failures = _native_response_failure_summary(
+        bootstrap_B, bootstrap_failed)
+    if checkpoint_metadata is not None:
+        checkpoint_metadata |= {
+            "bootstrap_failed_response_indices": bootstrap_failed,
+            "bootstrap_failure_reason": "fixed_component_nonfinite",
+        }
+
     finite_indices = np.flatnonzero(finite)
 
     # This is deliberately the sole calibration call for primary_only and joint.
@@ -1918,6 +1981,7 @@ def run_group_scan_omnib(
         }
     model_diagnostics = {
         "bootstrap_fwer": fwer,
+        "response_failures": response_failures,
         "family_provenance": family_provenance,
         "parallel_execution": dict(scores.parallel_execution),
         "grm_provenance": {

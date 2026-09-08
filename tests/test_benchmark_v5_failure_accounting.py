@@ -115,6 +115,33 @@ def test_native_observed_response_failure_aborts(monkeypatch):
         F.score_omnib_observed(scores, family, expanded, n_jobs=1)
 
 
+def test_score_omnib_family_partial_observed_component_failure_aborts(monkeypatch):
+    subdata, family, phenotype, _scores, _expanded = _fixture()
+    original = F._prepared_components_over_Y
+
+    def fail_one_observed_component(Yw, prepared):
+        result = original(Yw, prepared)
+        result[0, 0] = np.nan
+        return result
+
+    monkeypatch.setattr(
+        F, "_prepared_components_over_Y", fail_one_observed_component)
+    with pytest.raises(RuntimeError, match="native observed.*failed"):
+        F.score_omnib_family(
+            subdata,
+            family,
+            phenotype,
+            np.arange(phenotype.size),
+            transform="INT",
+            feature_seed=17,
+            retained_variant_masks={sub: np.ones(6, bool) for sub in subdata},
+            bootstrap_B=0,
+            n_jobs=1,
+            grm_method="grm_from_X",
+            min_snp=3,
+        )
+
+
 def test_native_bootstrap_failure_is_retained_as_degenerate(monkeypatch):
     subdata, family, phenotype, _scores, _expanded = _fixture()
     original = F._prepared_components_over_Y
@@ -147,6 +174,95 @@ def test_native_bootstrap_failure_is_retained_as_degenerate(monkeypatch):
     assert calibration["degenerate_policy"] == (
         "any_nonfinite_statistic_sets_null_min_to_zero"
     )
+
+
+def test_partial_bootstrap_component_failure_forces_null_minimum_zero(monkeypatch):
+    subdata, family, phenotype, _scores, _expanded = _fixture()
+    original = F._prepared_components_over_Y
+
+    def fail_one_bootstrap_component(Yw, prepared):
+        result = original(Yw, prepared)
+        result[0, 1] = np.nan
+        return result
+
+    monkeypatch.setattr(
+        F, "_prepared_components_over_Y", fail_one_bootstrap_component)
+    scores, _ = F.score_omnib_family(
+        subdata,
+        family,
+        phenotype,
+        np.arange(phenotype.size),
+        transform="INT",
+        feature_seed=17,
+        retained_variant_masks={sub: np.ones(6, bool) for sub in subdata},
+        bootstrap_B=1,
+        bootstrap_seed=29,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        min_snp=3,
+    )
+
+    assert scores.response_diagnostics.failed_response_indices == (1,)
+    assert np.isnan(scores.group_p[:, 1]).all()
+    calibration = F.bootstrap_minp_calibration(
+        scores.group_p[:, 0], scores.group_p[:, 1:], alpha=0.5
+    )
+    assert calibration["n_degenerate_replicates"] == 1
+    assert calibration["threshold"] == 0.0
+
+
+def test_checkpoint_partial_component_failures_are_persisted_and_reported(
+    monkeypatch, tmp_path,
+):
+    subdata, family, phenotype, _scores, _expanded = _fixture()
+    original = F._prepared_components_over_Y
+    calls = {"count": 0}
+
+    def fail_each_checkpoint_bootstrap(Yw, prepared):
+        result = original(Yw, prepared)
+        calls["count"] += 1
+        if calls["count"] > 1:
+            result[0, 0] = np.nan
+        return result
+
+    monkeypatch.setattr(
+        F, "_prepared_components_over_Y", fail_each_checkpoint_bootstrap)
+    result = F.run_group_scan_omnib(
+        subdata,
+        family,
+        phenotype,
+        np.arange(phenotype.size),
+        hypothesis_unit="group",
+        bootstrap_B=2,
+        bootstrap_seed=29,
+        feature_seed=17,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        min_snp=3,
+        checkpoint_dir=tmp_path / "checkpoint",
+        checkpoint_block_size=1,
+    )
+
+    fwer = result.model_diagnostics["bootstrap_fwer"]
+    failure = result.model_diagnostics["response_failures"]
+    checkpoint = result.model_diagnostics["resampling_checkpoint"]
+    assert fwer["n_degenerate_replicates"] == 2
+    assert failure == {
+        "schema": "homoeogwas-native-response-failure-v1",
+        "attempted": 3,
+        "successful": 1,
+        "retried": 0,
+        "terminal_failures": 2,
+        "observed_failed": False,
+        "bootstrap_failed_response_indices": [0, 1],
+        "bootstrap_failure_reason": "fixed_component_nonfinite",
+        "worst_case_mapping": {
+            "observed": "abort_without_scientific_result",
+            "bootstrap": "set_null_family_column_nonfinite_for_null_minimum_zero",
+        },
+    }
+    assert checkpoint["bootstrap_failed_response_indices"] == [0, 1]
+    assert checkpoint["bootstrap_failure_reason"] == "fixed_component_nonfinite"
 
 
 def test_gaussian_binding_failure_ceiling_is_point_zero_zero_two():
@@ -213,6 +329,44 @@ def test_conditional_bank_records_fixed_response_denominator():
     assert bank.failure["worst_case_mapping"] == "failure_counts_as_rejection"
 
 
+def test_conditional_bank_poison_partial_component_failure_for_each_method(
+    monkeypatch,
+):
+    context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=953)
+    original = F._prepared_components_over_Y
+
+    def fail_minor_burden_in_second_response(Yw, prepared):
+        result = original(Yw, prepared)
+        result[0, 1] = np.nan
+        return result
+
+    monkeypatch.setattr(
+        F, "_prepared_components_over_Y", fail_minor_burden_in_second_response
+    )
+    bank = run_conditional_bank(
+        context,
+        bank="calibration",
+        count=2,
+        design_hash="c" * 64,
+        n_jobs=1,
+        qa_only=True,
+        scenario_id="B.conditional.synthetic.gaussian.calibration",
+    )
+
+    assert np.isnan(bank.p_by_method["omnib"][:, 1]).all()
+    assert np.isnan(bank.p_by_method["minor_burden"][:, 1]).all()
+    assert np.isfinite(bank.p_by_method["pc1"][:, 1]).all()
+    assert np.isfinite(bank.p_by_method["kernel_hadamard"][:, 1]).all()
+    assert bank.failure["nonfinite_response_indices_by_method"]["omnib"] == [1]
+    assert bank.failure["nonfinite_response_indices_by_method"]["minor_burden"] == [1]
+    assert bank.failure["nonfinite_response_indices_by_method"]["pc1"] == []
+    assert empirical_threshold(
+        bank.p_by_method["omnib"],
+        alpha=0.5,
+        failed_mask=T._method_failure_mask(bank, "omnib"),
+    ) == 0.0
+
+
 def test_end_to_end_payload_serializes_observed_and_bootstrap_diagnostics():
     context = build_synthetic_omnib_context(n=36, groups=1, copies=2, seed=952)
     result = run_end_to_end_null(
@@ -240,3 +394,34 @@ def test_end_to_end_payload_serializes_observed_and_bootstrap_diagnostics():
     tampered["failure"]["bootstrap_within_failure_ceiling"] = False
     with pytest.raises(BenchmarkAuditError, match="bootstrap failure accounting"):
         _audit_end2end_decisions(tampered)
+
+
+def test_omitted_kernel_partial_bootstrap_failure_forces_null_minimum_zero(
+    monkeypatch,
+):
+    context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=954)
+    original = F._prepared_components_over_Y
+
+    def fail_one_bootstrap_component(Yw, prepared):
+        result = original(Yw, prepared)
+        result[0, 1] = np.nan
+        return result
+
+    monkeypatch.setattr(
+        F, "_prepared_components_over_Y", fail_one_bootstrap_component
+    )
+    result = run_end_to_end_null(
+        context,
+        replicate=0,
+        bootstrap_B=1,
+        design_hash="d" * 64,
+        qa_only=True,
+        n_jobs=1,
+        null_model="omitted_kernel",
+        scenario_id="B.end2end.synthetic.omitted_kernel",
+    )
+
+    assert result["failure"]["failed"] is False
+    assert result["failure"]["bootstrap_failed_response_indices"] == [0]
+    assert result["bootstrap_minp"]["n_degenerate_replicates"] == 1
+    assert result["null_minima"] == [0.0]
