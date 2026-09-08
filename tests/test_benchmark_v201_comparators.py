@@ -341,60 +341,44 @@ def _raw_snpxsnp_p(
     return np.asarray(rows)
 
 
-def test_snpxsnp_calibrates_complete_pair_family_before_group_score():
+def test_snpxsnp_returns_raw_complete_pair_family_minimum():
     rng = np.random.default_rng(882)
     n = 48
     left = rng.binomial(2, 0.25, size=(n, 2)).astype(float)
     right = rng.binomial(2, 0.35, size=(n, 3)).astype(float)
     responses = rng.normal(size=(n, 2))
-    calibration_responses = rng.normal(size=(n, 39))
     family = MasterGroupFamily(("A", "B"), ("g0",), (("gA", "gB"),))
     expanded = expand_pair_edges(family)
     scores = _minimal_scores(n)
 
-    actual, tested_count = score_snpxsnp_family(
+    result = score_snpxsnp_family(
         scores,
         family,
         expanded,
         {("A", "gA"): left, ("B", "gB"): right},
         responses,
-        calibration_responses=calibration_responses,
+        max_offered_pairs=6,
     )
 
     target_p = _raw_snpxsnp_p(scores, left, right, responses)
-    calibration_p = _raw_snpxsnp_p(scores, left, right, calibration_responses)
-    expected = np.array(
-        [
-            min(
-                F.bootstrap_minp_calibration(
-                    target_p[:, column], calibration_p
-                )["adjusted_p_local"]
-            )
-            for column in range(responses.shape[1])
-        ]
-    )[None, :]
-    best_pair = int(np.argmin(target_p[:, 0]))
-    selected_pair_only = (
-        1 + np.sum(calibration_p[best_pair] <= target_p[best_pair, 0])
-    ) / (calibration_p.shape[1] + 1)
+    expected = np.min(target_p, axis=0, keepdims=True)
 
-    np.testing.assert_array_equal(actual, expected)
-    assert actual[0, 0] != selected_pair_only
-    assert tested_count == left.shape[1] * right.shape[1] == 6
+    np.testing.assert_array_equal(result.group_p, expected)
+    assert result.tested_pair_count == left.shape[1] * right.shape[1] == 6
 
-    reordered, reordered_count = score_snpxsnp_family(
+    reordered = score_snpxsnp_family(
         scores,
         family,
         expanded,
         {("A", "gA"): left, ("B", "gB"): right},
         responses[:, ::-1],
-        calibration_responses=calibration_responses,
+        max_offered_pairs=6,
     )
-    np.testing.assert_array_equal(reordered, actual[:, ::-1])
-    assert reordered_count == tested_count
+    np.testing.assert_array_equal(reordered.group_p, result.group_p[:, ::-1])
+    assert reordered.tested_pair_count == result.tested_pair_count
 
 
-def test_snpxsnp_rejects_missing_blocks_and_empty_calibration_bank():
+def test_snpxsnp_rejects_missing_blocks_and_invalid_pair_ceiling():
     rng = np.random.default_rng(44)
     n = 32
     family = MasterGroupFamily(("A", "B"), ("g0",), (("gA", "gB"),))
@@ -409,9 +393,9 @@ def test_snpxsnp_rejects_missing_blocks_and_empty_calibration_bank():
             expanded,
             blocks,
             responses,
-            calibration_responses=rng.normal(size=(n, 19)),
+            max_offered_pairs=4,
         )
-    with pytest.raises(ValueError, match="at least one"):
+    with pytest.raises(ValueError, match="positive integer"):
         score_snpxsnp_family(
             scores,
             family,
@@ -421,5 +405,5 @@ def test_snpxsnp_rejects_missing_blocks_and_empty_calibration_bank():
                 ("B", "gB"): rng.binomial(2, 0.3, size=(n, 2)).astype(float),
             },
             responses,
-            calibration_responses=np.empty((n, 0)),
+            max_offered_pairs=0,
         )

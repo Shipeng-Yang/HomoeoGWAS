@@ -282,10 +282,10 @@ def test_family_size_stress_serializes_response_level_evidence():
         for method, values in payload["calibration_minima_by_method"].items()
     }
     assert payload["tested_family_sizes"]["snpxsnp"] > payload["group_count"]
-    assert payload["tested_family_hashes"]["snpxsnp"] == sha256_payload({
-        "method": "snpxsnp",
-        "ordered_member_ids": payload["tested_family_members"]["snpxsnp"],
-    })
+    assert (
+        payload["tested_family_hashes"]["snpxsnp"]
+        == payload["snpxsnp_evidence"]["member_family_sha256"]
+    )
 
 
 @pytest.fixture(scope="module")
@@ -376,6 +376,14 @@ def test_independent_banks_have_disjoint_responses_and_equal_identities(tiny_con
     assert evaluation.response_hash != evaluation.calibration_reference["response_hash"]
     assert evaluation.calibration_reference["shares_memory"] is False
     assert evaluation.calibration_reference["response_hash"] == calibration.response_hash
+    assert calibration.snpxsnp_evidence["schema"] == "snpxsnp_raw_stream_v1"
+    assert (
+        calibration.snpxsnp_evidence["member_family_sha256"]
+        == evaluation.snpxsnp_evidence["member_family_sha256"]
+        == power.snpxsnp_evidence["member_family_sha256"]
+    )
+    assert "snpxsnp_calibration_reference" not in calibration_payload
+    assert "snpxsnp_calibration_artifact" not in calibration_payload
     track_omnib_module._assert_independent_banks(calibration, evaluation)
     with pytest.raises(RuntimeError, match="prepared identity"):
         track_omnib_module._assert_independent_banks(
@@ -1103,9 +1111,11 @@ def test_power_cells_share_one_frozen_backbone_calibration_bank(tiny_context):
         hashes.append(payload["calibration_bank_manifest_hash"])
         assert "snpxsnp_calibration_artifact" not in payload["calibration_bank"]
         assert "snpxsnp_calibration_artifact" not in payload["target_bank"]
+        assert "snpxsnp_calibration_reference" not in payload["calibration_bank"]
+        assert "snpxsnp_calibration_reference" not in payload["target_bank"]
         assert (
-            payload["target_bank"]["snpxsnp_calibration_reference"]
-            == payload["calibration_artifact"]["snpxsnp_calibration_reference"]
+            payload["target_bank"]["snpxsnp_evidence"]["member_family_sha256"]
+            == payload["calibration_artifact"]["tested_family_hashes"]["snpxsnp"]
         )
     assert hashes[0] == hashes[1]
 
@@ -1156,9 +1166,15 @@ def test_tested_family_hash_binds_actual_snpxsnp_members(tiny_context):
     )
     for method, members in payload["tested_family_members"].items():
         assert len(members) == payload["tested_family_sizes"][method]
-        assert payload["tested_family_hashes"][method] == sha256_payload(
-            {"method": method, "ordered_member_ids": members}
-        )
+        if method == "snpxsnp":
+            assert (
+                payload["tested_family_hashes"][method]
+                == payload["snpxsnp_evidence"]["member_family_sha256"]
+            )
+        else:
+            assert payload["tested_family_hashes"][method] == sha256_payload(
+                {"method": method, "ordered_member_ids": members}
+            )
         assert payload["score_matrix_hashes"][method] == sha256_payload(
             original.p_by_method[method].tolist()
         )

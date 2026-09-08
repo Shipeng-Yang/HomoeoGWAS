@@ -995,6 +995,68 @@ def test_real_conditional_snpxsnp_group_rows_and_raw_family_are_distinct():
     checked = _conditional_score_matrices(bank, 2, failed)
     assert len(checked["snpxsnp"]) == len(bank["family_ids"])
     assert bank["tested_family_sizes"]["snpxsnp"] > len(checked["snpxsnp"])
+    evidence = bank["snpxsnp_evidence"]
+    assert evidence["schema"] == "snpxsnp_raw_stream_v1"
+    assert (
+        evidence["offered_pair_count"]
+        - evidence["design_nonestimable_pair_count"]
+        == evidence["tested_pair_count"]
+    )
+    assert "calibration_p" not in evidence
+
+
+def test_conditional_snpxsnp_per_group_pair_counts_are_audited():
+    context = build_synthetic_omnib_context(n=72, groups=2, copies=3, seed=2)
+    bank = run_conditional_bank(
+        context, bank="calibration", count=2,
+        design_hash="b" * 64, n_jobs=1,
+    ).to_payload()
+    bank["snpxsnp_evidence"]["tested_pair_count_by_group"][0] -= 1
+    failed, _ids = _validate_bank_envelope(bank, 2, "calibration")
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
+        _conditional_score_matrices(bank, 2, failed)
+
+
+def test_conditional_snpxsnp_malformed_evidence_fails_as_audit_error():
+    context = build_synthetic_omnib_context(n=48, groups=1, copies=2, seed=5)
+    bank = run_conditional_bank(
+        context, bank="calibration", count=1,
+        design_hash="c" * 64, n_jobs=1,
+    ).to_payload()
+    bank["snpxsnp_evidence"] = []
+    failed, _ids = _validate_bank_envelope(bank, 1, "calibration")
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
+        _conditional_score_matrices(bank, 1, failed)
+
+
+def test_conditional_family_manifest_exports_streamed_pair_counts():
+    context = build_synthetic_omnib_context(n=48, groups=2, copies=2, seed=19)
+    scenario = Scenario(
+        "B.conditional.synthetic.gaussian.calibration",
+        "omnib",
+        "pilot",
+        2,
+        0,
+        {
+            "experiment": "conditional",
+            "bank": "calibration",
+            "null_model": "gaussian",
+        },
+    )
+    payload = run_omnib_replicate(
+        scenario, context, replicate=0, design_hash="d" * 64, n_jobs=1,
+    )
+    rows = aggregate_module._omnib_rows(payload, scenario)[
+        "omnib_family_manifest.tsv"
+    ]
+    row = next(item for item in rows if item["method"] == "snpxsnp")
+    evidence = payload["bank"]["snpxsnp_evidence"]
+    assert row["offered_pair_count"] == evidence["offered_pair_count"]
+    assert row["design_nonestimable_pair_count"] == evidence[
+        "design_nonestimable_pair_count"
+    ]
+    assert row["tested_pair_count"] == evidence["tested_pair_count"]
+    assert row["member_family_sha256"] == evidence["member_family_sha256"]
 
 
 def test_global_vc_heldout_is_bound_to_registered_calibration_bank():
@@ -1366,6 +1428,13 @@ def test_family_size_audit_recomputes_response_level_fwer():
     assert snpxsnp[0]["score_family_size"] == 80
     assert snpxsnp[0]["tested_family_size"] > 80
     assert snpxsnp[0]["tested_family_hash"] == payload["tested_family_hashes"]["snpxsnp"]
+    detached = copy.deepcopy(payload)
+    detached["snpxsnp_evidence"]["tested_pair_count_by_group"][0] -= 1
+    detached_evidence = SimpleNamespace(
+        shards=((Path("family-detached.json"), detached),), registry=(scenario,),
+    )
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
+        _audit_families_and_parallel(detached_evidence)
     payload["fwer"]["omnib"] = 0.123
     with pytest.raises(BenchmarkAuditError, match="family-size"):
         _audit_families_and_parallel(evidence)
@@ -1487,10 +1556,10 @@ def test_power_registry_metadata_and_single_response_are_fail_closed():
     )
     _audit_power_evidence(payload, scenario)
     detached = copy.deepcopy(payload)
-    detached["target_bank"]["snpxsnp_calibration_reference"][
-        "calibration_p_sha256"
+    detached["target_bank"]["snpxsnp_evidence"][
+        "member_family_sha256"
     ] = "0" * 64
-    with pytest.raises(BenchmarkAuditError, match="frozen calibration"):
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP"):
         _audit_power_evidence(detached, scenario)
     detached = copy.deepcopy(payload)
     detached["target_bank"]["prepared_design_sha256"] = "0" * 64

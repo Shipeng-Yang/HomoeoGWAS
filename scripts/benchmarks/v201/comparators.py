@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral
 from types import MappingProxyType
+from typing import Any
 
 import numpy as np
 from scipy.linalg import orth
@@ -21,7 +22,6 @@ from homoeogwas.group_family import (
 from homoeogwas.kernel import hadamard_kernel, normalize_kernel
 from homoeogwas.omnib_family import (
     OmniBFamilyScores,
-    bootstrap_minp_calibration,
     score_omnib_responses,
 )
 
@@ -266,75 +266,181 @@ def _payload_hash(value: object) -> str:
     return sha256_payload(value)
 
 
-@dataclass(frozen=True)
-class SNPxSNPCalibrationArtifact:
-    """Frozen raw SNP-product null scores shared by every matched target."""
+def _snpxsnp_member_digest_update(
+    digest: Any, member_id: str, group_membership: tuple[int, ...],
+) -> None:
+    encoded = member_id.encode("utf-8")
+    digest.update(len(encoded).to_bytes(8, "big"))
+    digest.update(encoded)
+    digest.update(len(group_membership).to_bytes(8, "big"))
+    for group_index in group_membership:
+        digest.update(int(group_index).to_bytes(8, "big", signed=False))
 
+
+def _snpxsnp_member_family_hash(
+    member_ids: tuple[str, ...],
+    group_memberships: tuple[tuple[int, ...], ...],
+) -> str:
+    digest = hashlib.sha256(b"homoeogwas-snpxsnp-member-family-v1\0")
+    for member_id, membership in zip(member_ids, group_memberships, strict=True):
+        _snpxsnp_member_digest_update(digest, member_id, membership)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class SNPxSNPScoreResult:
+    """Streaming raw SNP-product minima and their complete family provenance."""
+
+    group_p: np.ndarray
+    argmin_member_index: np.ndarray
     member_ids: tuple[str, ...]
     group_memberships: tuple[tuple[int, ...], ...]
-    calibration_p: np.ndarray
+    member_family_sha256: str
+    offered_pair_count: int
+    design_nonestimable_pair_count: int
+    tested_pair_count: int
+    offered_pair_count_by_group: tuple[int, ...]
+    design_nonestimable_pair_count_by_group: tuple[int, ...]
+    tested_pair_count_by_group: tuple[int, ...]
+    nonfinite_pair_score_count: int
+    nonfinite_pair_score_count_by_group: tuple[int, ...]
+    failed_response_indices: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        values = np.array(self.calibration_p, dtype=float, copy=True)
+        group_p = np.array(self.group_p, dtype=float, copy=True)
+        argmin = np.array(self.argmin_member_index, dtype=np.int64, copy=True)
+        member_ids = tuple(self.member_ids)
+        memberships: list[tuple[int, ...]] = []
+        for membership in self.group_memberships:
+            if (
+                not membership
+                or any(
+                    isinstance(index, bool) or not isinstance(index, Integral)
+                    for index in membership
+                )
+            ):
+                raise ValueError("invalid SNPxSNP member group membership")
+            memberships.append(tuple(int(index) for index in membership))
+        group_memberships = tuple(memberships)
+        group_count = len(self.offered_pair_count_by_group)
+        counts = (
+            self.offered_pair_count,
+            self.design_nonestimable_pair_count,
+            self.tested_pair_count,
+            self.nonfinite_pair_score_count,
+            *self.offered_pair_count_by_group,
+            *self.design_nonestimable_pair_count_by_group,
+            *self.tested_pair_count_by_group,
+            *self.nonfinite_pair_score_count_by_group,
+        )
         if (
-            values.ndim != 2
-            or values.shape[0] != len(self.member_ids)
-            or values.shape[1] < 1
-            or len(self.member_ids) != len(set(self.member_ids))
-            or len(self.group_memberships) != len(self.member_ids)
-            or any(not item for item in self.member_ids)
-            or not np.all(np.isfinite(values))
+            group_p.ndim != 2
+            or group_p.shape[0] != group_count
+            or group_p.shape[1] < 1
+            or argmin.shape != group_p.shape
+            or len(self.design_nonestimable_pair_count_by_group) != group_count
+            or len(self.tested_pair_count_by_group) != group_count
+            or len(self.nonfinite_pair_score_count_by_group) != group_count
+            or any(isinstance(value, bool) or not isinstance(value, Integral) or value < 0
+                   for value in counts)
+            or self.offered_pair_count - self.design_nonestimable_pair_count
+            != self.tested_pair_count
+            or len(member_ids) != self.tested_pair_count
+            or len(group_memberships) != self.tested_pair_count
+            or len(set(member_ids)) != len(member_ids)
+            or any(not isinstance(member_id, str) or not member_id
+                   for member_id in member_ids)
         ):
-            raise ValueError("invalid frozen SNPxSNP calibration artifact")
-        values.setflags(write=False)
-        object.__setattr__(self, "calibration_p", values)
+            raise ValueError("invalid streaming SNPxSNP result dimensions or counts")
+        tested_by_group = [0] * group_count
+        for membership in group_memberships:
+            if (
+                len(set(membership)) != len(membership)
+                or any(index < 0 or index >= group_count for index in membership)
+            ):
+                raise ValueError("invalid SNPxSNP member group membership")
+            for group_index in membership:
+                tested_by_group[group_index] += 1
+        if (
+            tuple(tested_by_group) != tuple(self.tested_pair_count_by_group)
+            or any(
+                offered - nonestimable != tested
+                for offered, nonestimable, tested in zip(
+                    self.offered_pair_count_by_group,
+                    self.design_nonestimable_pair_count_by_group,
+                    self.tested_pair_count_by_group,
+                    strict=True,
+                )
+            )
+            or self.nonfinite_pair_score_count
+            > self.tested_pair_count * group_p.shape[1]
+            or any(
+                nonfinite > tested * group_p.shape[1]
+                for nonfinite, tested in zip(
+                    self.nonfinite_pair_score_count_by_group,
+                    self.tested_pair_count_by_group,
+                    strict=True,
+                )
+            )
+        ):
+            raise ValueError("invalid streaming SNPxSNP per-group counts")
+        finite = np.isfinite(group_p)
+        if (
+            np.isinf(group_p).any()
+            or np.any((group_p[finite] < 0.0) | (group_p[finite] > 1.0))
+            or np.any((argmin[finite] < 0) | (argmin[finite] >= len(self.member_ids)))
+            or np.any(argmin[~finite] != -1)
+        ):
+            raise ValueError("invalid streaming SNPxSNP scores or argmins")
+        for group_index, response_index in np.argwhere(finite):
+            if group_index not in group_memberships[argmin[group_index, response_index]]:
+                raise ValueError("SNPxSNP argmin does not belong to its group")
+        if any(
+            isinstance(index, bool) or not isinstance(index, Integral)
+            for index in self.failed_response_indices
+        ):
+            raise ValueError("invalid streaming SNPxSNP failure or member identity")
+        failed = tuple(int(index) for index in self.failed_response_indices)
+        if (
+            len(failed) != len(set(failed))
+            or tuple(sorted(failed)) != failed
+            or any(index < 0 or index >= group_p.shape[1] for index in failed)
+            or failed != tuple(np.flatnonzero(~finite.any(axis=0)).astype(int))
+            or bool(failed) != bool(self.nonfinite_pair_score_count)
+            or self.member_family_sha256
+            != _snpxsnp_member_family_hash(member_ids, group_memberships)
+        ):
+            raise ValueError("invalid streaming SNPxSNP failure or member identity")
+        group_p.setflags(write=False)
+        argmin.setflags(write=False)
+        object.__setattr__(self, "group_p", group_p)
+        object.__setattr__(self, "argmin_member_index", argmin)
+        object.__setattr__(self, "member_ids", member_ids)
+        object.__setattr__(self, "group_memberships", group_memberships)
+        object.__setattr__(self, "failed_response_indices", failed)
 
-    def reference_payload(self) -> dict[str, object]:
+    def evidence_payload(self) -> dict[str, object]:
         return {
-            "schema": "snpxsnp_calibration_v1",
+            "schema": "snpxsnp_raw_stream_v1",
             "hypothesis_unit": "snp_pair_within_group",
             "member_ids": list(self.member_ids),
-            "member_ids_sha256": _payload_hash(list(self.member_ids)),
             "group_memberships": [list(value) for value in self.group_memberships],
-            "calibration_shape": list(self.calibration_p.shape),
-            "calibration_p_sha256": _numeric_array_hash(self.calibration_p),
-        }
-
-    def to_payload(self) -> dict[str, object]:
-        payload = self.reference_payload()
-        payload["calibration_p"] = self.calibration_p.tolist()
-        payload["artifact_sha256"] = _payload_hash(payload)
-        return payload
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, object]) -> SNPxSNPCalibrationArtifact:
-        """Rehydrate a frozen calibration without rescoring any responses."""
-
-        if not isinstance(payload, Mapping):
-            raise ValueError("SNPxSNP calibration payload must be a mapping")
-        expected = {
-            "schema", "hypothesis_unit", "member_ids", "member_ids_sha256",
-            "group_memberships", "calibration_shape", "calibration_p_sha256",
-            "calibration_p", "artifact_sha256",
-        }
-        if set(payload) != expected or payload.get("schema") != "snpxsnp_calibration_v1":
-            raise ValueError("invalid frozen SNPxSNP calibration payload schema")
-        body = {key: value for key, value in payload.items() if key != "artifact_sha256"}
-        if payload.get("artifact_sha256") != _payload_hash(body):
-            raise ValueError("frozen SNPxSNP calibration payload hash mismatch")
-        artifact = cls(
-            member_ids=tuple(str(value) for value in payload["member_ids"]),
-            group_memberships=tuple(
-                tuple(int(index) for index in value)
-                for value in payload["group_memberships"]
+            "member_family_sha256": self.member_family_sha256,
+            "argmin_member_index": self.argmin_member_index.tolist(),
+            "offered_pair_count": self.offered_pair_count,
+            "design_nonestimable_pair_count": self.design_nonestimable_pair_count,
+            "tested_pair_count": self.tested_pair_count,
+            "offered_pair_count_by_group": list(self.offered_pair_count_by_group),
+            "design_nonestimable_pair_count_by_group": list(
+                self.design_nonestimable_pair_count_by_group
             ),
-            calibration_p=np.asarray(payload["calibration_p"], dtype=float),
-        )
-        if artifact.reference_payload() != {
-            key: payload[key] for key in artifact.reference_payload()
-        }:
-            raise ValueError("frozen SNPxSNP calibration payload commitment mismatch")
-        return artifact
+            "tested_pair_count_by_group": list(self.tested_pair_count_by_group),
+            "nonfinite_pair_score_count": self.nonfinite_pair_score_count,
+            "nonfinite_pair_score_count_by_group": list(
+                self.nonfinite_pair_score_count_by_group
+            ),
+            "failed_response_indices": list(self.failed_response_indices),
+        }
 
 
 def _validate_expanded_structure(
@@ -496,34 +602,26 @@ def score_snpxsnp_family(
     gene_blocks: Mapping[tuple[str, str], np.ndarray],
     responses: np.ndarray,
     *,
-    calibration_responses: np.ndarray | None = None,
-    calibration_artifact: SNPxSNPCalibrationArtifact | None = None,
-    return_artifact: bool = False,
-) -> tuple[np.ndarray, int] | tuple[np.ndarray, int, SNPxSNPCalibrationArtifact]:
-    """Empirically correct every tested SNP product before forming group p.
+    max_offered_pairs: int,
+) -> SNPxSNPScoreResult:
+    """Stream raw nested-F pair scores into group minima.
 
     ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
-    exactly the genes in ``expanded``. The returned integer is the number of
-    genotype-estimable SNP-pair products in the complete tested family.
+    exactly the genes in ``expanded``. Pair designs and scores are enumerated
+    once; no pair-by-response score matrix is retained.
     """
     from homoeogwas.interact import _batch_nested_f
 
     _validate_frozen_family(family, expanded)
     sample_count = _validate_score_context(scores)
     target = _response_matrix(responses, sample_count, name="responses")
-    if (calibration_responses is None) is (calibration_artifact is None):
-        raise ValueError(
-            "provide exactly one of calibration_responses or calibration_artifact"
-        )
-    calibration = (
-        _response_matrix(
-            calibration_responses,
-            sample_count,
-            name="calibration_responses",
-        )
-        if calibration_responses is not None
-        else None
-    )
+    if (
+        isinstance(max_offered_pairs, bool)
+        or not isinstance(max_offered_pairs, Integral)
+        or int(max_offered_pairs) < 1
+    ):
+        raise ValueError("max_offered_pairs must be a positive integer")
+    max_offered_pairs = int(max_offered_pairs)
     if not isinstance(gene_blocks, Mapping):
         raise ValueError("gene_blocks must map (subgenome, gene) to ndarrays")
     required = {
@@ -556,109 +654,142 @@ def score_snpxsnp_family(
             )
         checked_blocks[key] = values
 
-    W = np.asarray(scores.W, dtype=float)
-    Cw = W @ np.asarray(scores.null_design, dtype=float)
-    target_w = _whiten_columns(W, target)
-    calibration_w = _whiten_columns(W, calibration) if calibration is not None else None
-    groups_by_edge: list[tuple[int, ...]] = []
-    for edge_index in range(len(expanded.edges)):
-        groups_by_edge.append(tuple(
+    groups_by_edge = [
+        tuple(
             group_index
             for group_index, edge_indices in enumerate(expanded.group_edge_indices)
             if edge_index in edge_indices
-        ))
-
-    target_rows: list[np.ndarray] = []
-    calibration_rows: list[np.ndarray] = []
-    raw_group_membership: list[tuple[int, ...]] = []
-    member_ids: list[str] = []
+        )
+        for edge_index in range(len(expanded.edges))
+    ]
+    edge_specs: list[
+        tuple[EdgeRecord, np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, ...]]
+    ] = []
+    offered_pair_count = 0
+    offered_by_group = [0] * len(family.group_ids)
     for edge_index, edge in enumerate(expanded.edges):
-        left = checked_blocks[(edge.sub_x, edge.gene_x)]
-        right = checked_blocks[(edge.sub_y, edge.gene_y)]
+        left_key = (edge.sub_x, edge.gene_x)
+        right_key = (edge.sub_y, edge.gene_y)
+        left = checked_blocks[left_key]
+        right = checked_blocks[right_key]
         left_columns = np.asarray(
-            scores.gated_snp.get(
-                (edge.sub_x, edge.gene_x), np.arange(left.shape[1])
-            ),
-            dtype=int,
+            scores.gated_snp.get(left_key, np.arange(left.shape[1])), dtype=int,
         )
         right_columns = np.asarray(
-            scores.gated_snp.get(
-                (edge.sub_y, edge.gene_y), np.arange(right.shape[1])
-            ),
-            dtype=int,
+            scores.gated_snp.get(right_key, np.arange(right.shape[1])), dtype=int,
         )
-        if left_columns.shape != (left.shape[1],) or right_columns.shape != (
-            right.shape[1],
+        if (
+            left_columns.shape != (left.shape[1],)
+            or right_columns.shape != (right.shape[1],)
+            or np.any(left_columns < 0)
+            or np.any(right_columns < 0)
+            or np.unique(left_columns).size != left_columns.size
+            or np.unique(right_columns).size != right_columns.size
         ):
             raise ValueError("gated SNP indices do not match genotype blocks")
+        memberships = groups_by_edge[edge_index]
+        pair_count = int(left.shape[1] * right.shape[1])
+        offered_pair_count += pair_count
+        for group_index in memberships:
+            offered_by_group[group_index] += pair_count
+        edge_specs.append(
+            (edge, left, right, left_columns, right_columns, memberships)
+        )
+    if offered_pair_count > max_offered_pairs:
+        raise ValueError(
+            f"SNPxSNP offered pair ceiling exceeded: "
+            f"{offered_pair_count} > {max_offered_pairs}"
+        )
+
+    W = np.asarray(scores.W, dtype=float)
+    Cw = W @ np.asarray(scores.null_design, dtype=float)
+    target_w = _whiten_columns(W, target)
+    group_p = np.full((len(family.group_ids), target.shape[1]), np.inf)
+    argmin = np.full(group_p.shape, -1, dtype=np.int64)
+    member_ids: list[str] = []
+    group_memberships: list[tuple[int, ...]] = []
+    member_digest = hashlib.sha256(b"homoeogwas-snpxsnp-member-family-v1\0")
+    design_nonestimable_pair_count = 0
+    design_nonestimable_by_group = [0] * len(family.group_ids)
+    tested_by_group = [0] * len(family.group_ids)
+    nonfinite_pair_score_count = 0
+    nonfinite_by_group = [0] * len(family.group_ids)
+    failed_responses: set[int] = set()
+    for edge, left, right, left_columns, right_columns, memberships in edge_specs:
         for left_index in range(left.shape[1]):
             for right_index in range(right.shape[1]):
                 design = _nested_snp_product_design(
                     W, Cw, left[:, left_index], right[:, right_index]
                 )
                 if design is None:
+                    design_nonestimable_pair_count += 1
+                    for group_index in memberships:
+                        design_nonestimable_by_group[group_index] += 1
                     continue
                 reduced, added = design
-                target_rows.append(_batch_nested_f(target_w, reduced, added))
-                if calibration_w is not None:
-                    calibration_rows.append(
-                        _batch_nested_f(calibration_w, reduced, added)
-                    )
-                raw_group_membership.append(groups_by_edge[edge_index])
-                member_ids.append(
+                member_id = (
                     f"{edge.edge_id}|{int(left_columns[left_index])}|"
                     f"{int(right_columns[right_index])}"
                 )
+                member_index = len(member_ids)
+                member_ids.append(member_id)
+                group_memberships.append(memberships)
+                _snpxsnp_member_digest_update(member_digest, member_id, memberships)
+                for group_index in memberships:
+                    tested_by_group[group_index] += 1
+                pair_p = np.asarray(_batch_nested_f(target_w, reduced, added), dtype=float)
+                if pair_p.shape != (target.shape[1],):
+                    raise RuntimeError("nested SNPxSNP scorer returned an invalid shape")
+                finite = np.isfinite(pair_p)
+                nonfinite = np.flatnonzero(~finite)
+                nonfinite_pair_score_count += int(nonfinite.size)
+                failed_responses.update(int(index) for index in nonfinite)
+                for group_index in memberships:
+                    nonfinite_by_group[group_index] += int(nonfinite.size)
+                    current = group_p[group_index]
+                    better = finite & (pair_p < current)
+                    current[better] = pair_p[better]
+                    argmin[group_index, better] = member_index
+                    for response_index in np.flatnonzero(finite & (pair_p == current)):
+                        old_index = int(argmin[group_index, response_index])
+                        if old_index < 0 or member_id < member_ids[old_index]:
+                            argmin[group_index, response_index] = member_index
 
-    tested_family_count = len(target_rows)
-    if tested_family_count < 1:
+    tested_pair_count = len(member_ids)
+    if offered_pair_count - design_nonestimable_pair_count != tested_pair_count:
+        raise RuntimeError("SNPxSNP offered/nonestimable/tested count invariant failed")
+    if tested_pair_count < 1:
         raise ValueError("SNPxSNP family has no genotype-estimable tested products")
-    target_p = np.asarray(target_rows, dtype=float)
-    if calibration_artifact is None:
-        calibration_artifact = SNPxSNPCalibrationArtifact(
-            tuple(member_ids), tuple(raw_group_membership),
-            np.asarray(calibration_rows, dtype=float),
-        )
-    elif (
-        calibration_artifact.member_ids != tuple(member_ids)
-        or calibration_artifact.group_memberships != tuple(raw_group_membership)
-    ):
-        raise ValueError("SNPxSNP target family differs from frozen calibration artifact")
-    calibration_p = calibration_artifact.calibration_p
-    group_p = np.full((len(family.group_ids), target.shape[1]), np.nan)
-    pair_indices_by_group = [
-        np.asarray(
-            [
-                pair_index
-                for pair_index, memberships in enumerate(raw_group_membership)
-                if group_index in memberships
-            ],
-            dtype=int,
-        )
-        for group_index in range(len(family.group_ids))
-    ]
-    for response_index in range(target.shape[1]):
-        observed = target_p[:, response_index]
-        if not np.all(np.isfinite(observed)):
-            continue
-        calibration_result = bootstrap_minp_calibration(
-            observed, calibration_p, alpha=0.0
-        )
-        adjusted = np.asarray(calibration_result["adjusted_p_local"], dtype=float)
-        for group_index, pair_indices in enumerate(pair_indices_by_group):
-            if pair_indices.size:
-                group_p[group_index, response_index] = float(
-                    np.min(adjusted[pair_indices])
-                )
-    result = (group_p, tested_family_count)
-    return (*result, calibration_artifact) if return_artifact else result
+    missing = ~np.isfinite(group_p)
+    group_p[missing] = np.nan
+    argmin[missing] = -1
+    failed_indices = tuple(sorted(failed_responses))
+    if failed_indices:
+        group_p[:, failed_indices] = np.nan
+        argmin[:, failed_indices] = -1
+    return SNPxSNPScoreResult(
+        group_p=group_p,
+        argmin_member_index=argmin,
+        member_ids=tuple(member_ids),
+        group_memberships=tuple(group_memberships),
+        member_family_sha256=member_digest.hexdigest(),
+        offered_pair_count=offered_pair_count,
+        design_nonestimable_pair_count=design_nonestimable_pair_count,
+        tested_pair_count=tested_pair_count,
+        offered_pair_count_by_group=tuple(offered_by_group),
+        design_nonestimable_pair_count_by_group=tuple(design_nonestimable_by_group),
+        tested_pair_count_by_group=tuple(tested_by_group),
+        nonfinite_pair_score_count=nonfinite_pair_score_count,
+        nonfinite_pair_score_count_by_group=tuple(nonfinite_by_group),
+        failed_response_indices=failed_indices,
+    )
 
 
 __all__ = [
     "GLOBAL_VC_METHOD",
     "METHOD_NAMES",
     "MethodScoreBank",
-    "SNPxSNPCalibrationArtifact",
+    "SNPxSNPScoreResult",
     "group_component_p",
     "score_legacy_burden_product",
     "score_snpxsnp_family",

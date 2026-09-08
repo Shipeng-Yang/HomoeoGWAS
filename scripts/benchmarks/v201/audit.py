@@ -31,7 +31,7 @@ from .aggregate import (
     table_schemas,
     write_tables,
 )
-from .comparators import METHOD_NAMES
+from .comparators import METHOD_NAMES, SNPxSNPScoreResult
 from .contracts import ScalingAnchor, canonical_json, derive_seed, sha256_payload
 from .track_scaling import ScalingAnchorRun, summarize_anchor
 
@@ -944,6 +944,9 @@ def _conditional_score_matrices(
         or len(family_ids) != len(set(family_ids))
     ):
         raise BenchmarkAuditError("conditional group family IDs are invalid")
+    snpxsnp_evidence = bank.get("snpxsnp_evidence")
+    if not isinstance(snpxsnp_evidence, Mapping):
+        raise BenchmarkAuditError("SNPxSNP streaming evidence is incomplete")
     failed_set = set(failed)
     output: dict[str, list[list[float | None]]] = {}
     computed_nonfinite: dict[str, list[int]] = {}
@@ -951,15 +954,20 @@ def _conditional_score_matrices(
     for method in sorted(scores):
         matrix = scores[method]
         ordered = members[method]
+        expected_family_hash = (
+            snpxsnp_evidence.get("member_family_sha256")
+            if method == "snpxsnp"
+            else sha256_payload({
+                "method": method, "ordered_member_ids": ordered,
+            })
+        )
         if (
             not isinstance(matrix, list) or not matrix
             or not isinstance(ordered, list) or not ordered
             or len(matrix) != len(family_ids) or sizes[method] != len(ordered)
             or any(not isinstance(item, str) or not item for item in ordered)
             or len(ordered) != len(set(ordered))
-            or hashes[method] != sha256_payload({
-                "method": method, "ordered_member_ids": ordered,
-            })
+            or hashes[method] != expected_family_hash
         ):
             raise BenchmarkAuditError("conditional tested-family manifest mismatch")
         checked: list[list[float | None]] = []
@@ -997,15 +1005,7 @@ def _conditional_score_matrices(
         }
     ):
         raise BenchmarkAuditError("conditional partial-failure matrix evidence differs")
-    if bank.get("canonical_role") == "calibration":
-        artifact = _validate_snpxsnp_calibration_artifact(
-            bank.get("snpxsnp_calibration_artifact"),
-            calibration_count=expected,
-        )
-        if artifact.get("calibration_p_sha256") != bank.get(
-            "snpxsnp_calibration_reference", {}
-        ).get("calibration_p_sha256"):
-            raise BenchmarkAuditError("conditional SNPxSNP calibration reference differs")
+    _validate_snpxsnp_stream_evidence(bank, response_count=expected)
     return output
 
 
@@ -1375,86 +1375,93 @@ def _index_set(value: Any, expected: int, label: str) -> set[int]:
     return set(value)
 
 
-def _validate_snpxsnp_calibration_reference(
-    value: Any, *, calibration_count: int,
-) -> Mapping[str, Any]:
+def _snpxsnp_result_from_evidence(
+    evidence: Any,
+    *,
+    response_count: int,
+    group_p: np.ndarray | None = None,
+) -> SNPxSNPScoreResult:
     expected_fields = {
-        "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
-        "calibration_shape", "calibration_p_sha256",
+        "schema", "hypothesis_unit", "member_ids", "group_memberships",
+        "member_family_sha256", "argmin_member_index", "offered_pair_count",
+        "design_nonestimable_pair_count", "tested_pair_count",
+        "offered_pair_count_by_group", "design_nonestimable_pair_count_by_group",
+        "tested_pair_count_by_group", "nonfinite_pair_score_count",
+        "nonfinite_pair_score_count_by_group", "failed_response_indices",
     }
-    if not isinstance(value, Mapping) or set(value) != expected_fields:
-        raise BenchmarkAuditError("SNPxSNP frozen calibration reference is invalid")
-    members = value.get("member_ids")
-    memberships = value.get("group_memberships")
-    shape = value.get("calibration_shape")
     if (
-        value.get("schema") != "snpxsnp_calibration_v1"
-        or value.get("hypothesis_unit") != "snp_pair_within_group"
-        or not isinstance(members, list) or not members
-        or any(not isinstance(item, str) or not item for item in members)
-        or len(set(members)) != len(members)
-        or value.get("member_ids_sha256") != sha256_payload(members)
-        or not isinstance(memberships, list) or len(memberships) != len(members)
-        or any(
-            not isinstance(item, list) or not item
-            or any(isinstance(index, bool) or not isinstance(index, int) or index < 0
-                   for index in item)
-            for item in memberships
-        )
-        or shape != [len(members), calibration_count]
-        or not isinstance(value.get("calibration_p_sha256"), str)
-        or len(value["calibration_p_sha256"]) != 64
-        or any(character not in "0123456789abcdef"
-               for character in value["calibration_p_sha256"])
+        not isinstance(evidence, Mapping)
+        or set(evidence) != expected_fields
+        or evidence.get("schema") != "snpxsnp_raw_stream_v1"
+        or evidence.get("hypothesis_unit") != "snp_pair_within_group"
     ):
-        raise BenchmarkAuditError("SNPxSNP frozen calibration reference is invalid")
-    return value
+        raise BenchmarkAuditError("SNPxSNP streaming evidence is incomplete")
+    try:
+        argmin = np.asarray(evidence["argmin_member_index"])
+        if not np.issubdtype(argmin.dtype, np.integer):
+            raise ValueError("SNPxSNP argmins must be integers")
+        values = (
+            np.where(argmin >= 0, 1.0, np.nan)
+            if group_p is None else np.asarray(group_p, dtype=float)
+        )
+        result = SNPxSNPScoreResult(
+            group_p=values,
+            argmin_member_index=argmin,
+            member_ids=tuple(evidence["member_ids"]),
+            group_memberships=tuple(
+                tuple(value) for value in evidence["group_memberships"]
+            ),
+            member_family_sha256=evidence["member_family_sha256"],
+            offered_pair_count=evidence["offered_pair_count"],
+            design_nonestimable_pair_count=evidence["design_nonestimable_pair_count"],
+            tested_pair_count=evidence["tested_pair_count"],
+            offered_pair_count_by_group=tuple(evidence["offered_pair_count_by_group"]),
+            design_nonestimable_pair_count_by_group=tuple(
+                evidence["design_nonestimable_pair_count_by_group"]
+            ),
+            tested_pair_count_by_group=tuple(evidence["tested_pair_count_by_group"]),
+            nonfinite_pair_score_count=evidence["nonfinite_pair_score_count"],
+            nonfinite_pair_score_count_by_group=tuple(
+                evidence["nonfinite_pair_score_count_by_group"]
+            ),
+            failed_response_indices=tuple(evidence["failed_response_indices"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise BenchmarkAuditError("SNPxSNP streaming evidence is invalid") from error
+    if result.group_p.shape[1] != response_count:
+        raise BenchmarkAuditError("SNPxSNP streaming evidence response count differs")
+    return result
 
 
-def _numeric_array_hash(values: np.ndarray) -> str:
-    array = np.ascontiguousarray(values)
-    digest = hashlib.sha256()
-    digest.update(str(array.dtype).encode("ascii"))
-    digest.update(repr(array.shape).encode("ascii"))
-    digest.update(array.tobytes())
-    return digest.hexdigest()
-
-
-def _validate_snpxsnp_calibration_artifact(
-    value: Any, *, calibration_count: int,
+def _validate_snpxsnp_stream_evidence(
+    bank: Mapping[str, Any], *, response_count: int,
 ) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != {
-        "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
-        "calibration_shape", "calibration_p_sha256", "calibration_p",
-        "artifact_sha256",
-    }:
-        raise BenchmarkAuditError("SNPxSNP frozen calibration artifact is invalid")
-    reference = {
-        key: value[key] for key in (
-            "schema", "hypothesis_unit", "member_ids", "member_ids_sha256", "group_memberships",
-            "calibration_shape", "calibration_p_sha256",
-        )
-    }
-    _validate_snpxsnp_calibration_reference(
-        reference, calibration_count=calibration_count,
+    evidence = bank.get("snpxsnp_evidence")
+    scores = bank.get("p_by_method")
+    members = bank.get("tested_family_members")
+    hashes = bank.get("tested_family_hashes")
+    sizes = bank.get("tested_family_sizes")
+    if not all(isinstance(value, Mapping) for value in (members, hashes, sizes)):
+        raise BenchmarkAuditError("SNPxSNP streaming family binding is incomplete")
+    group_p = (
+        np.asarray(scores["snpxsnp"], dtype=float)
+        if isinstance(scores, Mapping) and isinstance(scores.get("snpxsnp"), list)
+        else None
     )
-    matrix = value.get("calibration_p")
+    result = _snpxsnp_result_from_evidence(
+        evidence, response_count=response_count, group_p=group_p,
+    )
+    failure = bank.get("failure")
     if (
-        not isinstance(matrix, list) or len(matrix) != len(reference["member_ids"])
-        or any(not isinstance(row, list) or len(row) != calibration_count for row in matrix)
+        list(result.member_ids) != members.get("snpxsnp")
+        or result.tested_pair_count != sizes.get("snpxsnp")
+        or result.member_family_sha256 != hashes.get("snpxsnp")
+        or not isinstance(failure, Mapping)
+        or list(result.failed_response_indices)
+        != failure.get("nonfinite_response_indices_by_method", {}).get("snpxsnp")
     ):
-        raise BenchmarkAuditError("SNPxSNP frozen calibration artifact is invalid")
-    numeric = np.asarray(matrix, dtype=float)
-    if (
-        not np.all(np.isfinite(numeric))
-        or np.any((numeric < 0.0) | (numeric > 1.0))
-        or reference["calibration_p_sha256"] != _numeric_array_hash(numeric)
-        or value.get("artifact_sha256") != sha256_payload({
-            key: item for key, item in value.items() if key != "artifact_sha256"
-        })
-    ):
-        raise BenchmarkAuditError("SNPxSNP frozen calibration artifact is invalid")
-    return value
+        raise BenchmarkAuditError("SNPxSNP streaming family binding differs")
+    return evidence
 
 
 def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
@@ -1569,6 +1576,7 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         or artifact.get("family_hash") != calibration_bank.get("family_hash")
         or artifact.get("score_matrix_hashes") != calibration_bank.get("score_matrix_hashes")
         or artifact.get("tested_family_hashes") != calibration_bank.get("tested_family_hashes")
+        or artifact.get("snpxsnp_evidence") != calibration_bank.get("snpxsnp_evidence")
         or artifact.get("failed_response_indices") != payload.get(
             "failed_calibration_response_indices"
         )
@@ -1625,17 +1633,17 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
         if np.any(np.isinf(values)) or np.any((values < 0.0) | (values > 1.0)):
             raise BenchmarkAuditError("power target score values are invalid")
         target_arrays[method] = values
-    artifact_reference = _validate_snpxsnp_calibration_reference(
-        artifact.get("snpxsnp_calibration_reference"),
-        calibration_count=calibration_count,
+    calibration_snpxsnp = _validate_snpxsnp_stream_evidence(
+        calibration_bank, response_count=calibration_count,
+    )
+    target_snpxsnp = _validate_snpxsnp_stream_evidence(
+        target_bank, response_count=response_count,
     )
     if (
-        calibration_bank.get("snpxsnp_calibration_reference") != artifact_reference
-        or target_bank.get("snpxsnp_calibration_reference") != artifact_reference
-        or "snpxsnp_calibration_artifact" in calibration_bank
-        or "snpxsnp_calibration_artifact" in target_bank
+        calibration_snpxsnp.get("member_family_sha256")
+        != target_snpxsnp.get("member_family_sha256")
     ):
-        raise BenchmarkAuditError("power frozen calibration binding is invalid")
+        raise BenchmarkAuditError("power SNPxSNP streaming families differ")
     if artifact.get("method_minima") != payload.get("calibration_minima_by_method"):
         raise BenchmarkAuditError("power compact minima detach from calibration artifact")
     if artifact.get("method_minima_hashes") != payload.get("calibration_minima_hashes"):
@@ -2390,6 +2398,23 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     == payload.get("target_response_hash")
                 ):
                     raise BenchmarkAuditError("family-size statistical stress evidence is invalid")
+                snpxsnp_result = None
+                if "snpxsnp" in expected_methods:
+                    snpxsnp_result = _snpxsnp_result_from_evidence(
+                        payload.get("snpxsnp_evidence"),
+                        response_count=response_count,
+                    )
+                    if (
+                        list(snpxsnp_result.member_ids)
+                        != tested_members.get("snpxsnp")
+                        or snpxsnp_result.tested_pair_count
+                        != tested_sizes.get("snpxsnp")
+                        or snpxsnp_result.member_family_sha256
+                        != tested_family_hashes.get("snpxsnp")
+                    ):
+                        raise BenchmarkAuditError(
+                            "family-size SNPxSNP streaming evidence differs"
+                        )
                 for method in sorted(expected_methods):
                     if hypothesis_units[method] != (
                         "snp_pair_within_group"
@@ -2399,14 +2424,19 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                             "family-size hypothesis unit is invalid"
                         )
                     ordered_members = tested_members[method]
+                    expected_tested_hash = (
+                        snpxsnp_result.member_family_sha256
+                        if method == "snpxsnp"
+                        else sha256_payload({
+                            "method": method,
+                            "ordered_member_ids": ordered_members,
+                        })
+                    )
                     if (
                         not isinstance(ordered_members, list) or not ordered_members
                         or len(ordered_members) != tested_sizes[method]
                         or len(set(ordered_members)) != len(ordered_members)
-                        or tested_family_hashes[method] != sha256_payload({
-                            "method": method,
-                            "ordered_member_ids": ordered_members,
-                        })
+                        or tested_family_hashes[method] != expected_tested_hash
                     ):
                         raise BenchmarkAuditError(
                             "family-size tested-family evidence is invalid"
@@ -2483,6 +2513,16 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                 for method in sizes:
                     size, digest = sizes[method], hashes[method]
                     ordered_members = members[method]
+                    expected_digest = (
+                        bank.get("snpxsnp_evidence", {}).get(
+                            "member_family_sha256"
+                        )
+                        if method == "snpxsnp"
+                        else sha256_payload({
+                            "method": method,
+                            "ordered_member_ids": ordered_members,
+                        })
+                    )
                     if (
                         isinstance(size, bool) or not isinstance(size, int) or size < 1
                         or not isinstance(digest, str) or len(digest) != 64
@@ -2491,10 +2531,7 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         or len(ordered_members) != size
                         or len(set(ordered_members)) != size
                         or any(not isinstance(item, str) or not item for item in ordered_members)
-                        or digest != sha256_payload({
-                            "method": method,
-                            "ordered_member_ids": ordered_members,
-                        })
+                        or digest != expected_digest
                         or not isinstance(score_hashes[method], str)
                         or len(score_hashes[method]) != 64
                         or any(c not in "0123456789abcdef" for c in score_hashes[method])
@@ -2535,26 +2572,19 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         "power frozen calibration has no registered conditional artifact"
                     )
                 frozen_count = len(frozen_bank.get("seed_ids", []))
-                full_snpxsnp = _validate_snpxsnp_calibration_artifact(
-                    frozen_bank.get("snpxsnp_calibration_artifact"),
-                    calibration_count=frozen_count,
+                frozen_snpxsnp = _validate_snpxsnp_stream_evidence(
+                    frozen_bank, response_count=frozen_count,
                 )
-                frozen_reference = {
-                    key: full_snpxsnp[key] for key in (
-                        "schema", "member_ids", "member_ids_sha256",
-                        "group_memberships", "calibration_shape",
-                        "calibration_p_sha256",
-                    )
-                }
                 direct_fields = (
                     "stage", "canonical_role", "seed_ids", "seeds",
                     "response_hash", "response_metadata", "family_ids",
                     "family_hash", "design_hash", "tested_family_sizes",
                     "tested_family_members", "tested_family_hashes",
                     "score_matrix_hashes", "failed_response_indices",
+                    "snpxsnp_evidence",
                 )
                 if (
-                    artifact.get("snpxsnp_calibration_reference") != frozen_reference
+                    artifact.get("snpxsnp_evidence") != frozen_snpxsnp
                     or any(
                         artifact.get(field) != (
                             frozen_bank.get("failure", {}).get(field)

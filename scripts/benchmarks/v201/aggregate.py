@@ -129,6 +129,9 @@ TABLE_SCHEMAS: dict[str, tuple[str, ...]] = {
         "panel_id", "sample_context", "feature_seed", "marker_mask_sha256",
         "feature_cache_sha256", "fixed_mask_sha256", "null_fit_sha256",
         "prepared_design_sha256",
+        "offered_pair_count", "design_nonestimable_pair_count",
+        "tested_pair_count", "nonfinite_pair_score_count",
+        "member_family_sha256",
         "callable", "requested_jobs", "effective_jobs", "backend", "worker_pids",
     ),
     "scaling_runs.tsv": _COMMON + (
@@ -1495,6 +1498,13 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
             members = tested_members[method]
             size = tested_sizes[method]
             tested = tested_hashes[method]
+            snpxsnp_evidence = (
+                bank.get("snpxsnp_evidence") if method == "snpxsnp" else {}
+            )
+            if method == "snpxsnp" and not isinstance(snpxsnp_evidence, Mapping):
+                raise BenchmarkAggregateError(
+                    "conditional SNPxSNP streaming evidence is missing"
+                )
             if not isinstance(matrix, list) or not matrix:
                 raise BenchmarkAggregateError("conditional score matrix is invalid")
             for index in range(len(seed_ids)):
@@ -1531,6 +1541,17 @@ def _omnib_rows(payload: Mapping[str, Any], registry: RegistryRow) -> dict[str, 
                 fixed_mask_sha256=bank.get("fixed_mask_sha256"),
                 null_fit_sha256=bank.get("null_fit_sha256"),
                 prepared_design_sha256=bank.get("prepared_design_sha256"),
+                offered_pair_count=snpxsnp_evidence.get("offered_pair_count"),
+                design_nonestimable_pair_count=snpxsnp_evidence.get(
+                    "design_nonestimable_pair_count"
+                ),
+                tested_pair_count=snpxsnp_evidence.get("tested_pair_count"),
+                nonfinite_pair_score_count=snpxsnp_evidence.get(
+                    "nonfinite_pair_score_count"
+                ),
+                member_family_sha256=snpxsnp_evidence.get(
+                    "member_family_sha256"
+                ),
                 requested_jobs=bank.get("requested_jobs"),
                 effective_jobs=bank.get("effective_jobs"),
                 backend=bank.get("parallel_backend"), worker_pids=bank.get("worker_pids")))

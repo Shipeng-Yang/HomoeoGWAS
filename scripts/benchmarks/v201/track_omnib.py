@@ -41,8 +41,7 @@ from .comparators import (
     GLOBAL_VC_METHOD,
     METHOD_NAMES,
     MethodScoreBank,
-    SNPxSNPCalibrationArtifact,
-    _nested_snp_product_design,
+    SNPxSNPScoreResult,
     group_component_p,
     score_global_hadamard_vc,
     score_snpxsnp_family,
@@ -62,6 +61,7 @@ _DEFAULT_DESIGN_HASH = "0" * 64
 _BINDING_GAUSSIAN_FAILURE_RATE_MAX = 0.002
 _DIAGNOSTIC_FAILURE_RATE_MAX = 0.01
 _DEFAULT_SYNTHETIC_FEATURE_SEED = 20_260_830
+_TASK7_MAX_OFFERED_SNP_PAIRS = 750_000
 
 
 @dataclass(frozen=True)
@@ -246,7 +246,7 @@ class ConditionalBank:
     tested_family_members: Mapping[str, tuple[str, ...]]
     tested_family_hashes: Mapping[str, str]
     score_matrix_hashes: Mapping[str, str]
-    snpxsnp_calibration: SNPxSNPCalibrationArtifact
+    snpxsnp_evidence: Mapping[str, Any]
     calibration_reference: Mapping[str, Any]
     execution: Mapping[str, Any]
     runtime_seconds: float
@@ -306,6 +306,17 @@ class ConditionalBank:
             == set(self.score_matrix_hashes)
         ):
             raise ValueError("score and tested-family method sets must match")
+        if (
+            not isinstance(self.snpxsnp_evidence, Mapping)
+            or self.snpxsnp_evidence.get("schema") != "snpxsnp_raw_stream_v1"
+            or self.snpxsnp_evidence.get("tested_pair_count")
+            != self.score_bank.tested_family_sizes["snpxsnp"]
+            or self.snpxsnp_evidence.get("member_ids")
+            != list(self.tested_family_members["snpxsnp"])
+            or self.snpxsnp_evidence.get("member_family_sha256")
+            != self.tested_family_hashes["snpxsnp"]
+        ):
+            raise ValueError("streaming SNPxSNP evidence differs from the score family")
         values.setflags(write=False)
         object.__setattr__(self, "responses", values)
         object.__setattr__(self, "feature_seed", int(self.feature_seed))
@@ -317,6 +328,9 @@ class ConditionalBank:
                 for label, record in self.marker_mask_identity.items()
             }),
         )
+        object.__setattr__(
+            self, "snpxsnp_evidence", MappingProxyType(dict(self.snpxsnp_evidence))
+        )
 
     @property
     def p_by_method(self) -> Mapping[str, np.ndarray]:
@@ -326,7 +340,6 @@ class ConditionalBank:
         self,
         *,
         include_scores: bool = True,
-        include_snpxsnp_artifact: bool = True,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "requested_role": self.requested_role,
@@ -368,9 +381,7 @@ class ConditionalBank:
                 for method in METHOD_NAMES
             },
             "score_matrix_hashes": dict(self.score_matrix_hashes),
-            "snpxsnp_calibration_reference": (
-                self.snpxsnp_calibration.reference_payload()
-            ),
+            "snpxsnp_evidence": dict(self.snpxsnp_evidence),
             "calibration_reference": dict(self.calibration_reference),
             "execution": dict(self.execution),
             "requested_jobs": self.execution.get("requested_jobs", 1),
@@ -386,10 +397,6 @@ class ConditionalBank:
                 method: _json_safe(values)
                 for method, values in self.score_bank.p_by_method.items()
             }
-        if self.canonical_role == "calibration" and include_snpxsnp_artifact:
-            payload["snpxsnp_calibration_artifact"] = (
-                self.snpxsnp_calibration.to_payload()
-            )
         return payload
 
     @classmethod
@@ -401,14 +408,14 @@ class ConditionalBank:
         responses = np.asarray(payload.get("responses"), dtype=float)
         p_by_method = payload.get("p_by_method")
         sizes = payload.get("tested_family_sizes")
-        artifact_payload = payload.get("snpxsnp_calibration_artifact")
+        snpxsnp_evidence = payload.get("snpxsnp_evidence")
         if (
             responses.ndim != 2
             or list(responses.shape) != payload.get("response_shape")
             or _array_hash(responses) != payload.get("response_hash")
             or not isinstance(p_by_method, Mapping)
             or not isinstance(sizes, Mapping)
-            or not isinstance(artifact_payload, Mapping)
+            or not isinstance(snpxsnp_evidence, Mapping)
         ):
             raise ValueError("conditional bank payload evidence is incomplete")
         score_bank = MethodScoreBank(
@@ -454,9 +461,7 @@ class ConditionalBank:
             },
             tested_family_hashes=dict(payload.get("tested_family_hashes", {})),
             score_matrix_hashes=dict(score_hashes),
-            snpxsnp_calibration=SNPxSNPCalibrationArtifact.from_payload(
-                artifact_payload
-            ),
+            snpxsnp_evidence=dict(snpxsnp_evidence),
             calibration_reference=dict(payload.get("calibration_reference", {})),
             execution=dict(payload.get("execution", {})),
             runtime_seconds=float(payload.get("runtime_seconds", 0.0)),
@@ -511,9 +516,7 @@ class ConditionalBank:
             },
             "tested_family_hashes": dict(self.tested_family_hashes),
             "score_matrix_hashes": dict(self.score_matrix_hashes),
-            "snpxsnp_calibration_reference": (
-                self.snpxsnp_calibration.reference_payload()
-            ),
+            "snpxsnp_evidence": dict(self.snpxsnp_evidence),
             "method_minima": minima,
             "method_minima_hashes": {
                 method: sha256_payload(value) for method, value in minima.items()
@@ -1193,9 +1196,7 @@ def _method_scores(
     responses: np.ndarray,
     *,
     n_jobs: int,
-    calibration_responses: np.ndarray | None = None,
-    snpxsnp_calibration: SNPxSNPCalibrationArtifact | None = None,
-) -> tuple[MethodScoreBank, dict[str, Any], SNPxSNPCalibrationArtifact]:
+) -> tuple[MethodScoreBank, dict[str, Any], SNPxSNPScoreResult]:
     _edge, group, components = score_omnib_responses(
         prepared.scores,
         prepared.context.family,
@@ -1214,15 +1215,8 @@ def _method_scores(
         prepared.expanded,
         prepared.gene_blocks,
         responses,
-        calibration_responses=(
-            None
-            if snpxsnp_calibration is not None
-            else responses if calibration_responses is None else calibration_responses
-        ),
-        calibration_artifact=snpxsnp_calibration,
-        return_artifact=True,
+        max_offered_pairs=_TASK7_MAX_OFFERED_SNP_PAIRS,
     )
-    snpxsnp, snpxsnp_size, frozen_snpxsnp = snpxsnp_result
     group_count = len(prepared.context.family.group_ids)
     return (
         MethodScoreBank(
@@ -1232,18 +1226,18 @@ def _method_scores(
                 "minor_burden": component_scores[0],
                 "pc1": component_scores[1],
                 "kernel_hadamard": component_scores[2],
-                "snpxsnp": snpxsnp,
+                "snpxsnp": snpxsnp_result.group_p,
             },
             tested_family_sizes={
                 "omnib": group_count,
                 "minor_burden": group_count,
                 "pc1": group_count,
                 "kernel_hadamard": group_count,
-                "snpxsnp": snpxsnp_size,
+                "snpxsnp": snpxsnp_result.tested_pair_count,
             },
         ),
         response_execution,
-        frozen_snpxsnp,
+        snpxsnp_result,
     )
 
 
@@ -1304,14 +1298,18 @@ def run_family_size_stress(
     if set(calibration_ids) & set(target_ids):
         raise RuntimeError("family-size calibration and heldout banks overlap")
     if family_size <= 80:
-        calibration_scores, _, snpxsnp_calibration = _method_scores(
+        calibration_scores, _, calibration_snpxsnp = _method_scores(
             prepared, calibration, n_jobs=n_jobs,
-            calibration_responses=calibration,
         )
         target_scores, _, target_snpxsnp = _method_scores(
             prepared, target, n_jobs=n_jobs,
-            snpxsnp_calibration=snpxsnp_calibration,
         )
+        if (
+            calibration_snpxsnp.member_ids != target_snpxsnp.member_ids
+            or calibration_snpxsnp.member_family_sha256
+            != target_snpxsnp.member_family_sha256
+        ):
+            raise RuntimeError("family-size SNPxSNP response banks differ")
         calibration_map = dict(calibration_scores.p_by_method)
         target_map = dict(target_scores.p_by_method)
         tested_sizes = dict(target_scores.tested_family_sizes)
@@ -1337,6 +1335,8 @@ def run_family_size_stress(
         })
         for method, members in tested_members.items()
     }
+    if family_size <= 80:
+        tested_hashes["snpxsnp"] = target_snpxsnp.member_family_sha256
     thresholds = {
         method: empirical_threshold(values) for method, values in calibration_map.items()
     }
@@ -1376,6 +1376,10 @@ def run_family_size_stress(
             method: list(members) for method, members in tested_members.items()
         },
         "tested_family_hashes": tested_hashes,
+        **(
+            {"snpxsnp_evidence": target_snpxsnp.evidence_payload()}
+            if family_size <= 80 else {}
+        ),
         "score_hypothesis_units": {
             method: (
                 "snp_pair_within_group" if method == "snpxsnp" else "group_score"
@@ -1418,7 +1422,10 @@ def run_family_size_stress(
     }
 
 
-def _tested_family_members(prepared: _PreparedScenario) -> dict[str, tuple[str, ...]]:
+def _tested_family_members(
+    prepared: _PreparedScenario,
+    snpxsnp_result: SNPxSNPScoreResult,
+) -> dict[str, tuple[str, ...]]:
     local_members = tuple(
         f"{group_id}|edges="
         + ",".join(
@@ -1428,34 +1435,12 @@ def _tested_family_members(prepared: _PreparedScenario) -> dict[str, tuple[str, 
         )
         for group_index, group_id in enumerate(prepared.context.family.group_ids)
     )
-    snpxsnp_members: list[str] = []
-    W = np.asarray(prepared.scores.W, dtype=float)
-    Cw = W @ np.asarray(prepared.scores.null_design, dtype=float)
-    for edge in prepared.expanded.edges:
-        left_key = (edge.sub_x, edge.gene_x)
-        right_key = (edge.sub_y, edge.gene_y)
-        left = prepared.gene_blocks[left_key]
-        right = prepared.gene_blocks[right_key]
-        left_columns = np.asarray(prepared.scores.gated_snp[left_key], dtype=int)
-        right_columns = np.asarray(prepared.scores.gated_snp[right_key], dtype=int)
-        for left_local, left_column in enumerate(left_columns):
-            for right_local, right_column in enumerate(right_columns):
-                if _nested_snp_product_design(
-                    W,
-                    Cw,
-                    left[:, left_local],
-                    right[:, right_local],
-                ) is None:
-                    continue
-                snpxsnp_members.append(
-                    f"{edge.edge_id}|{int(left_column)}|{int(right_column)}"
-                )
     members = {
         "omnib": local_members,
         "minor_burden": local_members,
         "pc1": local_members,
         "kernel_hadamard": local_members,
-        "snpxsnp": tuple(snpxsnp_members),
+        "snpxsnp": snpxsnp_result.member_ids,
     }
     return members
 
@@ -1550,7 +1535,6 @@ def _bank_from_prepared(
     response_factory: Any = None,
     calibration_responses: np.ndarray | None = None,
     calibration_reference: Mapping[str, Any] | None = None,
-    snpxsnp_calibration: SNPxSNPCalibrationArtifact | None = None,
 ) -> ConditionalBank:
     started = time.perf_counter()
     canonical_role = _canonical_role(bank)
@@ -1599,12 +1583,10 @@ def _bank_from_prepared(
         }
     failure: dict[str, Any] = {"failed": False, "failed_response_indices": []}
     try:
-        score_bank, response_execution, frozen_snpxsnp = _method_scores(
+        score_bank, response_execution, snpxsnp_result = _method_scores(
             prepared,
             responses,
             n_jobs=n_jobs,
-            calibration_responses=calibration_responses,
-            snpxsnp_calibration=snpxsnp_calibration,
         )
     except Exception as error:
         failure = {
@@ -1627,6 +1609,7 @@ def _bank_from_prepared(
         "minor_burden": list(component_failures["minor_burden"]),
         "pc1": list(component_failures["pc1"]),
         "kernel_hadamard": list(component_failures["kernel_hadamard"]),
+        "snpxsnp": list(snpxsnp_result.failed_response_indices),
     })
     all_nan_by_method = {
         method: np.flatnonzero(~np.isfinite(values).any(axis=0)).astype(int).tolist()
@@ -1670,7 +1653,7 @@ def _bank_from_prepared(
             ),
         }
     )
-    members = _tested_family_members(prepared)
+    members = _tested_family_members(prepared, snpxsnp_result)
     for method in METHOD_NAMES:
         if len(members[method]) != score_bank.tested_family_sizes[method]:
             raise RuntimeError(
@@ -1683,6 +1666,7 @@ def _bank_from_prepared(
         )
         for method in METHOD_NAMES
     }
+    tested_hashes["snpxsnp"] = snpxsnp_result.member_family_sha256
     return ConditionalBank(
         requested_role=bank,
         canonical_role=canonical_role,
@@ -1711,7 +1695,7 @@ def _bank_from_prepared(
             method: sha256_payload(_json_safe(values))
             for method, values in score_bank.p_by_method.items()
         },
-        snpxsnp_calibration=frozen_snpxsnp,
+        snpxsnp_evidence=snpxsnp_result.evidence_payload(),
         calibration_reference=dict(calibration_reference),
         execution=response_execution,
         runtime_seconds=float(time.perf_counter() - started),
@@ -2604,7 +2588,6 @@ def run_power_replicate(
             calibration.seed_ids,
             calibration_scenario_id,
         ),
-        snpxsnp_calibration=calibration.snpxsnp_calibration,
     )
     _assert_independent_banks(calibration, target)
     thresholds: dict[str, float | None] = {}
@@ -2731,9 +2714,7 @@ def run_power_replicate(
             "target_minima_by_method": target_minima,
             "calibration_minima_hashes": calibration_minima_hashes,
             "target_minima_hashes": target_minima_hashes,
-            "calibration_bank": calibration.to_payload(
-                include_scores=False, include_snpxsnp_artifact=False
-            ),
+            "calibration_bank": calibration.to_payload(include_scores=False),
             "target_bank": target.to_payload(include_scores=True),
             "effective_jobs": target.execution.get("effective_jobs", 1),
             "parallel_backend": target.execution.get("backend", "serial"),
