@@ -72,6 +72,36 @@ def test_retained_variant_mask_rejects_non_hard_call_dosages():
         )
 
 
+def test_retained_variant_mask_chunked_sample_index_matches_literal_contract():
+    X = np.array(
+        [
+            [1.0, 0.0, np.nan, 0.0, 0.0, 0.0],
+            [1.0, 2.0, 1.0, 0.0, 1.0, np.nan],
+            [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            [2.0, 1.0, 2.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            [0.0, np.nan, np.nan, 0.0, 0.0, 0.0],
+        ]
+    )
+    sample_idx = np.array([5, 0, 3, 1])
+
+    mask, provenance = I.build_retained_variant_mask(
+        X,
+        sample_idx=sample_idx,
+        column_chunk_size=2,
+        call_rate_min=0.75,
+        maf_min=0.125,
+        mac_min=1,
+    )
+
+    expected = np.array([True, True, False, False, True, False])
+    np.testing.assert_array_equal(mask, expected)
+    assert provenance["n_samples"] == 4
+    assert provenance["n_variants_input"] == 6
+    assert provenance["n_variants_retained"] == 3
+    assert provenance["retained_variant_mask_sha256"] == _mask_sha256(expected)
+
+
 @pytest.mark.parametrize(
     ("mutator", "message"),
     [
@@ -275,7 +305,9 @@ def test_declarative_mask_labels_do_not_change_executable_prepared_digest():
     assert first.retained_variant_mask_identity["A"]["source"]["label"] == "cli"
 
 
-def test_cli_benchmark_mask_records_bind_samples_thresholds_and_bim(tmp_path):
+def test_cli_benchmark_mask_records_use_chunked_sample_index_and_bind_identity(
+    tmp_path, monkeypatch,
+):
     subdata, family, _phenotype, sample_idx, _masks = _mask_fixture()
     prefixes = {}
     for sub in family.subgenomes:
@@ -298,9 +330,22 @@ def test_cli_benchmark_mask_records_bind_samples_thresholds_and_bim(tmp_path):
         },
     }
 
+    original = I.build_retained_variant_mask
+    calls = []
+
+    def capture(X, **kwargs):
+        calls.append((X, kwargs.copy()))
+        return original(X, **kwargs)
+
+    monkeypatch.setattr(I, "build_retained_variant_mask", capture)
     records = I._build_benchmark_mask_records(config, subdata, sample_idx)
 
     expected_sample_hash = F._array_identity(sample_idx)["sha256"]
+    assert len(calls) == len(family.subgenomes)
+    for (X, kwargs), sub in zip(calls, family.subgenomes, strict=True):
+        assert X is subdata[sub].X
+        np.testing.assert_array_equal(kwargs["sample_idx"], sample_idx)
+        assert kwargs["column_chunk_size"] > 0
     for sub, record in records.items():
         assert record["panel_id"] == "REALG.TEST"
         assert record["subgenome"] == sub

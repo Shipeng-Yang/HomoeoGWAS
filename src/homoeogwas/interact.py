@@ -303,15 +303,35 @@ def scols_safe(M: np.ndarray) -> np.ndarray:
 def build_retained_variant_mask(
     X: np.ndarray,
     *,
+    sample_idx: np.ndarray | None = None,
+    column_chunk_size: int = 4_096,
     call_rate_min: float,
     maf_min: float,
     mac_min: float,
 ) -> tuple[np.ndarray, dict]:
     """Build the formal inclusive call-rate/MAF/MAC marker-QC mask."""
-    X = np.asarray(X, float)
+    X = np.asarray(X)
     if X.ndim != 2 or X.shape[0] < 1:
         raise ValueError(
             "marker-QC dosage matrix must be two-dimensional with samples")
+    if isinstance(column_chunk_size, bool) or not isinstance(
+        column_chunk_size, (int, np.integer)
+    ) or int(column_chunk_size) < 1:
+        raise ValueError("column_chunk_size must be an integer >= 1")
+    column_chunk_size = int(column_chunk_size)
+    if sample_idx is None:
+        selected_rows = None
+        n_samples = int(X.shape[0])
+    else:
+        selected_rows = np.asarray(sample_idx)
+        if selected_rows.ndim != 1 or selected_rows.size < 1:
+            raise ValueError("sample_idx must be a non-empty one-dimensional array")
+        if not np.issubdtype(selected_rows.dtype, np.integer):
+            raise ValueError("sample_idx must contain integer row indices")
+        selected_rows = selected_rows.astype(np.intp, copy=False)
+        if np.any(selected_rows < 0) or np.any(selected_rows >= X.shape[0]):
+            raise ValueError("sample_idx contains an out-of-bounds row index")
+        n_samples = int(selected_rows.size)
     call_rate_min = float(call_rate_min)
     maf_min = float(maf_min)
     mac_min = float(mac_min)
@@ -321,17 +341,30 @@ def build_retained_variant_mask(
         raise ValueError("maf_min must be finite and in [0, 0.5]")
     if not np.isfinite(mac_min) or mac_min < 0.0:
         raise ValueError("mac_min must be finite and non-negative")
-    finite = np.isfinite(X)
-    finite_values = X[finite]
-    if finite_values.size and not np.isin(finite_values, (0.0, 1.0, 2.0)).all():
-        raise ValueError("marker QC requires finite hard-call A1 dosages 0, 1 or 2")
-    n_called = finite.sum(axis=0)
-    allele_sum = np.where(finite, X, 0.0).sum(axis=0)
-    call_rate = n_called / X.shape[0]
+    n_variants = int(X.shape[1])
+    n_called = np.empty(n_variants, dtype=np.int64)
+    allele_sum = np.empty(n_variants, dtype=np.float64)
+    for start in range(0, n_variants, column_chunk_size):
+        stop = min(start + column_chunk_size, n_variants)
+        if selected_rows is None:
+            chunk = np.asarray(X[:, start:stop], dtype=np.float64)
+        else:
+            chunk = np.asarray(X[selected_rows, start:stop], dtype=np.float64)
+        finite = np.isfinite(chunk)
+        finite_values = chunk[finite]
+        if finite_values.size and not np.isin(
+            finite_values, (0.0, 1.0, 2.0)
+        ).all():
+            raise ValueError(
+                "marker QC requires finite hard-call A1 dosages 0, 1 or 2"
+            )
+        n_called[start:stop] = finite.sum(axis=0)
+        allele_sum[start:stop] = np.where(finite, chunk, 0.0).sum(axis=0)
+    call_rate = n_called / n_samples
     af = np.divide(
         allele_sum,
         2.0 * n_called,
-        out=np.full(X.shape[1], np.nan),
+        out=np.full(n_variants, np.nan),
         where=n_called > 0,
     )
     maf = np.minimum(af, 1.0 - af)
@@ -343,8 +376,8 @@ def build_retained_variant_mask(
     )
     mask_bytes = np.ascontiguousarray(retained, dtype=np.uint8).tobytes()
     return retained, {
-        "n_samples": int(X.shape[0]),
-        "n_variants_input": int(X.shape[1]),
+        "n_samples": n_samples,
+        "n_variants_input": n_variants,
         "n_variants_retained": int(retained.sum()),
         "call_rate_min": call_rate_min,
         "maf_min": maf_min,
@@ -3880,7 +3913,9 @@ def _build_benchmark_mask_records(
     records = {}
     for sub in interact_config["subgenomes"]:
         mask, qc = build_retained_variant_mask(
-            np.asarray(subdata[sub].X, float)[sample_idx],
+            subdata[sub].X,
+            sample_idx=sample_idx,
+            column_chunk_size=4_096,
             call_rate_min=0.90,
             maf_min=0.01,
             mac_min=5,

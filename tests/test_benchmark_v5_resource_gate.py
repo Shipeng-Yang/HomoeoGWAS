@@ -223,15 +223,25 @@ def test_track_rejects_an_unfrozen_context_before_scoring(
         track_omnib._snpxsnp_pair_ceiling(context)
 
 
-def test_comparator_measurement_uses_self_high_water_rss_backstop(monkeypatch):
+@pytest.mark.parametrize(
+    ("high_water_gib", "expected_parent_rss"),
+    [
+        ((8, 8), 100),
+        ((8, 9), 9 * GIB),
+    ],
+)
+def test_comparator_measurement_gates_high_water_to_operation_window(
+    monkeypatch, high_water_gib, expected_parent_rss,
+):
     from scripts.benchmarks.v201 import cli
 
     monkeypatch.setattr(cli, "_comparator_memory_snapshot", lambda _pid: (100, 200))
-    monkeypatch.setattr(cli, "_self_peak_rss_bytes", lambda: 8 * GIB)
+    high_water = iter(value * GIB for value in high_water_gib)
+    monkeypatch.setattr(cli, "_self_peak_rss_bytes", lambda: next(high_water))
     _result, measurement = cli._measure_comparator_operation(
         lambda: "done", sample_interval_seconds=0.001
     )
-    assert measurement["peak_parent_rss_bytes"] == 8 * GIB
+    assert measurement["peak_parent_rss_bytes"] == expected_parent_rss
     assert measurement["peak_aggregate_pss_bytes"] == 200
 
 

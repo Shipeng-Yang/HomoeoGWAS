@@ -231,6 +231,7 @@ def _measure_comparator_operation(
     wall_before = time.perf_counter()
     worker = threading.Thread(target=monitor, name="snpxsnp-resource-monitor")
     worker.start()
+    high_water_before = _self_peak_rss_bytes()
     try:
         result = operation()
     finally:
@@ -241,7 +242,9 @@ def _measure_comparator_operation(
     sample_once()
     if sample_error:
         raise RuntimeError("comparator resource monitor failed") from sample_error[0]
-    peak_parent_rss = max(peak_parent_rss, _self_peak_rss_bytes())
+    high_water_after = _self_peak_rss_bytes()
+    if high_water_after > high_water_before:
+        peak_parent_rss = max(peak_parent_rss, high_water_after)
     return result, {
         "scorer_cpu_seconds": max(0.0, cpu_after - cpu_before),
         "scorer_wall_seconds": max(0.0, wall_seconds),
