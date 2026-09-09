@@ -316,7 +316,7 @@ class ConditionalBank:
             raise ValueError("score and tested-family method sets must match")
         if (
             not isinstance(self.snpxsnp_evidence, Mapping)
-            or self.snpxsnp_evidence.get("schema") != "snpxsnp_raw_stream_v1"
+            or self.snpxsnp_evidence.get("schema") != "snpxsnp_raw_stream_v2"
             or self.snpxsnp_evidence.get("tested_pair_count")
             != self.score_bank.tested_family_sizes["snpxsnp"]
             or self.snpxsnp_evidence.get("member_ids")
@@ -1487,6 +1487,8 @@ def run_family_size_stress(
             calibration_snpxsnp.member_ids != target_snpxsnp.member_ids
             or calibration_snpxsnp.member_family_sha256
             != target_snpxsnp.member_family_sha256
+            or calibration_snpxsnp.input_family_sha256
+            != target_snpxsnp.input_family_sha256
         ):
             raise RuntimeError("family-size SNPxSNP response banks differ")
         calibration_map = dict(calibration_scores.p_by_method)

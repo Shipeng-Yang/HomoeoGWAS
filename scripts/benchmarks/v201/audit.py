@@ -1402,7 +1402,8 @@ def _snpxsnp_result_from_evidence(
 ) -> SNPxSNPScoreResult:
     expected_fields = {
         "schema", "hypothesis_unit", "member_ids", "group_memberships",
-        "member_family_sha256", "argmin_member_index", "offered_pair_count",
+        "member_family_sha256", "input_block_bindings", "input_family_sha256",
+        "argmin_member_index", "offered_pair_count",
         "design_nonestimable_pair_count", "tested_pair_count",
         "offered_pair_count_by_group", "design_nonestimable_pair_count_by_group",
         "tested_pair_count_by_group", "nonfinite_pair_score_count",
@@ -1411,7 +1412,7 @@ def _snpxsnp_result_from_evidence(
     if (
         not isinstance(evidence, Mapping)
         or set(evidence) != expected_fields
-        or evidence.get("schema") != "snpxsnp_raw_stream_v1"
+        or evidence.get("schema") != "snpxsnp_raw_stream_v2"
         or evidence.get("hypothesis_unit") != "snp_pair_within_group"
     ):
         raise BenchmarkAuditError("SNPxSNP streaming evidence is incomplete")
@@ -1431,6 +1432,8 @@ def _snpxsnp_result_from_evidence(
                 tuple(value) for value in evidence["group_memberships"]
             ),
             member_family_sha256=evidence["member_family_sha256"],
+            input_block_bindings=tuple(evidence["input_block_bindings"]),
+            input_family_sha256=evidence["input_family_sha256"],
             offered_pair_count=evidence["offered_pair_count"],
             design_nonestimable_pair_count=evidence["design_nonestimable_pair_count"],
             tested_pair_count=evidence["tested_pair_count"],
@@ -1661,6 +1664,8 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
     if (
         calibration_snpxsnp.get("member_family_sha256")
         != target_snpxsnp.get("member_family_sha256")
+        or calibration_snpxsnp.get("input_family_sha256")
+        != target_snpxsnp.get("input_family_sha256")
     ):
         raise BenchmarkAuditError("power SNPxSNP streaming families differ")
     if artifact.get("method_minima") != payload.get("calibration_minima_by_method"):

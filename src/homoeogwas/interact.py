@@ -1684,6 +1684,9 @@ def _batch_nested_f(
     p=1) so ACAT omits them rather than injecting a spurious large-p term."""
     from scipy.linalg import orth
 
+    Yw = np.asarray(Yw, dtype=np.float64)
+    Xred = np.asarray(Xred, dtype=np.float64)
+    Xadd = np.asarray(Xadd, dtype=np.float64)
     n = Yw.shape[0]
     Qr = orth(Xred)
     Xadd_r = Xadd - Qr @ (Qr.T @ Xadd) if Qr.size else Xadd
@@ -1695,19 +1698,32 @@ def _batch_nested_f(
     # Explicit residual norms avoid catastrophic cancellation from
     # ||Y||^2 - ||Q'Y||^2 when the fitted model explains almost all variation.
     if response_axis_stable:
-        def ordered_sum_rows(values: np.ndarray) -> np.ndarray:
-            work = np.array(values, dtype=float, copy=True)
-            np.add.accumulate(work, axis=0, out=work)
-            return work[-1]
+        def ordered_weighted_sum_rows(
+            weights: np.ndarray, values: np.ndarray,
+        ) -> np.ndarray:
+            # One float64 response-width accumulator fixes the sample reduction
+            # order without the old sample-by-response cumulative-sum copy.
+            # This intentionally uses an ordinary, non-compensated sum so that
+            # response partitioning cannot select a different BLAS reduction.
+            total = np.zeros(values.shape[1], dtype=np.float64)
+            for row in range(values.shape[0]):
+                total += weights[row] * values[row]
+            return total
+
+        def ordered_squared_sum_rows(values: np.ndarray) -> np.ndarray:
+            total = np.zeros(values.shape[1], dtype=np.float64)
+            for row in range(values.shape[0]):
+                total += values[row] * values[row]
+            return total
 
         def stable_projection(
             basis: np.ndarray, values: np.ndarray,
         ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
-            projection = np.zeros_like(values)
+            projection = np.zeros(values.shape, dtype=np.float64)
             coefficients = []
             for column in range(basis.shape[1]):
-                coefficient = ordered_sum_rows(
-                    basis[:, column, None] * values
+                coefficient = ordered_weighted_sum_rows(
+                    basis[:, column], values
                 )
                 projection += basis[:, column, None] * coefficient[None, :]
                 coefficients.append(coefficient)
@@ -1715,24 +1731,36 @@ def _batch_nested_f(
 
         reduced_fit, _ = stable_projection(Qr, Yw)
         Yres = Yw - reduced_fit
+        response_ss = ordered_squared_sum_rows(Yw)
+        reduced_residual_ss = ordered_squared_sum_rows(Yres)
         added_fit, added_coefficients = stable_projection(Qa, Yres)
         added_ss = np.zeros(Yw.shape[1], dtype=float)
         for coefficient in added_coefficients:
             added_ss += coefficient * coefficient
         full_resid = Yres - added_fit
-        rss_f = ordered_sum_rows(full_resid * full_resid)
+        rss_f = ordered_squared_sum_rows(full_resid)
     else:
         Yres = Yw - Qr @ (Qr.T @ Yw) if Qr.size else Yw.copy()
+        response_ss = (Yw ** 2).sum(0)
+        reduced_residual_ss = (Yres ** 2).sum(0)
         added_ss = ((Qa.T @ Yres) ** 2).sum(0)
         full_resid = Yres - Qa @ (Qa.T @ Yres)
         rss_f = (full_resid ** 2).sum(0)
+    relative_floor = np.finfo(np.float64).eps * max(1, n)
+    degenerate = (
+        ~np.isfinite(response_ss)
+        | ~np.isfinite(reduced_residual_ss)
+        | (response_ss <= 0.0)
+        | (reduced_residual_ss <= relative_floor * response_ss)
+    )
     denom = rss_f / dfd
     bad = denom <= 1e-300
     f = added_ss / dfn / np.where(bad, 1.0, denom)
     p = stats.f.sf(np.maximum(f, 0.0), dfn, dfd)
     # A truly perfect full-model fit with positive added signal has p=0;
     # an entirely degenerate response remains undefined.
-    return np.where(bad, np.where(added_ss > 1e-300, 0.0, np.nan), p)
+    result = np.where(bad, np.where(added_ss > 1e-300, 0.0, np.nan), p)
+    return np.where(degenerate, np.nan, result)
 
 
 def _bootstrap_minp_calibration(

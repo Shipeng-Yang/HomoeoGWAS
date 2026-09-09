@@ -1041,7 +1041,9 @@ def test_real_conditional_snpxsnp_group_rows_and_raw_family_are_distinct():
     assert len(checked["snpxsnp"]) == len(bank["family_ids"])
     assert bank["tested_family_sizes"]["snpxsnp"] > len(checked["snpxsnp"])
     evidence = bank["snpxsnp_evidence"]
-    assert evidence["schema"] == "snpxsnp_raw_stream_v1"
+    assert evidence["schema"] == "snpxsnp_raw_stream_v2"
+    assert len(evidence["input_block_bindings"]) > 0
+    assert len(evidence["input_family_sha256"]) == 64
     assert (
         evidence["offered_pair_count"]
         - evidence["design_nonestimable_pair_count"]
@@ -1057,6 +1059,20 @@ def test_conditional_snpxsnp_per_group_pair_counts_are_audited():
         design_hash="b" * 64, n_jobs=1,
     ).to_payload()
     bank["snpxsnp_evidence"]["tested_pair_count_by_group"][0] -= 1
+    failed, _ids = _validate_bank_envelope(bank, 2, "calibration")
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
+        _conditional_score_matrices(bank, 2, failed)
+
+
+def test_conditional_snpxsnp_input_block_binding_is_audited():
+    context = build_synthetic_omnib_context(n=72, groups=2, copies=3, seed=3)
+    bank = run_conditional_bank(
+        context, bank="calibration", count=2,
+        design_hash="d" * 64, n_jobs=1,
+    ).to_payload()
+    bank["snpxsnp_evidence"]["input_block_bindings"][0][
+        "dosage_sha256"
+    ] = "0" * 64
     failed, _ids = _validate_bank_envelope(bank, 2, "calibration")
     with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
         _conditional_score_matrices(bank, 2, failed)

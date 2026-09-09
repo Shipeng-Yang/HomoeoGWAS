@@ -173,6 +173,7 @@ def test_prepared_response_scoring_cannot_mutate_fixed_component_family():
 def test_response_banks_wider_than_microblock_are_partition_and_worker_invariant():
     subdata, family, phenotype, sample_idx, masks = _prepared_fixture()
     scores, expanded = _prepare(subdata, family, phenotype, sample_idx, masks)
+    assert not np.allclose(scores.W, np.eye(scores.W.shape[0]))
     responses = np.random.default_rng(942).normal(size=(phenotype.size, 31))
 
     serial = F.score_omnib_responses(

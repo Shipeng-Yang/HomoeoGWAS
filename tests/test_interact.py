@@ -1867,6 +1867,55 @@ def test_batched_nested_f_handles_duplicate_nuisance_columns():
     assert p_duplicated == pytest.approx(p_unique, rel=1e-11, abs=1e-12)
 
 
+def test_batched_nested_f_stable_path_normalizes_integer_and_float32_responses():
+    rng = np.random.default_rng(20260909)
+    n = 48
+    x = np.linspace(-1.0, 1.0, n)
+    reduced = np.column_stack((np.ones(n), x))
+    added = rng.normal(size=(n, 1))
+    integer = np.column_stack((np.arange(n) % 3, np.arange(n) % 5))
+    expected = I._batch_nested_f(
+        integer.astype(np.float64),
+        reduced,
+        added,
+        response_axis_stable=True,
+    )
+
+    observed_integer = I._batch_nested_f(
+        integer.astype(np.int64),
+        reduced,
+        added,
+        response_axis_stable=True,
+    )
+    observed_float32 = I._batch_nested_f(
+        integer.astype(np.float32),
+        reduced,
+        added,
+        response_axis_stable=True,
+    )
+
+    np.testing.assert_array_equal(observed_integer, expected)
+    np.testing.assert_array_equal(observed_float32, expected)
+
+
+def test_batched_nested_f_declares_reduced_model_explained_responses_degenerate():
+    rng = np.random.default_rng(20260910)
+    n = 48
+    x = np.linspace(-1.0, 1.0, n)
+    reduced = np.column_stack((np.ones(n), x))
+    added = rng.normal(size=(n, 1))
+    responses = np.column_stack((
+        np.full(n, 7.0),
+        reduced @ np.array([2.0, 3.0]),
+    ))
+
+    result = I._batch_nested_f(
+        responses, reduced, added, response_axis_stable=True,
+    )
+
+    assert np.isnan(result).all()
+
+
 def test_bootstrap_minp_degenerate_replicate_is_conservative():
     p_obs = np.array([0.01, 0.20])
     p_null = np.array([

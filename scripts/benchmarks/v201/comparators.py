@@ -292,6 +292,61 @@ def _snpxsnp_member_family_hash(
     return digest.hexdigest()
 
 
+def _is_lower_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+_SNPXSNP_INPUT_BLOCK_FIELDS = {
+    "subgenome",
+    "gene_id",
+    "sample_count",
+    "variant_count",
+    "source_column_indices_encoding",
+    "source_column_indices_sha256",
+    "dosage_encoding",
+    "dosage_sha256",
+    "binding_sha256",
+}
+
+
+def _snpxsnp_input_block_binding(
+    key: tuple[str, str],
+    source_columns: np.ndarray,
+    dosage: np.ndarray,
+) -> dict[str, object]:
+    columns = np.ascontiguousarray(source_columns, dtype="<i8")
+    values = np.ascontiguousarray(dosage, dtype="<f8")
+    identity: dict[str, object] = {
+        "subgenome": str(key[0]),
+        "gene_id": str(key[1]),
+        "sample_count": int(values.shape[0]),
+        "variant_count": int(values.shape[1]),
+        "source_column_indices_encoding": "little_endian_int64_c_order",
+        "source_column_indices_sha256": hashlib.sha256(
+            columns.tobytes(order="C")
+        ).hexdigest(),
+        "dosage_encoding": "little_endian_float64_c_order",
+        "dosage_sha256": hashlib.sha256(
+            values.tobytes(order="C")
+        ).hexdigest(),
+    }
+    identity["binding_sha256"] = _payload_hash(identity)
+    return identity
+
+
+def _snpxsnp_input_family_hash(
+    bindings: tuple[Mapping[str, object], ...],
+) -> str:
+    return _payload_hash({
+        "schema": "homoeogwas-snpxsnp-input-family-v1",
+        "blocks": [dict(record) for record in bindings],
+    })
+
+
 @dataclass(frozen=True)
 class SNPxSNPScoreResult:
     """Streaming raw SNP-product minima and their complete family provenance."""
@@ -301,6 +356,8 @@ class SNPxSNPScoreResult:
     member_ids: tuple[str, ...]
     group_memberships: tuple[tuple[int, ...], ...]
     member_family_sha256: str
+    input_block_bindings: tuple[Mapping[str, object], ...]
+    input_family_sha256: str
     offered_pair_count: int
     design_nonestimable_pair_count: int
     tested_pair_count: int
@@ -327,6 +384,47 @@ class SNPxSNPScoreResult:
                 raise ValueError("invalid SNPxSNP member group membership")
             memberships.append(tuple(int(index) for index in membership))
         group_memberships = tuple(memberships)
+        try:
+            input_bindings = tuple(dict(record) for record in self.input_block_bindings)
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid SNPxSNP input-block bindings") from error
+        block_keys = []
+        for record in input_bindings:
+            identity = {
+                key: value for key, value in record.items()
+                if key != "binding_sha256"
+            }
+            if (
+                set(record) != _SNPXSNP_INPUT_BLOCK_FIELDS
+                or not isinstance(record["subgenome"], str)
+                or not record["subgenome"]
+                or not isinstance(record["gene_id"], str)
+                or not record["gene_id"]
+                or isinstance(record["sample_count"], bool)
+                or not isinstance(record["sample_count"], Integral)
+                or int(record["sample_count"]) < 1
+                or isinstance(record["variant_count"], bool)
+                or not isinstance(record["variant_count"], Integral)
+                or int(record["variant_count"]) < 1
+                or record["source_column_indices_encoding"]
+                != "little_endian_int64_c_order"
+                or record["dosage_encoding"]
+                != "little_endian_float64_c_order"
+                or not _is_lower_sha256(record["source_column_indices_sha256"])
+                or not _is_lower_sha256(record["dosage_sha256"])
+                or record["binding_sha256"] != _payload_hash(identity)
+            ):
+                raise ValueError("invalid SNPxSNP input-block bindings")
+            block_keys.append((record["subgenome"], record["gene_id"]))
+        if (
+            not input_bindings
+            or tuple(block_keys) != tuple(sorted(block_keys))
+            or len(block_keys) != len(set(block_keys))
+            or not _is_lower_sha256(self.input_family_sha256)
+            or self.input_family_sha256
+            != _snpxsnp_input_family_hash(input_bindings)
+        ):
+            raise ValueError("invalid SNPxSNP input-family binding")
         group_count = len(self.offered_pair_count_by_group)
         counts = (
             self.offered_pair_count,
@@ -422,15 +520,24 @@ class SNPxSNPScoreResult:
         object.__setattr__(self, "argmin_member_index", argmin)
         object.__setattr__(self, "member_ids", member_ids)
         object.__setattr__(self, "group_memberships", group_memberships)
+        object.__setattr__(
+            self,
+            "input_block_bindings",
+            tuple(MappingProxyType(record) for record in input_bindings),
+        )
         object.__setattr__(self, "failed_response_indices", failed)
 
     def evidence_payload(self) -> dict[str, object]:
         return {
-            "schema": "snpxsnp_raw_stream_v1",
+            "schema": "snpxsnp_raw_stream_v2",
             "hypothesis_unit": "snp_pair_within_group",
             "member_ids": list(self.member_ids),
             "group_memberships": [list(value) for value in self.group_memberships],
             "member_family_sha256": self.member_family_sha256,
+            "input_block_bindings": [
+                dict(record) for record in self.input_block_bindings
+            ],
+            "input_family_sha256": self.input_family_sha256,
             "argmin_member_index": self.argmin_member_index.tolist(),
             "offered_pair_count": self.offered_pair_count,
             "design_nonestimable_pair_count": self.design_nonestimable_pair_count,
@@ -673,6 +780,25 @@ def score_snpxsnp_family(
             )
         checked_blocks[key] = values
 
+    checked_columns: dict[tuple[str, str], np.ndarray] = {}
+    for key in sorted(required):
+        columns = np.asarray(scores.gated_snp[key], dtype=int)
+        block = checked_blocks[key]
+        if (
+            columns.shape != (block.shape[1],)
+            or np.any(columns < 0)
+            or np.unique(columns).size != columns.size
+        ):
+            raise ValueError("gated SNP indices do not match genotype blocks")
+        checked_columns[key] = columns
+    input_bindings = tuple(
+        _snpxsnp_input_block_binding(
+            key, checked_columns[key], checked_blocks[key]
+        )
+        for key in sorted(required)
+    )
+    input_family_sha256 = _snpxsnp_input_family_hash(input_bindings)
+
     groups_by_edge = [
         tuple(
             group_index
@@ -691,17 +817,8 @@ def score_snpxsnp_family(
         right_key = (edge.sub_y, edge.gene_y)
         left = checked_blocks[left_key]
         right = checked_blocks[right_key]
-        left_columns = np.asarray(scores.gated_snp[left_key], dtype=int)
-        right_columns = np.asarray(scores.gated_snp[right_key], dtype=int)
-        if (
-            left_columns.shape != (left.shape[1],)
-            or right_columns.shape != (right.shape[1],)
-            or np.any(left_columns < 0)
-            or np.any(right_columns < 0)
-            or np.unique(left_columns).size != left_columns.size
-            or np.unique(right_columns).size != right_columns.size
-        ):
-            raise ValueError("gated SNP indices do not match genotype blocks")
+        left_columns = checked_columns[left_key]
+        right_columns = checked_columns[right_key]
         memberships = groups_by_edge[edge_index]
         pair_count = int(left.shape[1] * right.shape[1])
         offered_pair_count += pair_count
@@ -796,6 +913,8 @@ def score_snpxsnp_family(
         member_ids=tuple(member_ids),
         group_memberships=tuple(group_memberships),
         member_family_sha256=member_digest.hexdigest(),
+        input_block_bindings=input_bindings,
+        input_family_sha256=input_family_sha256,
         offered_pair_count=offered_pair_count,
         design_nonestimable_pair_count=design_nonestimable_pair_count,
         tested_pair_count=tested_pair_count,

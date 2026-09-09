@@ -36,6 +36,8 @@ def _family():
 def _three_copy_shared_edge_fixture():
     rng = np.random.default_rng(9210)
     n = 56
+    rotation, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    W = (rotation * np.linspace(0.7, 1.3, n)) @ rotation.T
     a_marker = rng.binomial(2, 0.31, n).astype(float)
     blocks = {
         ("A", "a0"): np.column_stack((a_marker, a_marker)),
@@ -55,7 +57,7 @@ def _three_copy_shared_edge_fixture():
         edge_components_obs=np.empty((len(expanded.edges), 3)),
         edge_estimable=np.ones(len(expanded.edges), dtype=bool),
         group_estimable=np.ones(len(family.group_ids), dtype=bool),
-        W=np.eye(n),
+        W=W,
         y=np.zeros(n),
         covariance_components={"e": 1.0},
         null_design=np.ones((n, 1)),
@@ -108,7 +110,10 @@ def test_streamed_raw_score_matches_direct_nested_f_and_counts_skips():
         assert design is not None
         direct.append(
             interact_module._batch_nested_f(
-                scores.W @ responses, design[0], design[1]
+                scores.W @ responses,
+                design[0],
+                design[1],
+                response_axis_stable=True,
             )
         )
     expected = np.min(np.vstack(direct), axis=0, keepdims=True)
@@ -274,8 +279,91 @@ def test_missing_gated_snp_identity_fails_closed():
         )
 
 
+def test_dosage_bytes_are_bound_separately_from_member_family_identity():
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    first = comparator_module.score_snpxsnp_family(
+        scores, family, expanded, blocks, responses[:, :2], max_offered_pairs=12,
+    )
+    changed_blocks = {key: value.copy() for key, value in blocks.items()}
+    changed_blocks[("D", "d1")][0, 0] = (
+        2.0 - changed_blocks[("D", "d1")][0, 0]
+    )
+    second = comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        changed_blocks,
+        responses[:, :2],
+        max_offered_pairs=12,
+    )
+
+    assert first.member_family_sha256 == second.member_family_sha256
+    assert first.input_family_sha256 != second.input_family_sha256
+    first_bindings = {
+        (record["subgenome"], record["gene_id"]): record["binding_sha256"]
+        for record in first.input_block_bindings
+    }
+    second_bindings = {
+        (record["subgenome"], record["gene_id"]): record["binding_sha256"]
+        for record in second.input_block_bindings
+    }
+    assert first_bindings[("D", "d1")] != second_bindings[("D", "d1")]
+    assert {
+        key for key in first_bindings if first_bindings[key] != second_bindings[key]
+    } == {("D", "d1")}
+
+
+def test_shared_edge_nonestimable_and_nonfinite_counts_are_membership_aware(
+    monkeypatch,
+):
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    original_design = comparator_module._nested_snp_product_design
+    design_calls = 0
+
+    def first_pair_nonestimable(*args):
+        nonlocal design_calls
+        design_calls += 1
+        if design_calls == 1:
+            return None
+        return original_design(*args)
+
+    original_score = interact_module._batch_nested_f
+    score_calls = 0
+
+    def first_tested_pair_has_one_nonfinite(*args, **kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        values = original_score(*args, **kwargs)
+        if score_calls == 1:
+            values = values.copy()
+            values[1] = np.nan
+        return values
+
+    monkeypatch.setattr(
+        comparator_module, "_nested_snp_product_design", first_pair_nonestimable,
+    )
+    monkeypatch.setattr(
+        interact_module, "_batch_nested_f", first_tested_pair_has_one_nonfinite,
+    )
+    result = comparator_module.score_snpxsnp_family(
+        scores, family, expanded, blocks, responses[:, :3], max_offered_pairs=12,
+    )
+
+    assert result.offered_pair_count == 12
+    assert result.design_nonestimable_pair_count == 1
+    assert result.tested_pair_count == 11
+    assert result.offered_pair_count_by_group == (8, 8)
+    assert result.design_nonestimable_pair_count_by_group == (1, 1)
+    assert result.tested_pair_count_by_group == (7, 7)
+    assert result.nonfinite_pair_score_count == 1
+    assert result.nonfinite_pair_score_count_by_group == (1, 1)
+    assert result.failed_response_indices == (1,)
+    assert np.isnan(result.group_p[:, 1]).all()
+
+
 def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invariance():
     scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    assert not np.allclose(scores.W, np.eye(scores.W.shape[0]))
     assert expanded.group_edge_indices == ((0, 1, 2), (0, 3, 4))
     assert expanded.edges[0].source_group_ids == ("g0", "g1")
 
@@ -295,8 +383,8 @@ def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invarianc
     assert result.design_nonestimable_pair_count_by_group == (0, 0)
     assert result.tested_pair_count_by_group == (8, 8)
     assert result.group_memberships[:4] == ((0, 1),) * 4
-    assert result.member_family_sha256 == comparator_module._snpxsnp_member_family_hash(
-        result.member_ids, result.group_memberships
+    assert result.member_family_sha256 == (
+        "663d054a4d04a5252d62dd2cbafc61d7d018f5e8d0bc8007e7faab4d2e72f75d"
     )
 
     expected_p = np.full_like(result.group_p, np.inf)
@@ -321,7 +409,10 @@ def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invarianc
                 )
                 assert design is not None
                 pair_p = interact_module._batch_nested_f(
-                    scores.W @ responses, design[0], design[1]
+                    scores.W @ responses,
+                    design[0],
+                    design[1],
+                    response_axis_stable=True,
                 )
                 member_id = f"{edge.edge_id}|{int(left_id)}|{int(right_id)}"
                 for group_index in memberships:

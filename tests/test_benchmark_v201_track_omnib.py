@@ -376,7 +376,7 @@ def test_independent_banks_have_disjoint_responses_and_equal_identities(tiny_con
     assert evaluation.response_hash != evaluation.calibration_reference["response_hash"]
     assert evaluation.calibration_reference["shares_memory"] is False
     assert evaluation.calibration_reference["response_hash"] == calibration.response_hash
-    assert calibration.snpxsnp_evidence["schema"] == "snpxsnp_raw_stream_v1"
+    assert calibration.snpxsnp_evidence["schema"] == "snpxsnp_raw_stream_v2"
     assert (
         calibration.snpxsnp_evidence["member_family_sha256"]
         == evaluation.snpxsnp_evidence["member_family_sha256"]
