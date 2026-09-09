@@ -473,6 +473,29 @@ def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invarianc
     )
 
 
+def test_snpxsnp_production_explicitly_requests_stable_response_axis(monkeypatch):
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    original = interact_module._batch_nested_f
+    stable_flags = []
+
+    def recording_score(*args, **kwargs):
+        stable_flags.append(kwargs.get("response_axis_stable"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(interact_module, "_batch_nested_f", recording_score)
+    comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        blocks,
+        responses[:, :2],
+        max_offered_pairs=12,
+    )
+
+    assert stable_flags
+    assert all(flag is True for flag in stable_flags)
+
+
 def test_one_member_fixture_is_only_a_legacy_compatibility_limit():
     """One tested member is the narrow limit where both calibrations agree."""
     rng = np.random.default_rng(9207)

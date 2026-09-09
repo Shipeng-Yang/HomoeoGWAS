@@ -1,5 +1,7 @@
 """Fixed-family and shared-preparation contracts for v5 omniB."""
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -310,3 +312,97 @@ def test_noncheckpoint_result_serializes_recomputable_prepared_identity():
         F.PREPARED_SCORE_ALGORITHM
     )
     assert result.model_diagnostics["evidence_role"] == "formal"
+
+
+def test_prepared_scorer_declares_reduced_model_explained_response_degenerate():
+    rng = np.random.default_rng(20260909)
+    n = 48
+    reduced = np.column_stack((np.ones(n), np.linspace(-1.0, 1.0, n)))
+    Qr, _ = np.linalg.qr(reduced)
+    added = rng.normal(size=n)
+    added -= Qr @ (Qr.T @ added)
+    Qa = (added / np.linalg.norm(added))[:, None]
+    responses = np.column_stack((
+        Qr[:, 0],
+        Qr[:, 0] + 1.0e-16 * rng.normal(size=n),
+        rng.normal(size=n),
+    ))
+
+    observed = F._prepared_components_over_Y(
+        responses,
+        ((Qr, Qa, Qr.shape[1], Qa.shape[1], n - Qr.shape[1] - Qa.shape[1]),),
+    )
+
+    assert np.isnan(observed[0, :2]).all()
+    assert np.isfinite(observed[0, 2])
+    assert F.PREPARED_SCORE_ALGORITHM == "homoeogwas-omnib-prepared-response-v4"
+
+
+def test_benchmark_formal_result_requires_and_serializes_launch_identity():
+    subdata, family, phenotype, sample_idx, masks = _prepared_fixture()
+    sample_hash = F._array_identity(sample_idx)["sha256"]
+    mask_records = {
+        sub: {
+            "mask": mask,
+            "sha256": hashlib.sha256(
+                np.ascontiguousarray(mask, dtype=np.uint8).tobytes()
+            ).hexdigest(),
+            "panel_id": "REALG.TEST",
+            "sample_context": "full",
+            "subgenome": sub,
+            "ordered_sample_index_sha256": sample_hash,
+            "source_BIM_sha256": sub.lower() * 64,
+            "input_variant_count": 6,
+            "thresholds": {
+                "call_rate_min": 0.90,
+                "maf_min": 0.01,
+                "mac_min": 5,
+            },
+            "retained_variant_count": 6,
+            "retained_variant_mask_encoding": "uint8_input_variant_order",
+        }
+        for sub, mask in masks.items()
+    }
+    launch_context = {
+        "raw_config_sha256": "1" * 64,
+        "pre_run_manifest_sha256": "2" * 64,
+        "pre_run_manifest_schema": "homoeogwas-group-omnib-pre-run-manifest-v1",
+        "source_identity": {"git_commit": "3" * 40},
+        "runtime_fingerprint": {"python": "test"},
+    }
+
+    with pytest.raises(ValueError, match="verified launch context"):
+        F.run_group_scan_omnib(
+            subdata,
+            family,
+            phenotype,
+            sample_idx,
+            feature_seed=17,
+            evidence_role="benchmark_formal",
+            retained_variant_masks=mask_records,
+            bootstrap_B=1,
+            n_jobs=1,
+            grm_method="grm_from_X",
+            min_snp=3,
+        )
+
+    result = F.run_group_scan_omnib(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        feature_seed=17,
+        evidence_role="benchmark_formal",
+        checkpoint_manifest_context=launch_context,
+        retained_variant_masks=mask_records,
+        bootstrap_B=1,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        min_snp=3,
+    )
+
+    serialized = result.model_diagnostics["verified_launch"]
+    assert serialized["context"] == launch_context
+    assert serialized["sha256"] == F._text_identity(launch_context)
+    launch_context["source_identity"]["git_commit"] = "4" * 40
+    assert serialized["context"]["source_identity"]["git_commit"] == "3" * 40

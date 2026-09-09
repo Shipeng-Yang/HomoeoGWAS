@@ -1525,6 +1525,16 @@ def test_family_size_audit_recomputes_response_level_fwer():
     )
     with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
         _audit_families_and_parallel(detached_evidence)
+    detached_calibration = copy.deepcopy(payload)
+    detached_calibration["snpxsnp_calibration_evidence"][
+        "input_family_sha256"
+    ] = "0" * 64
+    detached_calibration_evidence = SimpleNamespace(
+        shards=((Path("family-calibration-detached.json"), detached_calibration),),
+        registry=(scenario,),
+    )
+    with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
+        _audit_families_and_parallel(detached_calibration_evidence)
     failure_detached = copy.deepcopy(payload)
     failure_detached["target_response_failures"][
         "failed_response_indices_by_method"

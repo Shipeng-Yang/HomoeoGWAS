@@ -316,9 +316,9 @@ def validate_comparator_probe_series(
         raise ValueError("comparator probes do not use the same frozen context")
     per_response_5 = by_width[5].scorer_wall_seconds / 5
     per_response_20 = by_width[20].scorer_wall_seconds / 20
-    relative_deviation = abs(per_response_20 - per_response_5) / per_response_5
-    if relative_deviation > COMPARATOR_TIME_PER_RESPONSE_TOLERANCE:
-        raise ValueError("comparator probe time per response differs by more than 20%")
+    relative_growth = (per_response_20 - per_response_5) / per_response_5
+    if relative_growth > COMPARATOR_TIME_PER_RESPONSE_TOLERANCE:
+        raise ValueError("comparator probe time per response worsens by more than 20%")
     limit = comparator_resource_limit(
         anchor.panel_id, family_size=anchor.family_size, copies=anchor.copies,
     )
@@ -399,7 +399,8 @@ def validate_comparator_probe_series(
         "family_size": anchor.family_size,
         "response_widths": list(COMPARATOR_PROBE_WIDTHS),
         "target_response_count": COMPARATOR_TARGET_RESPONSE_COUNT,
-        "time_per_response_relative_deviation_5_vs_20": relative_deviation,
+        "time_per_response_growth_5_to_20": relative_growth,
+        "time_amortization_observed": relative_growth < 0.0,
         "safety_factor": safety,
         "memory_projection_models": {
             "peak_parent_rss_bytes": parent_model,

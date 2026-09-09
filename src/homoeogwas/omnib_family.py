@@ -15,7 +15,7 @@ from .parallel import run_fork_blocks
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
-PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v3"
+PREPARED_SCORE_ALGORITHM = "homoeogwas-omnib-prepared-response-v4"
 FEATURE_SEED_SCHEME = "homoeogwas-feature-v1"
 COMPONENT_RANK_ATOL = 1.0e-10
 COMPONENT_RANK_ALGORITHM = "normalized-joint-svd-absolute-v2"
@@ -1402,6 +1402,8 @@ def _prepared_components_over_Y(Yw, prepared):
     """Score a response block with fixed, column-independent reduction order."""
     from scipy import stats
 
+    from . import interact as I
+
     Yw = np.asarray(Yw, float)
     output = np.full((len(prepared), Yw.shape[1]), np.nan)
     for component, (Qr, Qa, _rank_reduced, dfn, dfd) in enumerate(prepared):
@@ -1414,6 +1416,15 @@ def _prepared_components_over_Y(Yw, prepared):
                 "ij,jk->ik", Qr, reduced_coef, optimize=False)
         else:
             y_residual = Yw.copy()
+        response_ss = np.einsum(
+            "ij,ij->j", Yw, Yw, optimize=False)
+        reduced_residual_ss = np.einsum(
+            "ij,ij->j", y_residual, y_residual, optimize=False)
+        degenerate = I._reduced_response_degeneracy(
+            response_ss,
+            reduced_residual_ss,
+            n_samples=Yw.shape[0],
+        )
         added_coef = np.einsum(
             "ij,ik->jk", Qa, y_residual, optimize=False)
         added_ss = np.einsum(
@@ -1426,8 +1437,9 @@ def _prepared_components_over_Y(Yw, prepared):
         bad = denominator <= 1e-300
         f_stat = added_ss / dfn / np.where(bad, 1.0, denominator)
         p_value = stats.f.sf(np.maximum(f_stat, 0.0), dfn, dfd)
-        output[component] = np.where(
+        result = np.where(
             bad, np.where(added_ss > 1e-300, 0.0, np.nan), p_value)
+        output[component] = np.where(degenerate, np.nan, result)
     return output
 
 
@@ -1894,6 +1906,29 @@ def run_group_scan_omnib(
         raise ValueError(
             f"{evidence_role} evidence requires an explicit feature_seed"
         )
+    verified_launch_context = None
+    if evidence_role == "benchmark_formal":
+        required_launch_fields = {
+            "raw_config_sha256",
+            "pre_run_manifest_sha256",
+            "pre_run_manifest_schema",
+            "source_identity",
+            "runtime_fingerprint",
+        }
+        if (
+            not isinstance(checkpoint_manifest_context, Mapping)
+            or not required_launch_fields.issubset(checkpoint_manifest_context)
+        ):
+            raise ValueError(
+                "benchmark_formal evidence requires a verified launch context"
+            )
+        verified_launch_context = deepcopy(checkpoint_manifest_context)
+    elif evidence_role == "formal" and isinstance(
+        checkpoint_manifest_context, Mapping
+    ):
+        verified_launch_context = deepcopy(checkpoint_manifest_context)
+    if verified_launch_context is not None:
+        checkpoint_manifest_context = verified_launch_context
     if evidence_role.startswith("benchmark_"):
         _require_benchmark_mask_bindings(
             retained_variant_masks, family, np.asarray(sample_idx, int)
@@ -2178,6 +2213,11 @@ def run_group_scan_omnib(
             "null_fit_sha256": scores.null_fit_sha256,
         },
     }
+    if verified_launch_context is not None:
+        model_diagnostics["verified_launch"] = {
+            "context": verified_launch_context,
+            "sha256": _text_identity(verified_launch_context),
+        }
     if checkpoint_metadata is not None:
         model_diagnostics["resampling_checkpoint"] = checkpoint_metadata
     return _interact_result(

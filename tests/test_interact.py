@@ -1889,6 +1889,57 @@ def test_ordered_weighted_sum_has_a_high_precision_error_bound():
     assert np.all(np.abs(observed - reference) <= error_bound)
 
 
+def test_ordered_reducers_use_bounded_row_microblocks(monkeypatch):
+    rng = np.random.default_rng(20260909)
+    n = 2 * I.STABLE_ROW_MICROBLOCK + 7
+    weights = rng.normal(size=n)
+    values = rng.normal(size=(n, 5))
+    original = np.einsum
+    calls = []
+
+    def recording_einsum(subscripts, *operands, **kwargs):
+        calls.append((subscripts, tuple(value.shape for value in operands)))
+        return original(subscripts, *operands, **kwargs)
+
+    monkeypatch.setattr(I.np, "einsum", recording_einsum)
+    weighted = I._ordered_weighted_sum_rows(weights, values)
+    squared = I._ordered_squared_sum_rows(values)
+
+    expected_calls_per_reducer = 3
+    assert [record[0] for record in calls] == (
+        ["i,ij->j"] * expected_calls_per_reducer
+        + ["ij,ij->j"] * expected_calls_per_reducer
+    )
+    assert all(
+        shapes[0][0] == I.STABLE_ROW_MICROBLOCK
+        for _subscripts, shapes in calls
+    )
+    np.testing.assert_allclose(weighted, weights @ values, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(squared, (values * values).sum(axis=0), rtol=1e-13)
+
+
+def test_ordered_squared_sum_has_a_high_precision_error_bound():
+    rng = np.random.default_rng(20260910)
+    values = rng.normal(size=(257, 4)) * np.array(
+        [1.0, 1.0e8, 1.0e-8, 1.0e150]
+    )
+
+    observed = I._ordered_squared_sum_rows(values)
+    reference = np.array([
+        math.fsum(
+            float(values[row, column]) ** 2
+            for row in range(values.shape[0])
+        )
+        for column in range(values.shape[1])
+    ])
+    absolute_terms = np.sum(np.abs(values * values), axis=0)
+    error_bound = (
+        np.finfo(np.float64).eps * values.shape[0] * absolute_terms
+    )
+
+    assert np.all(np.abs(observed - reference) <= error_bound)
+
+
 def test_batched_nested_f_stable_path_normalizes_integer_and_float32_responses():
     rng = np.random.default_rng(20260909)
     n = 48

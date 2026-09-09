@@ -1587,7 +1587,12 @@ def run_family_size_stress(
         },
         "tested_family_hashes": tested_hashes,
         **(
-            {"snpxsnp_evidence": target_snpxsnp.evidence_payload()}
+            {
+                "snpxsnp_calibration_evidence": (
+                    calibration_snpxsnp.evidence_payload()
+                ),
+                "snpxsnp_evidence": target_snpxsnp.evidence_payload(),
+            }
             if family_size <= 80 else {}
         ),
         "score_hypothesis_units": {
@@ -3744,10 +3749,50 @@ def run_encoding_check(
                     for value in record["top_k_jaccard_by_method"]["omnib"]
                 ]
                 fwer_value = float(np.mean(heldout_decisions["omnib"]))
+                calibration_failure_record = _response_failure_record(
+                    calibration_failure_masks,
+                    response_count=calibration_count,
+                    response_role="calibration",
+                    failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                )
+                heldout_failure_record = _response_failure_record(
+                    heldout_failure_masks,
+                    response_count=response_count,
+                    response_role="heldout",
+                    failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                )
+                failure_records = [
+                    calibration_failure_record,
+                    heldout_failure_record,
+                    *[
+                        failure_record
+                        for arm in strata.values()
+                        for failure_record in (
+                            arm["response_failures"],
+                            arm["baseline_response_failures"],
+                        )
+                    ],
+                ]
+                within_failure_ceiling = all(
+                    record["within_failure_ceiling"] is True
+                    for record in failure_records
+                )
                 robustness[name] = {
-                    "status": "completed",
-                    "error_type": None,
-                    "message": None,
+                    "status": (
+                        "completed"
+                        if within_failure_ceiling
+                        else "failed_response_ceiling"
+                    ),
+                    "error_type": (
+                        None
+                        if within_failure_ceiling
+                        else "ResponseFailureCeilingExceeded"
+                    ),
+                    "message": (
+                        None
+                        if within_failure_ceiling
+                        else "robustness response failure rate exceeds 1%"
+                    ),
                     "rank_correlation": (
                         float(np.mean(finite_correlations))
                         if finite_correlations else None
@@ -3782,12 +3827,7 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in calibration_scores.items()
                         },
-                        "response_failures": _response_failure_record(
-                            calibration_failure_masks,
-                            response_count=calibration_count,
-                            response_role="calibration",
-                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
-                        ),
+                        "response_failures": calibration_failure_record,
                         **(
                             {"qa_cutoffs_by_method": thresholds}
                             if qa_only else {"thresholds": thresholds}
@@ -3804,12 +3844,7 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in heldout_scores.items()
                         },
-                        "response_failures": _response_failure_record(
-                            heldout_failure_masks,
-                            response_count=response_count,
-                            response_role="heldout",
-                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
-                        ),
+                        "response_failures": heldout_failure_record,
                         **(
                             {"qa_rejections_by_method": {
                                 method: values.tolist()
@@ -3876,6 +3911,12 @@ def run_encoding_check(
         all(bool(check[field]) for field in exact_fields)
         for check in required_checks
     )
+    failed_robustness_checks = sorted(
+        name
+        for name, record in robustness.items()
+        if record.get("status") != "completed"
+    )
+    overall_failed = not all_required_exact or bool(failed_robustness_checks)
     return _json_safe(
         {
             **_base_replicate_payload(
@@ -3906,9 +3947,13 @@ def run_encoding_check(
             "exact_checks": exact_checks,
             "all_required_exact": all_required_exact,
             "failure": {
-                "failed": not all_required_exact,
+                "failed": overall_failed,
                 "status": (
-                    "completed" if all_required_exact else "failed_exact_invariance"
+                    "failed_exact_invariance"
+                    if not all_required_exact
+                    else "failed_robustness"
+                    if failed_robustness_checks
+                    else "completed"
                 ),
                 "failed_checks": [
                     name
@@ -3916,6 +3961,7 @@ def run_encoding_check(
                     if check["required"]
                     and not all(bool(check[field]) for field in exact_fields)
                 ],
+                "failed_robustness_checks": failed_robustness_checks,
             },
             "robustness_checks": robustness,
             "robustness_is_exact_invariance": False,

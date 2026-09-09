@@ -481,6 +481,12 @@ def test_robustness_preserves_bank_specific_method_failures(monkeypatch):
     )
 
     record = payload["robustness_checks"]["missingness_2pct"]
+    assert record["status"] == "failed_response_ceiling"
+    assert record["error_type"] == "ResponseFailureCeilingExceeded"
+    assert payload["failure"]["failed"] is True
+    assert payload["failure"]["failed_robustness_checks"] == [
+        "missingness_2pct"
+    ]
     assert record["calibration"]["response_failures"][
         "failed_response_indices_by_method"
     ]["minor_burden"] == [0]
@@ -502,6 +508,89 @@ def test_robustness_preserves_bank_specific_method_failures(monkeypatch):
     ]["omnib"] = []
     with pytest.raises(BenchmarkAuditError, match="response failure"):
         _audit_robustness_record("missingness_2pct", tampered, payload)
+
+    methods = tuple(record["heldout"]["p_by_method"])
+
+    def no_failures(count, role):
+        return T._response_failure_record(
+            {method: np.zeros(count, dtype=bool) for method in methods},
+            response_count=count,
+            response_role=role,
+            failure_rate_max=0.01,
+        )
+
+    def column_minima(rows):
+        values = np.asarray(rows, dtype=float)
+        finite = np.isfinite(values)
+        minima = np.where(finite, values, np.inf).min(axis=0)
+        minima[~finite.any(axis=0)] = np.nan
+        return minima
+
+    coherent = deepcopy(record)
+    heldout = coherent["heldout"]
+    heldout["response_failures"] = no_failures(
+        len(heldout["response_ids"]), "heldout"
+    )
+    for method, rows in heldout["p_by_method"].items():
+        heldout["qa_rejections_by_method"][method] = (
+            column_minima(rows) < coherent["calibration"][
+                "qa_cutoffs_by_method"
+            ][method]
+        ).tolist()
+    coherent["qa_fwer"] = float(np.mean(
+        heldout["qa_rejections_by_method"]["omnib"]
+    ))
+    with pytest.raises(BenchmarkAuditError, match="undeclared non-estimable"):
+        _audit_robustness_record("missingness_2pct", coherent, payload)
+
+    coherent = deepcopy(record)
+    power_arm = coherent["qa_power_by_architecture"]["minor_burden_aligned"]
+    power_arm["response_failures"] = no_failures(
+        len(power_arm["response_ids"]), "power"
+    )
+    with pytest.raises(BenchmarkAuditError, match="undeclared non-estimable"):
+        _audit_robustness_record("missingness_2pct", coherent, payload)
+
+    coherent = deepcopy(record)
+    calibration = coherent["calibration"]
+    calibration["response_failures"] = no_failures(
+        len(calibration["response_ids"]), "calibration"
+    )
+    cutoffs = {}
+    for method, rows in calibration["p_by_method"].items():
+        minima = column_minima(rows)
+        index = int(np.floor(0.05 * (len(minima) + 1))) - 1
+        cutoffs[method] = float(np.sort(minima)[index])
+    calibration["qa_cutoffs_by_method"] = cutoffs
+    heldout = coherent["heldout"]
+    for method, rows in heldout["p_by_method"].items():
+        decisions = column_minima(rows) < cutoffs[method]
+        failed = heldout["response_failures"][
+            "failed_response_indices_by_method"
+        ][method]
+        decisions[np.asarray(failed, dtype=int)] = True
+        heldout["qa_rejections_by_method"][method] = decisions.tolist()
+    coherent["qa_fwer"] = float(np.mean(
+        heldout["qa_rejections_by_method"]["omnib"]
+    ))
+    family_ids = payload["family_ids"]
+    for arm in coherent["qa_power_by_architecture"].values():
+        causal_index = family_ids.index(arm["causal_group_ids"][0])
+        for method, rows in arm["p_by_method"].items():
+            decisions = np.asarray(rows, dtype=float)[causal_index] < cutoffs[method]
+            failed = arm["response_failures"][
+                "failed_response_indices_by_method"
+            ][method]
+            decisions[np.asarray(failed, dtype=int)] = False
+            arm["qa_detection_by_method"][method] = decisions.tolist()
+            arm["qa_power_by_method"][method] = float(np.mean(decisions))
+        powers = arm["qa_power_by_method"]
+        arm["qa_absolute_power_regret_by_method"]["omnib"] = abs(
+            powers["omnib"]
+            - max(powers["minor_burden"], powers["pc1"], powers["kernel_hadamard"])
+        )
+    with pytest.raises(BenchmarkAuditError, match="undeclared non-estimable"):
+        _audit_robustness_record("missingness_2pct", coherent, payload)
 
 
 def test_end_to_end_payload_serializes_observed_and_bootstrap_diagnostics():

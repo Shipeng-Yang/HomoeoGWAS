@@ -1831,6 +1831,34 @@ def _audited_method_failure_masks(
     return masks
 
 
+def _require_failure_masks_match_nonestimable(
+    scores: Mapping[str, np.ndarray],
+    masks: Mapping[str, np.ndarray],
+    *,
+    label: str,
+) -> None:
+    """Bind every response-failure mask to its serialized all-null columns."""
+
+    if set(scores) != set(masks):
+        raise BenchmarkAuditError(f"{label} response failure methods differ")
+    for method in sorted(scores):
+        values = np.asarray(scores[method], dtype=float)
+        failed = np.asarray(masks[method], dtype=bool)
+        nonestimable = ~np.isfinite(values).any(axis=0)
+        undeclared = np.flatnonzero(nonestimable & ~failed).astype(int).tolist()
+        if undeclared:
+            raise BenchmarkAuditError(
+                f"{label} has undeclared non-estimable responses for "
+                f"{method}: {undeclared}"
+            )
+        overdeclared = np.flatnonzero(failed & ~nonestimable).astype(int).tolist()
+        if overdeclared:
+            raise BenchmarkAuditError(
+                f"{label} declares estimable responses failed for "
+                f"{method}: {overdeclared}"
+            )
+
+
 def _audit_robustness_record(
     perturbation: str, record: Mapping[str, Any], payload: Mapping[str, Any],
 ) -> None:
@@ -1961,6 +1989,14 @@ def _audit_robustness_record(
     heldout_failures = failure_masks(
         heldout, response_count, response_role="heldout"
     )
+    _require_failure_masks_match_nonestimable(
+        calibration_scores, calibration_failures,
+        label="robustness calibration",
+    )
+    _require_failure_masks_match_nonestimable(
+        heldout_scores, heldout_failures,
+        label="robustness heldout",
+    )
     if set(calibration["response_ids"]) & set(heldout["response_ids"]):
         raise BenchmarkAuditError("robustness null banks overlap")
     thresholds = {}
@@ -1998,10 +2034,14 @@ def _audit_robustness_record(
         arm_failures = failure_masks(
             arm, response_count, response_role="power"
         )
-        failure_masks(
+        baseline_failures = failure_masks(
             {"response_failures": arm["baseline_response_failures"]},
             response_count,
             response_role="power",
+        )
+        _require_failure_masks_match_nonestimable(
+            scores, arm_failures,
+            label=f"robustness {architecture} power",
         )
         if set(calibration["response_ids"]) & set(arm["response_ids"]):
             raise BenchmarkAuditError("robustness power/calibration banks overlap")
@@ -2059,6 +2099,10 @@ def _audit_robustness_record(
                     "robustness baseline rank commitment is invalid"
                 )
             baseline = np.asarray(baseline_method, dtype=float)
+            _require_failure_masks_match_nonestimable(
+                {method: baseline}, {method: baseline_failures[method]},
+                label=f"robustness {architecture} baseline power",
+            )
             correlations: list[float | None] = []
             overlaps: list[float] = []
             for column in range(response_count):
@@ -2103,18 +2147,40 @@ def _audit_robustness_record(
         != float(np.mean(~np.isfinite(heldout_scores["omnib"])))
     ):
         raise BenchmarkAuditError("robustness aggregate metrics do not recompute")
+    failure_records = [
+        calibration["response_failures"],
+        heldout["response_failures"],
+        *[
+            failure_record
+            for arm in strata.values()
+            for failure_record in (
+                arm["response_failures"],
+                arm["baseline_response_failures"],
+            )
+        ],
+    ]
+    within_failure_ceiling = all(
+        record["within_failure_ceiling"] is True
+        for record in failure_records
+    )
+    expected_status = (
+        "completed" if within_failure_ceiling else "failed_response_ceiling"
+    )
+    if (
+        record.get("status") != expected_status
+        or (record.get("error_type") is None) is not within_failure_ceiling
+        or (record.get("message") is None) is not within_failure_ceiling
+        or (
+            not within_failure_ceiling
+            and record.get("error_type") != "ResponseFailureCeilingExceeded"
+        )
+    ):
+        raise BenchmarkAuditError("robustness response failure ceiling differs")
 
 
 def _finite_minimum_array(values: np.ndarray) -> np.ndarray:
     finite = np.isfinite(values)
     return np.where(finite.any(axis=0), np.where(finite, values, np.inf).min(axis=0), np.nan)
-
-
-def _finite_minima(values: np.ndarray) -> list[float]:
-    minima = _finite_minimum_array(values)
-    if not np.all(np.isfinite(minima)):
-        raise BenchmarkAuditError("robustness calibration has non-estimable responses")
-    return minima.tolist()
 
 
 def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
@@ -2586,11 +2652,24 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     )
                 snpxsnp_result = None
                 if "snpxsnp" in expected_methods:
+                    calibration_snpxsnp_result = _snpxsnp_result_from_evidence(
+                        payload.get("snpxsnp_calibration_evidence"),
+                        response_count=calibration_count,
+                    )
                     snpxsnp_result = _snpxsnp_result_from_evidence(
                         payload.get("snpxsnp_evidence"),
                         response_count=response_count,
                     )
                     if (
+                        calibration_snpxsnp_result.member_ids
+                        != snpxsnp_result.member_ids
+                        or calibration_snpxsnp_result.member_family_sha256
+                        != snpxsnp_result.member_family_sha256
+                        or calibration_snpxsnp_result.input_block_bindings
+                        != snpxsnp_result.input_block_bindings
+                        or calibration_snpxsnp_result.input_family_sha256
+                        != snpxsnp_result.input_family_sha256
+                        or
                         list(snpxsnp_result.member_ids)
                         != tested_members.get("snpxsnp")
                         or snpxsnp_result.tested_pair_count
@@ -2898,13 +2977,13 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     not isinstance(record, Mapping)
                     or set(record)
                     != (_ENCODING_ROBUSTNESS_SCHEMA_BASE | robustness_stage_fields)
-                    or record.get("status") not in {"completed", "failed"}
+                    or record.get("status") not in {
+                        "completed", "failed_response_ceiling", "failed",
+                    }
                     or not isinstance(record.get("note"), str)
                 ):
                     raise BenchmarkAuditError("encoding robustness schema is invalid")
-                if record["status"] == "completed":
-                    if record.get("error_type") is not None or record.get("message") is not None:
-                        raise BenchmarkAuditError("completed robustness record has an error")
+                if record["status"] in {"completed", "failed_response_ceiling"}:
                     _audit_robustness_record(perturbation, record, payload)
                 elif (
                     not isinstance(record.get("error_type"), str)
@@ -2934,6 +3013,47 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1
                 ):
                     raise BenchmarkAuditError("encoding robustness top_k is invalid")
+            failed_robustness_checks = sorted(
+                name
+                for name, record in robustness.items()
+                if record.get("status") != "completed"
+            )
+            failed_exact_checks = [
+                name
+                for name, check in checks.items()
+                if check["required"]
+                and not all(
+                    check[field] is True
+                    for field in (
+                        "observed_arrays_identical",
+                        "adjusted_decisions_identical",
+                        "ranking_hash_identical",
+                        "rejection_sets_identical",
+                    )
+                )
+            ]
+            expected_failed = bool(failed_exact_checks or failed_robustness_checks)
+            expected_status = (
+                "failed_exact_invariance"
+                if failed_exact_checks
+                else "failed_robustness"
+                if failed_robustness_checks
+                else "completed"
+            )
+            failure = payload.get("failure")
+            if (
+                not isinstance(failure, Mapping)
+                or set(failure) != {
+                    "failed", "status", "failed_checks",
+                    "failed_robustness_checks",
+                }
+                or failure.get("failed") is not expected_failed
+                or failure.get("status") != expected_status
+                or failure.get("failed_checks") != failed_exact_checks
+                or failure.get("failed_robustness_checks")
+                != failed_robustness_checks
+            ):
+                raise BenchmarkAuditError("encoding failure envelope differs")
 
 
 def _audit_scaling_scenario(

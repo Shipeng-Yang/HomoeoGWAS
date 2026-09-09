@@ -130,6 +130,18 @@ def test_probe_series_rejects_time_nonlinearity_and_safety_adjusted_memory():
         resource_contracts.validate_comparator_probe_series(memory)
 
 
+def test_probe_series_allows_fixed_cost_amortization_across_response_widths():
+    records = [_probe(width) for width in (1, 5, 20)]
+    records[0]["scorer_wall_seconds"] = 6.0
+    records[1]["scorer_wall_seconds"] = 10.0
+    records[2]["scorer_wall_seconds"] = 20.0
+
+    projection = resource_contracts.validate_comparator_probe_series(records)
+
+    assert projection["time_per_response_growth_5_to_20"] == pytest.approx(-0.5)
+    assert projection["time_amortization_observed"] is True
+
+
 def test_probe_series_projects_width_varying_memory_with_upper_envelope():
     records = [_probe(width) for width in (1, 5, 20)]
     base_parent = 1 * GIB

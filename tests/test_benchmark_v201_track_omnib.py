@@ -286,6 +286,14 @@ def test_family_size_stress_serializes_response_level_evidence():
         payload["tested_family_hashes"]["snpxsnp"]
         == payload["snpxsnp_evidence"]["member_family_sha256"]
     )
+    assert (
+        payload["snpxsnp_calibration_evidence"]["member_family_sha256"]
+        == payload["snpxsnp_evidence"]["member_family_sha256"]
+    )
+    assert (
+        payload["snpxsnp_calibration_evidence"]["input_family_sha256"]
+        == payload["snpxsnp_evidence"]["input_family_sha256"]
+    )
 
 
 @pytest.fixture(scope="module")

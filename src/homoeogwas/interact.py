@@ -1668,34 +1668,79 @@ def run_pair_scan(
                  "same hypotheses, so exactly one of them is inferential"))
 
 
+STABLE_ROW_MICROBLOCK = 256
+
+
+def _stable_row_microblocks(values: np.ndarray):
+    """Yield fixed-height, zero-padded sample-order blocks."""
+
+    for start in range(0, values.shape[0], STABLE_ROW_MICROBLOCK):
+        stop = min(start + STABLE_ROW_MICROBLOCK, values.shape[0])
+        block = values[start:stop]
+        if block.shape[0] != STABLE_ROW_MICROBLOCK:
+            padded = np.zeros(
+                (STABLE_ROW_MICROBLOCK, values.shape[1]), dtype=np.float64
+            )
+            padded[: block.shape[0]] = block
+            block = padded
+        yield start, stop, block
+
+
 def _ordered_weighted_sum_rows(
     weights: np.ndarray,
     values: np.ndarray,
 ) -> np.ndarray:
-    """Reduce in sample order with O(response-width) float64 scratch.
+    """Reduce fixed sample-order microblocks with bounded float64 scratch.
 
-    The ordinary, non-compensated accumulation deliberately fixes the row
-    order so response partitioning cannot select a different BLAS reduction.
-    Its rounding error is bounded by the standard sequential-sum error bound;
-    the benchmark tests that bound against ``math.fsum``.
+    The ordinary, non-compensated accumulation uses constant-height padded
+    blocks in a fixed order so response partitioning cannot select a different
+    reduction. Scratch is O(STABLE_ROW_MICROBLOCK * response_width), independent
+    of total sample count. The benchmark checks the standard sequential-sum
+    error bound against ``math.fsum``.
     """
 
     weights = np.asarray(weights, dtype=np.float64)
     values = np.asarray(values, dtype=np.float64)
     total = np.zeros(values.shape[1], dtype=np.float64)
-    for row in range(values.shape[0]):
-        total += weights[row] * values[row]
+    for start, stop, block in _stable_row_microblocks(values):
+        weight_block = weights[start:stop]
+        if weight_block.shape[0] != STABLE_ROW_MICROBLOCK:
+            padded = np.zeros(STABLE_ROW_MICROBLOCK, dtype=np.float64)
+            padded[: weight_block.shape[0]] = weight_block
+            weight_block = padded
+        total += np.einsum(
+            "i,ij->j", weight_block, block, optimize=False
+        )
     return total
 
 
 def _ordered_squared_sum_rows(values: np.ndarray) -> np.ndarray:
-    """Columnwise squared norm with fixed sample order and bounded scratch."""
+    """Columnwise squared norm in fixed, bounded sample-order microblocks."""
 
     values = np.asarray(values, dtype=np.float64)
     total = np.zeros(values.shape[1], dtype=np.float64)
-    for row in range(values.shape[0]):
-        total += values[row] * values[row]
+    for _start, _stop, block in _stable_row_microblocks(values):
+        total += np.einsum("ij,ij->j", block, block, optimize=False)
     return total
+
+
+def _reduced_response_degeneracy(
+    response_ss: np.ndarray,
+    reduced_residual_ss: np.ndarray,
+    *,
+    n_samples: int,
+) -> np.ndarray:
+    """Identify responses numerically explained by their reduced model."""
+
+    response_ss = np.asarray(response_ss, dtype=np.float64)
+    reduced_residual_ss = np.asarray(reduced_residual_ss, dtype=np.float64)
+    relative_floor = np.finfo(np.float64).eps * max(1, int(n_samples))
+    return (
+        ~np.isfinite(response_ss)
+        | ~np.isfinite(reduced_residual_ss)
+        | (response_ss <= 0.0)
+        | (reduced_residual_ss <= relative_floor * response_ss)
+    )
 
 
 def _batch_nested_f(
@@ -1758,12 +1803,10 @@ def _batch_nested_f(
         added_ss = ((Qa.T @ Yres) ** 2).sum(0)
         full_resid = Yres - Qa @ (Qa.T @ Yres)
         rss_f = (full_resid ** 2).sum(0)
-    relative_floor = np.finfo(np.float64).eps * max(1, n)
-    degenerate = (
-        ~np.isfinite(response_ss)
-        | ~np.isfinite(reduced_residual_ss)
-        | (response_ss <= 0.0)
-        | (reduced_residual_ss <= relative_floor * response_ss)
+    degenerate = _reduced_response_degeneracy(
+        response_ss,
+        reduced_residual_ss,
+        n_samples=n,
     )
     denom = rss_f / dfd
     bad = denom <= 1e-300
