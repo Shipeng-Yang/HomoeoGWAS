@@ -1752,6 +1752,80 @@ def _audit_power_evidence(payload: Mapping[str, Any], scenario: Any) -> None:
             raise BenchmarkAuditError("power decisions differ from compact minima")
 
 
+def _audited_method_failure_masks(
+    record: Any,
+    methods: set[str],
+    count: int,
+    *,
+    response_role: str,
+    failure_rate_max: float,
+    label: str,
+) -> dict[str, np.ndarray]:
+    """Validate a fixed-denominator method-failure record and return masks."""
+
+    required = {
+        "attempted", "failed_response_indices",
+        "failed_response_indices_by_method", "terminal_failures",
+        "terminal_failures_by_method", "terminal_failure_rate",
+        "terminal_failure_rate_by_method", "failure_rate_max",
+        "within_failure_ceiling", "within_failure_ceiling_by_method",
+        "worst_case_mapping",
+    }
+    if not isinstance(record, Mapping) or set(record) != required:
+        raise BenchmarkAuditError(f"{label} response failure schema is invalid")
+    by_method = record.get("failed_response_indices_by_method")
+    if not isinstance(by_method, Mapping) or set(by_method) != methods:
+        raise BenchmarkAuditError(f"{label} response failure methods are invalid")
+    masks: dict[str, np.ndarray] = {}
+    counts: dict[str, int] = {}
+    rates: dict[str, float] = {}
+    union = np.zeros(count, dtype=bool)
+    for method in sorted(methods):
+        indices = by_method[method]
+        if (
+            not isinstance(indices, list)
+            or any(
+                isinstance(index, bool) or not isinstance(index, int)
+                for index in indices
+            )
+            or indices != sorted(set(indices))
+            or any(index < 0 or index >= count for index in indices)
+        ):
+            raise BenchmarkAuditError(
+                f"{label} response failure indices are invalid"
+            )
+        mask = np.zeros(count, dtype=bool)
+        mask[indices] = True
+        masks[method] = mask
+        union |= mask
+        counts[method] = len(indices)
+        rates[method] = len(indices) / count
+    union_indices = np.flatnonzero(union).astype(int).tolist()
+    expected_mapping = (
+        "failure_counts_as_rejection"
+        if response_role in {"calibration", "heldout", "null"}
+        else "failure_counts_as_non_detection"
+    )
+    if (
+        record.get("attempted") != count
+        or record.get("failed_response_indices") != union_indices
+        or record.get("terminal_failures") != len(union_indices)
+        or record.get("terminal_failures_by_method") != counts
+        or record.get("terminal_failure_rate") != len(union_indices) / count
+        or record.get("terminal_failure_rate_by_method") != rates
+        or record.get("failure_rate_max") != failure_rate_max
+        or record.get("within_failure_ceiling") is not (
+            len(union_indices) / count <= failure_rate_max
+        )
+        or record.get("within_failure_ceiling_by_method") != {
+            method: rate <= failure_rate_max for method, rate in rates.items()
+        }
+        or record.get("worst_case_mapping") != expected_mapping
+    ):
+        raise BenchmarkAuditError(f"{label} response failure evidence differs")
+    return masks
+
+
 def _audit_robustness_record(
     perturbation: str, record: Mapping[str, Any], payload: Mapping[str, Any],
 ) -> None:
@@ -1802,10 +1876,10 @@ def _audit_robustness_record(
     )
     if set(calibration) != {
         "response_ids", "seeds", "response_hash", "p_by_method", "p_hashes",
-        cutoff_name,
+        "response_failures", cutoff_name,
     } or set(heldout) != {
         "response_ids", "seeds", "response_hash", "p_by_method", "p_hashes",
-        rejection_name,
+        "response_failures", rejection_name,
     }:
         raise BenchmarkAuditError("robustness raw stage schema is invalid")
     marker_design = record.get("realized_marker_design")
@@ -1862,22 +1936,41 @@ def _audit_robustness_record(
             output[method] = np.asarray(raw, dtype=float)
         return output
 
+    def failure_masks(
+        bank: Mapping[str, Any], count: int, *, response_role: str,
+    ) -> dict[str, np.ndarray]:
+        return _audited_method_failure_masks(
+            bank.get("response_failures"),
+            set(_ROBUSTNESS_METHODS),
+            count,
+            response_role=response_role,
+            failure_rate_max=ACCEPTANCE_RULES["diagnostic_failure_rate_max"],
+            label="robustness",
+        )
+
     calibration_scores = score_matrices(calibration, calibration_count)
     heldout_scores = score_matrices(heldout, response_count)
+    calibration_failures = failure_masks(
+        calibration, calibration_count, response_role="calibration"
+    )
+    heldout_failures = failure_masks(
+        heldout, response_count, response_role="heldout"
+    )
     if set(calibration["response_ids"]) & set(heldout["response_ids"]):
         raise BenchmarkAuditError("robustness null banks overlap")
-    thresholds = {
-        method: (
-            lambda minima: sorted(minima)[int(math.floor(0.05 * (len(minima) + 1))) - 1]
-        )(_finite_minima(calibration_scores[method]))
-        for method in _ROBUSTNESS_METHODS
-    }
+    thresholds = {}
+    for method in _ROBUSTNESS_METHODS:
+        minima = _finite_minimum_array(calibration_scores[method])
+        minima[calibration_failures[method]] = 0.0
+        index = int(math.floor(0.05 * (len(minima) + 1))) - 1
+        thresholds[method] = float(np.sort(minima)[index])
     if calibration.get(cutoff_name) != thresholds:
         raise BenchmarkAuditError("robustness threshold differs from calibration")
-    heldout_decisions = {
-        method: (_finite_minimum_array(values) < thresholds[method]).tolist()
-        for method, values in heldout_scores.items()
-    }
+    heldout_decisions = {}
+    for method, values in heldout_scores.items():
+        decisions = _finite_minimum_array(values) < thresholds[method]
+        decisions[heldout_failures[method]] = True
+        heldout_decisions[method] = decisions.tolist()
     if heldout.get(rejection_name) != heldout_decisions:
         raise BenchmarkAuditError("robustness heldout decisions do not recompute")
     record_fwer_name = "qa_fwer" if pilot else "fwer"
@@ -1892,20 +1985,32 @@ def _audit_robustness_record(
             "response_ids", "seeds", "response_hash", "causal_group_ids",
             "p_by_method", "p_hashes", "baseline_p_by_method",
             "baseline_p_hashes", "rank_correlation_by_method",
-            "top_k_jaccard_by_method", detection_name, power_name, regret_name,
+            "top_k_jaccard_by_method", "response_failures",
+            "baseline_response_failures", detection_name, power_name, regret_name,
         }:
             raise BenchmarkAuditError("robustness power stratum is invalid")
         scores = score_matrices(arm, response_count)
+        arm_failures = failure_masks(
+            arm, response_count, response_role="power"
+        )
+        failure_masks(
+            {"response_failures": arm["baseline_response_failures"]},
+            response_count,
+            response_role="power",
+        )
         if set(calibration["response_ids"]) & set(arm["response_ids"]):
             raise BenchmarkAuditError("robustness power/calibration banks overlap")
         causal = arm.get("causal_group_ids")
         if not isinstance(causal, list) or len(causal) != 1 or causal[0] not in family_ids:
             raise BenchmarkAuditError("robustness causal truth is invalid")
         index = family_ids.index(causal[0])
-        detection = {
-            method: (values[index] < thresholds[method]).tolist()
-            for method, values in scores.items()
-        }
+        detection = {}
+        for method, values in scores.items():
+            decisions = np.asarray(
+                values[index] < thresholds[method], dtype=bool
+            )
+            decisions[arm_failures[method]] = False
+            detection[method] = decisions.tolist()
         powers = {method: float(np.mean(values)) for method, values in detection.items()}
         if arm.get(detection_name) != detection or arm.get(power_name) != powers:
             raise BenchmarkAuditError("robustness power decisions do not recompute")
@@ -2417,6 +2522,63 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     == payload.get("target_response_hash")
                 ):
                     raise BenchmarkAuditError("family-size statistical stress evidence is invalid")
+                calibration_failures = _audited_method_failure_masks(
+                    payload.get("calibration_response_failures"),
+                    expected_methods,
+                    calibration_count,
+                    response_role="calibration",
+                    failure_rate_max=ACCEPTANCE_RULES[
+                        "diagnostic_failure_rate_max"
+                    ],
+                    label="family-size calibration",
+                )
+                target_failures = _audited_method_failure_masks(
+                    payload.get("target_response_failures"),
+                    expected_methods,
+                    response_count,
+                    response_role="heldout",
+                    failure_rate_max=ACCEPTANCE_RULES[
+                        "diagnostic_failure_rate_max"
+                    ],
+                    label="family-size target",
+                )
+                failure = payload.get("failure")
+                both_within = bool(
+                    payload["calibration_response_failures"][
+                        "within_failure_ceiling"
+                    ]
+                    and payload["target_response_failures"][
+                        "within_failure_ceiling"
+                    ]
+                )
+                any_response_failure = bool(
+                    payload["calibration_response_failures"]["terminal_failures"]
+                    or payload["target_response_failures"]["terminal_failures"]
+                )
+                expected_failure_status = (
+                    "failed_response_ceiling"
+                    if not both_within
+                    else "completed_with_worst_case_response_failures"
+                    if any_response_failure
+                    else "completed"
+                )
+                if (
+                    not isinstance(failure, Mapping)
+                    or set(failure) != {"failed", "status"}
+                    or failure.get("failed") is not (not both_within)
+                    or failure.get("status") != expected_failure_status
+                    or payload.get("failure_rate") != max(
+                        payload["calibration_response_failures"][
+                            "terminal_failure_rate"
+                        ],
+                        payload["target_response_failures"][
+                            "terminal_failure_rate"
+                        ],
+                    )
+                ):
+                    raise BenchmarkAuditError(
+                        "family-size response failure envelope is invalid"
+                    )
                 snpxsnp_result = None
                 if "snpxsnp" in expected_methods:
                     snpxsnp_result = _snpxsnp_result_from_evidence(
@@ -2461,11 +2623,13 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                             "family-size tested-family evidence is invalid"
                         )
                     calibration_values = _compact_vector(
-                        calibration_minima[method], calibration_count, set(),
+                        calibration_minima[method], calibration_count,
+                        set(np.flatnonzero(calibration_failures[method])),
                         "family-size calibration minimum",
                     )
                     target_values = _compact_vector(
-                        target_minima[method], response_count, set(),
+                        target_minima[method], response_count,
+                        set(np.flatnonzero(target_failures[method])),
                         "family-size target minimum",
                     )
                     if (
@@ -2479,11 +2643,16 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                     expected_threshold = (
                         None if k < 1 else sorted(calibration_values)[k - 1]
                     )
-                    expected_rejections = [
-                        False if expected_threshold is None
-                        else bool(value < expected_threshold)
-                        for value in target_values
-                    ]
+                    expected_rejections = []
+                    for index, value in enumerate(target_values):
+                        if target_failures[method][index]:
+                            expected_rejections.append(True)
+                        else:
+                            expected_rejections.append(
+                                False
+                                if expected_threshold is None
+                                else bool(value < expected_threshold)
+                            )
                     if (
                         thresholds[method] != expected_threshold
                         or rejections[method] != expected_rejections

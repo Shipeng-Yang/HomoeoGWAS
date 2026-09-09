@@ -568,13 +568,22 @@ def score_legacy_burden_product(
 ) -> tuple[np.ndarray, int]:
     """Score the sign-coherent minor-burden product on the frozen null fit."""
     _validate_frozen_family(family, expanded)
-    _edge_p, _group_p, components = score_omnib_responses(
-        scores, family, expanded, responses, n_jobs=n_jobs
+    _edge_p, _group_p, components, diagnostics = score_omnib_responses(
+        scores,
+        family,
+        expanded,
+        responses,
+        n_jobs=n_jobs,
+        return_diagnostics=True,
     )
-    return (
-        group_component_p(components, expanded, component_index=0),
-        len(family.group_ids),
+    values = group_component_p(components, expanded, component_index=0)
+    failed = np.asarray(
+        diagnostics.failed_response_indices_by_component["minor_burden"],
+        dtype=int,
     )
+    if failed.size:
+        values[:, failed] = np.nan
+    return values, len(family.group_ids)
 
 
 def _whiten_columns(W: np.ndarray, responses: np.ndarray) -> np.ndarray:

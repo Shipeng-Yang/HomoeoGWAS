@@ -1307,6 +1307,31 @@ def test_robustness_audit_recomputes_each_method_and_rejects_formal_pilot_keys()
     calibration_ids = [f"cal-{index}" for index in range(calibration_count)]
     heldout_ids = [f"held-{index}" for index in range(response_count)]
 
+    def no_failures(count: int, role: str) -> dict:
+        return {
+            "attempted": count,
+            "failed_response_indices": [],
+            "failed_response_indices_by_method": {
+                method: [] for method in methods
+            },
+            "terminal_failures": 0,
+            "terminal_failures_by_method": {method: 0 for method in methods},
+            "terminal_failure_rate": 0.0,
+            "terminal_failure_rate_by_method": {
+                method: 0.0 for method in methods
+            },
+            "failure_rate_max": 0.01,
+            "within_failure_ceiling": True,
+            "within_failure_ceiling_by_method": {
+                method: True for method in methods
+            },
+            "worst_case_mapping": (
+                "failure_counts_as_rejection"
+                if role in {"calibration", "heldout"}
+                else "failure_counts_as_non_detection"
+            ),
+        }
+
     def bank_scores(count: int, offset: float = 0.0) -> dict[str, list[list[float]]]:
         return {
             method: [
@@ -1338,6 +1363,7 @@ def test_robustness_audit_recomputes_each_method_and_rejects_formal_pilot_keys()
             method: sha256_payload(values)
             for method, values in calibration_scores.items()
         },
+        "response_failures": no_failures(calibration_count, "calibration"),
         "qa_cutoffs_by_method": thresholds,
     }
     heldout = {
@@ -1349,6 +1375,7 @@ def test_robustness_audit_recomputes_each_method_and_rejects_formal_pilot_keys()
             method: sha256_payload(values)
             for method, values in heldout_scores.items()
         },
+        "response_failures": no_failures(response_count, "heldout"),
         "qa_rejections_by_method": heldout_decisions,
     }
     architectures = [
@@ -1389,6 +1416,8 @@ def test_robustness_audit_recomputes_each_method_and_rejects_formal_pilot_keys()
             ],
             "response_hash": f"{architecture_index + 3:x}" * 64,
             "causal_group_ids": [family_ids[0]],
+            "response_failures": no_failures(response_count, "power"),
+            "baseline_response_failures": no_failures(response_count, "power"),
             "p_by_method": candidate,
             "p_hashes": {
                 method: sha256_payload(values) for method, values in candidate.items()
@@ -1480,6 +1509,16 @@ def test_family_size_audit_recomputes_response_level_fwer():
     )
     with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
         _audit_families_and_parallel(detached_evidence)
+    failure_detached = copy.deepcopy(payload)
+    failure_detached["target_response_failures"][
+        "failed_response_indices_by_method"
+    ]["omnib"] = [0]
+    failure_evidence = SimpleNamespace(
+        shards=((Path("family-failure-detached.json"), failure_detached),),
+        registry=(scenario,),
+    )
+    with pytest.raises(BenchmarkAuditError, match="response failure"):
+        _audit_families_and_parallel(failure_evidence)
     payload["fwer"]["omnib"] = 0.123
     with pytest.raises(BenchmarkAuditError, match="family-size"):
         _audit_families_and_parallel(evidence)

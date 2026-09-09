@@ -308,6 +308,49 @@ def test_legacy_burden_product_matches_frozen_minor_burden_nested_term():
     assert tested_count == 1
 
 
+def test_legacy_burden_product_does_not_acat_drop_failed_component(monkeypatch):
+    family = MasterGroupFamily(
+        ("A", "B", "D"), ("g0",), (("gA", "gB", "gD"),)
+    )
+    expanded = expand_pair_edges(family)
+    scores = _minimal_scores(12)
+    scores.edge_estimable = np.ones(3, dtype=bool)
+    components = np.full((3, 3, 2), 0.2, dtype=float)
+    components[1, 0, 1] = np.nan
+    diagnostics = F.OmniBResponseDiagnostics(
+        failed_response_mask=np.array([False, True]),
+        failed_response_indices=(1,),
+        failed_response_indices_by_component={
+            "minor_burden": (1,),
+            "pc1": (),
+            "kernel_hadamard": (),
+        },
+        nonfinite_component_counts=(0, 1),
+        attempted=2,
+        successful=1,
+        retried=0,
+        terminal_failures=1,
+    )
+
+    def scored(*_args, return_diagnostics=False, **_kwargs):
+        assert return_diagnostics is True
+        return (
+            np.full((3, 2), 0.2),
+            np.full((1, 2), 0.2),
+            components,
+            diagnostics,
+        )
+
+    monkeypatch.setattr(comparator_module, "score_omnib_responses", scored)
+    actual, tested_count = score_legacy_burden_product(
+        scores, family, expanded, np.ones((12, 2)), n_jobs=1
+    )
+
+    assert tested_count == 1
+    assert np.isfinite(actual[:, 0]).all()
+    assert np.isnan(actual[:, 1]).all()
+
+
 def _minimal_scores(n: int) -> F.OmniBFamilyScores:
     return F.OmniBFamilyScores(
         edge_p=np.empty((1, 0)),

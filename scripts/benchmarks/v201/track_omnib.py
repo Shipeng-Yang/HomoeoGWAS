@@ -1238,12 +1238,126 @@ def _poison_failed_omnib_method_columns(
     return group, components
 
 
+def _frozen_response_failure_mask(
+    response_count: int, indices: Sequence[int], *, method: str,
+) -> np.ndarray:
+    """Build one immutable response-aligned method failure mask."""
+
+    mask = np.zeros(response_count, dtype=bool)
+    selected = np.asarray(indices, dtype=int)
+    if selected.size:
+        if (
+            selected.ndim != 1
+            or np.any(selected < 0)
+            or np.any(selected >= response_count)
+            or np.unique(selected).size != selected.size
+        ):
+            raise RuntimeError(f"invalid response failure indices for {method}")
+        mask[selected] = True
+    mask.setflags(write=False)
+    return mask
+
+
+def _omnib_method_failure_masks(
+    diagnostics: Any,
+    *,
+    response_count: int,
+    snpxsnp_result: SNPxSNPScoreResult | None = None,
+) -> dict[str, np.ndarray]:
+    """Freeze method-specific failures before another bank overwrites diagnostics."""
+
+    if diagnostics is None or diagnostics.attempted != response_count:
+        raise RuntimeError("omniB response failure diagnostics are missing")
+    by_component = diagnostics.failed_response_indices_by_component
+    masks = {
+        "omnib": _frozen_response_failure_mask(
+            response_count, diagnostics.failed_response_indices, method="omnib"
+        ),
+        "minor_burden": _frozen_response_failure_mask(
+            response_count, by_component["minor_burden"], method="minor_burden"
+        ),
+        "pc1": _frozen_response_failure_mask(
+            response_count, by_component["pc1"], method="pc1"
+        ),
+        "kernel_hadamard": _frozen_response_failure_mask(
+            response_count,
+            by_component["kernel_hadamard"],
+            method="kernel_hadamard",
+        ),
+    }
+    if snpxsnp_result is not None:
+        masks["snpxsnp"] = _frozen_response_failure_mask(
+            response_count,
+            snpxsnp_result.failed_response_indices,
+            method="snpxsnp",
+        )
+    return masks
+
+
+def _response_failure_record(
+    masks: Mapping[str, np.ndarray],
+    *,
+    response_count: int,
+    response_role: str,
+    failure_rate_max: float,
+) -> dict[str, Any]:
+    """Serialize fixed-denominator, method-specific response failures."""
+
+    checked: dict[str, np.ndarray] = {}
+    for method, raw in masks.items():
+        mask = np.asarray(raw)
+        if mask.dtype != np.bool_ or mask.shape != (response_count,):
+            raise RuntimeError(f"response failure mask is not aligned for {method}")
+        checked[method] = mask
+    failed_by_method = {
+        method: np.flatnonzero(mask).astype(int).tolist()
+        for method, mask in checked.items()
+    }
+    counts_by_method = {
+        method: len(indices) for method, indices in failed_by_method.items()
+    }
+    rates_by_method = {
+        method: count / response_count
+        for method, count in counts_by_method.items()
+    }
+    failed_union = np.zeros(response_count, dtype=bool)
+    for mask in checked.values():
+        failed_union |= mask
+    union_indices = np.flatnonzero(failed_union).astype(int).tolist()
+    union_rate = len(union_indices) / response_count
+    return {
+        "attempted": response_count,
+        "failed_response_indices": union_indices,
+        "failed_response_indices_by_method": failed_by_method,
+        "terminal_failures": len(union_indices),
+        "terminal_failures_by_method": counts_by_method,
+        "terminal_failure_rate": union_rate,
+        "terminal_failure_rate_by_method": rates_by_method,
+        "failure_rate_max": failure_rate_max,
+        "within_failure_ceiling": union_rate <= failure_rate_max,
+        "within_failure_ceiling_by_method": {
+            method: rate <= failure_rate_max
+            for method, rate in rates_by_method.items()
+        },
+        "worst_case_mapping": (
+            "failure_counts_as_rejection"
+            if response_role in {"calibration", "heldout", "null"}
+            else "failure_counts_as_non_detection"
+        ),
+    }
+
+
 def _method_scores(
     prepared: _PreparedScenario,
     responses: np.ndarray,
     *,
     n_jobs: int,
-) -> tuple[MethodScoreBank, dict[str, Any], SNPxSNPScoreResult]:
+) -> tuple[
+    MethodScoreBank,
+    dict[str, Any],
+    SNPxSNPScoreResult,
+    dict[str, np.ndarray],
+]:
     _edge, group, components, diagnostics = score_omnib_responses(
         prepared.scores,
         prepared.context.family,
@@ -1269,6 +1383,11 @@ def _method_scores(
         max_offered_pairs=_snpxsnp_pair_ceiling(prepared.context),
     )
     group_count = len(prepared.context.family.group_ids)
+    failure_masks = _omnib_method_failure_masks(
+        diagnostics,
+        response_count=responses.shape[1],
+        snpxsnp_result=snpxsnp_result,
+    )
     return (
         MethodScoreBank(
             family_ids=prepared.context.family.group_ids,
@@ -1289,6 +1408,7 @@ def _method_scores(
         ),
         response_execution,
         snpxsnp_result,
+        failure_masks,
     )
 
 
@@ -1297,7 +1417,7 @@ def _local_component_scores(
     responses: np.ndarray,
     *,
     n_jobs: int,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     _edge, group, components, diagnostics = score_omnib_responses(
         prepared.scores, prepared.context.family, prepared.expanded,
         responses, n_jobs=n_jobs, return_diagnostics=True,
@@ -1309,12 +1429,17 @@ def _local_component_scores(
     group, component = _poison_failed_omnib_method_columns(
         group, component, diagnostics
     )
-    return {
-        "omnib": group,
-        "minor_burden": component[0],
-        "pc1": component[1],
-        "kernel_hadamard": component[2],
-    }
+    return (
+        {
+            "omnib": group,
+            "minor_burden": component[0],
+            "pc1": component[1],
+            "kernel_hadamard": component[2],
+        },
+        _omnib_method_failure_masks(
+            diagnostics, response_count=responses.shape[1]
+        ),
+    )
 
 
 def run_family_size_stress(
@@ -1352,10 +1477,10 @@ def run_family_size_stress(
     if set(calibration_ids) & set(target_ids):
         raise RuntimeError("family-size calibration and heldout banks overlap")
     if family_size <= 80:
-        calibration_scores, _, calibration_snpxsnp = _method_scores(
+        calibration_scores, _, calibration_snpxsnp, calibration_failure_masks = _method_scores(
             prepared, calibration, n_jobs=n_jobs,
         )
-        target_scores, _, target_snpxsnp = _method_scores(
+        target_scores, _, target_snpxsnp, target_failure_masks = _method_scores(
             prepared, target, n_jobs=n_jobs,
         )
         if (
@@ -1374,10 +1499,12 @@ def run_family_size_stress(
         tested_members["snpxsnp"] = target_snpxsnp.member_ids
         snpxsnp_status = "applicable"
     else:
-        calibration_map = _local_component_scores(
+        calibration_map, calibration_failure_masks = _local_component_scores(
             prepared, calibration, n_jobs=n_jobs
         )
-        target_map = _local_component_scores(prepared, target, n_jobs=n_jobs)
+        target_map, target_failure_masks = _local_component_scores(
+            prepared, target, n_jobs=n_jobs
+        )
         tested_sizes = {method: family_size for method in calibration_map}
         tested_members = {
             method: tuple(context.family.group_ids) for method in calibration_map
@@ -1392,10 +1519,17 @@ def run_family_size_stress(
     if family_size <= 80:
         tested_hashes["snpxsnp"] = target_snpxsnp.member_family_sha256
     thresholds = {
-        method: empirical_threshold(values) for method, values in calibration_map.items()
+        method: empirical_threshold(
+            values, failed_mask=calibration_failure_masks[method]
+        )
+        for method, values in calibration_map.items()
     }
     rejection = {
-        method: apply_threshold(target_map[method], thresholds[method])
+        method: apply_failure_policy(
+            apply_threshold(target_map[method], thresholds[method]),
+            target_failure_masks[method],
+            response_role="heldout",
+        )
         for method in calibration_map
     }
     calibration_minima = {
@@ -1403,9 +1537,12 @@ def run_family_size_stress(
             np.isfinite(values).any(axis=0),
             np.where(np.isfinite(values), values, np.inf).min(axis=0),
             np.nan,
-        ))
+        ).copy())
         for method, values in calibration_map.items()
     }
+    for method, failed_mask in calibration_failure_masks.items():
+        for index in np.flatnonzero(failed_mask):
+            calibration_minima[method][int(index)] = 0.0
     target_minima = {
         method: _json_safe(np.where(
             np.isfinite(values).any(axis=0),
@@ -1420,6 +1557,23 @@ def run_family_size_stress(
     inference = (
         {"qa_cutoffs": thresholds}
         if qa_only else {"thresholds": thresholds}
+    )
+    failure_rate_max = _DIAGNOSTIC_FAILURE_RATE_MAX
+    calibration_failures = _response_failure_record(
+        calibration_failure_masks,
+        response_count=calibration_count,
+        response_role="calibration",
+        failure_rate_max=failure_rate_max,
+    )
+    target_failures = _response_failure_record(
+        target_failure_masks,
+        response_count=response_count,
+        response_role="heldout",
+        failure_rate_max=failure_rate_max,
+    )
+    within_failure_ceiling = bool(
+        calibration_failures["within_failure_ceiling"]
+        and target_failures["within_failure_ceiling"]
     )
     return {
         "experiment": "family_size", "family_size": family_size,
@@ -1452,7 +1606,13 @@ def run_family_size_stress(
         },
         "fwer": {method: float(np.mean(values))
                  for method, values in rejections_by_method.items()},
-        "failure_rate": 0.0, "runtime_seconds": float(time.perf_counter() - started),
+        "failure_rate": max(
+            calibration_failures["terminal_failure_rate"],
+            target_failures["terminal_failure_rate"],
+        ),
+        "calibration_response_failures": calibration_failures,
+        "target_response_failures": target_failures,
+        "runtime_seconds": float(time.perf_counter() - started),
         "calibration_count": calibration_count, "response_count": response_count,
         "calibration_response_ids": list(calibration_ids),
         "target_response_ids": list(target_ids),
@@ -1465,7 +1625,17 @@ def run_family_size_stress(
         "null_fit_sha256": prepared.scores.null_fit_sha256,
         "prepared_design_sha256": prepared.scores.prepared_design_sha256,
         "inference_status": "noninferential_do_not_threshold" if qa_only else "formal",
-        "failure": {"failed": False, "status": "completed"},
+        "failure": {
+            "failed": not within_failure_ceiling,
+            "status": (
+                "failed_response_ceiling"
+                if not within_failure_ceiling
+                else "completed_with_worst_case_response_failures"
+                if calibration_failures["terminal_failures"]
+                or target_failures["terminal_failures"]
+                else "completed"
+            ),
+        },
         "requested_jobs": n_jobs,
         "effective_jobs": int(prepared.scores.parallel_execution.get("effective_jobs", 1)),
         "parallel_backend": prepared.scores.parallel_execution.get("backend", "serial"),
@@ -1637,7 +1807,7 @@ def _bank_from_prepared(
         }
     failure: dict[str, Any] = {"failed": False, "failed_response_indices": []}
     try:
-        score_bank, response_execution, snpxsnp_result = _method_scores(
+        score_bank, response_execution, snpxsnp_result, failure_masks = _method_scores(
             prepared,
             responses,
             n_jobs=n_jobs,
@@ -1650,21 +1820,10 @@ def _bank_from_prepared(
             "message": str(error),
         }
         raise RuntimeError(f"conditional bank scoring failed: {error}") from error
-    diagnostics = prepared.scores.response_diagnostics
-    if diagnostics is None or diagnostics.attempted != count:
-        raise RuntimeError("omniB response failure diagnostics are missing")
-    component_failures = diagnostics.failed_response_indices_by_component
     nonfinite_by_method = {
-        method: np.flatnonzero(~np.isfinite(values).all(axis=0)).astype(int).tolist()
-        for method, values in score_bank.p_by_method.items()
+        method: np.flatnonzero(mask).astype(int).tolist()
+        for method, mask in failure_masks.items()
     }
-    nonfinite_by_method.update({
-        "omnib": list(diagnostics.failed_response_indices),
-        "minor_burden": list(component_failures["minor_burden"]),
-        "pc1": list(component_failures["pc1"]),
-        "kernel_hadamard": list(component_failures["kernel_hadamard"]),
-        "snpxsnp": list(snpxsnp_result.failed_response_indices),
-    })
     all_nan_by_method = {
         method: np.flatnonzero(~np.isfinite(values).any(axis=0)).astype(int).tolist()
         for method, values in score_bank.p_by_method.items()
@@ -3106,9 +3265,17 @@ _ROBUSTNESS_METHODS = ("omnib", "minor_burden", "pc1", "kernel_hadamard")
 
 def _robustness_score_bank(
     prepared: _PreparedScenario, responses: np.ndarray, *, n_jobs: int,
-) -> dict[str, np.ndarray]:
-    scores = _local_component_scores(prepared, responses, n_jobs=n_jobs)
-    return {method: np.asarray(scores[method], dtype=float) for method in _ROBUSTNESS_METHODS}
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    scores, failure_masks = _local_component_scores(
+        prepared, responses, n_jobs=n_jobs
+    )
+    return (
+        {
+            method: np.asarray(scores[method], dtype=float)
+            for method in _ROBUSTNESS_METHODS
+        },
+        {method: failure_masks[method] for method in _ROBUSTNESS_METHODS},
+    )
 
 
 def _response_minima(values: np.ndarray) -> np.ndarray:
@@ -3451,32 +3618,46 @@ def run_encoding_check(
                     transformed, design_hash=design_hash, stage=stage,
                     scenario_id=f"{scenario_id}.robustness.{name}", n_jobs=n_jobs,
                 )
-                calibration_scores = _robustness_score_bank(
+                calibration_scores, calibration_failure_masks = _robustness_score_bank(
                     challenge_prepared, calibration_responses, n_jobs=n_jobs
                 )
-                heldout_scores = _robustness_score_bank(
+                heldout_scores, heldout_failure_masks = _robustness_score_bank(
                     challenge_prepared, heldout_responses, n_jobs=n_jobs
                 )
                 thresholds = {
-                    method: empirical_threshold(values)
+                    method: empirical_threshold(
+                        values, failed_mask=calibration_failure_masks[method]
+                    )
                     for method, values in calibration_scores.items()
                 }
                 heldout_decisions = {
-                    method: apply_threshold(heldout_scores[method], thresholds[method])
+                    method: apply_failure_policy(
+                        apply_threshold(
+                            heldout_scores[method], thresholds[method]
+                        ),
+                        heldout_failure_masks[method],
+                        response_role="heldout",
+                    )
                     for method in _ROBUSTNESS_METHODS
                 }
                 strata: dict[str, Any] = {}
                 for architecture, (responses, power_seeds, power_ids, causal_ids) in power_banks.items():
-                    candidate_scores = _robustness_score_bank(
+                    candidate_scores, candidate_failure_masks = _robustness_score_bank(
                         challenge_prepared, responses, n_jobs=n_jobs
                     )
-                    canonical_scores = _robustness_score_bank(
+                    canonical_scores, canonical_failure_masks = _robustness_score_bank(
                         canonical_prepared, responses, n_jobs=n_jobs
                     )
                     causal_index = context.family.group_ids.index(causal_ids[0])
                     detection = {
-                        method: (
-                            candidate_scores[method][causal_index] < thresholds[method]
+                        method: apply_failure_policy(
+                            np.asarray(
+                                candidate_scores[method][causal_index]
+                                < thresholds[method],
+                                dtype=bool,
+                            ),
+                            candidate_failure_masks[method],
+                            response_role="power",
                         ).tolist()
                         for method in _ROBUSTNESS_METHODS
                     }
@@ -3508,6 +3689,18 @@ def run_encoding_check(
                         "response_ids": list(power_ids), "seeds": list(power_seeds),
                         "response_hash": _array_hash(responses),
                         "causal_group_ids": causal_ids,
+                        "response_failures": _response_failure_record(
+                            candidate_failure_masks,
+                            response_count=response_count,
+                            response_role="power",
+                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                        ),
+                        "baseline_response_failures": _response_failure_record(
+                            canonical_failure_masks,
+                            response_count=response_count,
+                            response_role="power",
+                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                        ),
                         "p_by_method": {
                             method: _json_safe(values)
                             for method, values in candidate_scores.items()
@@ -3587,6 +3780,12 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in calibration_scores.items()
                         },
+                        "response_failures": _response_failure_record(
+                            calibration_failure_masks,
+                            response_count=calibration_count,
+                            response_role="calibration",
+                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                        ),
                         **(
                             {"qa_cutoffs_by_method": thresholds}
                             if qa_only else {"thresholds": thresholds}
@@ -3603,6 +3802,12 @@ def run_encoding_check(
                             method: sha256_payload(_json_safe(values))
                             for method, values in heldout_scores.items()
                         },
+                        "response_failures": _response_failure_record(
+                            heldout_failure_masks,
+                            response_count=response_count,
+                            response_role="heldout",
+                            failure_rate_max=_DIAGNOSTIC_FAILURE_RATE_MAX,
+                        ),
                         **(
                             {"qa_rejections_by_method": {
                                 method: values.tolist()

@@ -12,6 +12,7 @@ from homoeogwas.interact import SubgenomeData
 from scripts.benchmarks.v201.audit import (
     BenchmarkAuditError,
     _audit_end2end_decisions,
+    _audit_robustness_record,
     core_fwer_gate,
 )
 from scripts.benchmarks.v201.track_omnib import (
@@ -365,6 +366,142 @@ def test_conditional_bank_poison_partial_component_failure_for_each_method(
         alpha=0.5,
         failed_mask=T._method_failure_mask(bank, "omnib"),
     ) == 0.0
+
+
+def test_family_size_stress_preserves_separate_calibration_and_target_failures(
+    monkeypatch,
+):
+    context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=954)
+    original = T._method_scores
+    calls = 0
+
+    def poison_distinct_banks(prepared, responses, *, n_jobs):
+        nonlocal calls
+        returned = original(prepared, responses, n_jobs=n_jobs)
+        if len(returned) == 3:
+            bank, execution, snpxsnp = returned
+        else:
+            bank, execution, snpxsnp, _original_masks = returned
+        values = {
+            method: np.array(scores, dtype=float, copy=True)
+            for method, scores in bank.p_by_method.items()
+        }
+        masks = {
+            method: np.zeros(responses.shape[1], dtype=bool)
+            for method in values
+        }
+        failed_index = 0 if calls == 0 else 1
+        values["omnib"][:, failed_index] = np.nan
+        masks["omnib"][failed_index] = True
+        calls += 1
+        return (
+            T.MethodScoreBank(
+                bank.family_ids, values, dict(bank.tested_family_sizes)
+            ),
+            execution,
+            snpxsnp,
+            masks,
+        )
+
+    monkeypatch.setattr(T, "_method_scores", poison_distinct_banks)
+    payload = T.run_family_size_stress(
+        context,
+        family_size=1,
+        response_count=2,
+        calibration_count=20,
+        design_hash="d" * 64,
+        qa_only=True,
+        n_jobs=1,
+        scenario_id="B.family_size.synthetic.g1",
+    )
+
+    assert payload["calibration_response_failures"][
+        "failed_response_indices_by_method"
+    ]["omnib"] == [0]
+    assert payload["target_response_failures"][
+        "failed_response_indices_by_method"
+    ]["omnib"] == [1]
+    assert payload["calibration_minima_by_method"]["omnib"][0] == 0.0
+    assert payload["qa_rejections_by_method"]["omnib"] == [False, True]
+    assert payload["target_response_failures"]["attempted"] == 2
+    assert payload["target_response_failures"]["failure_rate_max"] == 0.01
+    assert payload["target_response_failures"]["worst_case_mapping"] == (
+        "failure_counts_as_rejection"
+    )
+
+
+def test_robustness_preserves_bank_specific_method_failures(monkeypatch):
+    context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=955)
+    calls = 0
+
+    monkeypatch.setattr(
+        T,
+        "_basic_robustness_contexts",
+        lambda base, seed, *, with_metadata: (
+            {"missingness_2pct": base}, {"missingness_2pct": None}
+        ),
+    )
+
+    def poison_robustness_bank(prepared, responses, *, n_jobs):
+        nonlocal calls
+        scores, original_masks = T._local_component_scores(
+            prepared, responses, n_jobs=n_jobs
+        )
+        values = {
+            method: np.array(matrix, dtype=float, copy=True)
+            for method, matrix in scores.items()
+        }
+        masks = {
+            method: np.array(mask, dtype=bool, copy=True)
+            for method, mask in original_masks.items()
+        }
+        if calls == 0:
+            method, index = "minor_burden", 0
+        elif calls == 1:
+            method, index = "omnib", 1
+        elif calls == 2:
+            method, index = "pc1", 2
+        else:
+            method = None
+        if method is not None:
+            values[method][:, index] = np.nan
+            masks[method][index] = True
+        calls += 1
+        return values, masks
+
+    monkeypatch.setattr(T, "_robustness_score_bank", poison_robustness_bank)
+    payload = T.run_encoding_check(
+        context,
+        bootstrap_B=199,
+        design_hash="e" * 64,
+        n_jobs=1,
+        parallel_jobs=1,
+        include_robustness=True,
+        qa_only=True,
+    )
+
+    record = payload["robustness_checks"]["missingness_2pct"]
+    assert record["calibration"]["response_failures"][
+        "failed_response_indices_by_method"
+    ]["minor_burden"] == [0]
+    assert record["heldout"]["response_failures"][
+        "failed_response_indices_by_method"
+    ]["omnib"] == [1]
+    assert record["heldout"]["qa_rejections_by_method"]["omnib"][1] is True
+    first = record["qa_power_by_architecture"]["minor_burden_aligned"]
+    assert first["response_failures"]["failed_response_indices_by_method"][
+        "pc1"
+    ] == [2]
+    assert first["response_failures"]["worst_case_mapping"] == (
+        "failure_counts_as_non_detection"
+    )
+    _audit_robustness_record("missingness_2pct", record, payload)
+    tampered = deepcopy(record)
+    tampered["heldout"]["response_failures"][
+        "failed_response_indices_by_method"
+    ]["omnib"] = []
+    with pytest.raises(BenchmarkAuditError, match="response failure"):
+        _audit_robustness_record("missingness_2pct", tampered, payload)
 
 
 def test_end_to_end_payload_serializes_observed_and_bootstrap_diagnostics():
