@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -172,11 +173,11 @@ def _normalize_retained_variant_masks(
                     f"retained variant mask record for {sub} requires mask and sha256")
             mask = np.asarray(entry["mask"])
             expected_hash = entry["sha256"]
-            supplied_identity = {
+            supplied_identity = deepcopy({
                 str(key): value
                 for key, value in entry.items()
                 if key not in {"mask", "sha256"}
-            }
+            })
         else:
             mask = np.asarray(entry)
             supplied_identity = {}
@@ -1026,7 +1027,15 @@ def prepare_omnib_design(
         },
         "retained_variant_masks": (
             {
-                sub: retained_variant_mask_identity[sub]
+                sub: {
+                    field: retained_variant_mask_identity[sub][field]
+                    for field in (
+                        "input_variant_count",
+                        "retained_variant_count",
+                        "retained_variant_mask_encoding",
+                        "retained_variant_mask_sha256",
+                    )
+                }
                 for sub in sorted(retained_variant_mask_identity)
             }
             if retained_variant_mask_identity
@@ -1874,13 +1883,18 @@ def run_group_scan_omnib(
         raise ValueError("family_scope must be primary_only or joint")
     if not isinstance(inferential, bool):
         raise ValueError("inferential must be true or false")
-    if evidence_role not in {"legacy", "formal", "benchmark"}:
-        raise ValueError("evidence_role must be legacy, formal or benchmark")
+    if evidence_role not in {
+        "legacy", "formal", "benchmark_qa", "benchmark_formal",
+    }:
+        raise ValueError(
+            "evidence_role must be legacy, formal, benchmark_qa or "
+            "benchmark_formal"
+        )
     if evidence_role != "legacy" and feature_seed is None:
         raise ValueError(
             f"{evidence_role} evidence requires an explicit feature_seed"
         )
-    if evidence_role == "benchmark":
+    if evidence_role.startswith("benchmark_"):
         _require_benchmark_mask_bindings(
             retained_variant_masks, family, np.asarray(sample_idx, int)
         )
@@ -2156,7 +2170,9 @@ def run_group_scan_omnib(
         "feature_provenance": scores.feature_seed_provenance | {
             "feature_cache_sha256": scores.feature_cache_sha256,
         },
+        "evidence_role": evidence_role,
         "prepared_design": {
+            "identity": deepcopy(scores.prepared_design_identity),
             "sha256": scores.prepared_design_sha256,
             "fixed_mask_sha256": scores.fixed_mask_sha256,
             "null_fit_sha256": scores.null_fit_sha256,

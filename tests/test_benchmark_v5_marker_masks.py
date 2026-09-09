@@ -157,7 +157,7 @@ def test_benchmark_evidence_role_requires_explicit_seed_and_masks():
             family,
             phenotype,
             sample_idx,
-            evidence_role="benchmark",
+            evidence_role="benchmark_qa",
             retained_variant_masks=masks,
             bootstrap_B=1,
             n_jobs=1,
@@ -170,7 +170,7 @@ def test_benchmark_evidence_role_requires_explicit_seed_and_masks():
             family,
             phenotype,
             sample_idx,
-            evidence_role="benchmark",
+            evidence_role="benchmark_qa",
             feature_seed=17,
             bootstrap_B=1,
             n_jobs=1,
@@ -213,15 +213,66 @@ def test_bound_mask_record_is_retained_in_prepared_design_identity():
         transform="INT",
     )
 
-    identity = scores.prepared_design_identity["retained_variant_masks"]
-    assert identity["A"]["panel_id"] == "REALG.TEST"
-    assert identity["A"]["thresholds"] == {
+    provenance = scores.retained_variant_mask_identity
+    assert provenance["A"]["panel_id"] == "REALG.TEST"
+    assert provenance["A"]["thresholds"] == {
         "call_rate_min": 0.90,
         "maf_min": 0.01,
         "mac_min": 5,
     }
-    assert identity["D"]["source_BIM_sha256"] == "d" * 64
-    assert "mask" not in identity["A"]
+    assert provenance["D"]["source_BIM_sha256"] == "d" * 64
+    assert "mask" not in provenance["A"]
+    assert scores.prepared_design_identity["retained_variant_masks"]["A"] == {
+        "input_variant_count": 6,
+        "retained_variant_count": 3,
+        "retained_variant_mask_encoding": "uint8_input_variant_order",
+        "retained_variant_mask_sha256": _mask_sha256(masks["A"]),
+    }
+
+
+def test_declarative_mask_labels_do_not_change_executable_prepared_digest():
+    subdata, family, phenotype, sample_idx, masks = _mask_fixture()
+    records = {}
+    for sub, mask in masks.items():
+        records[sub] = {
+            "mask": mask,
+            "sha256": _mask_sha256(mask),
+            "source": {"label": "cli", "nested": ["original"]},
+        }
+    first, _ = F.prepare_omnib_design(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        feature_seed=17,
+        retained_variant_masks=records,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        burden_maf=0.01,
+        min_snp=3,
+        cap=150,
+        n_pc=3,
+        transform="INT",
+    )
+    records["A"]["source"]["label"] = "benchmark"
+    second, _ = F.prepare_omnib_design(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        feature_seed=17,
+        retained_variant_masks=records,
+        grm_method="grm_from_X",
+        maf_min=0.01,
+        burden_maf=0.01,
+        min_snp=3,
+        cap=150,
+        n_pc=3,
+        transform="INT",
+    )
+
+    assert first.prepared_design_sha256 == second.prepared_design_sha256
+    assert first.retained_variant_mask_identity["A"]["source"]["label"] == "cli"
 
 
 def test_cli_benchmark_mask_records_bind_samples_thresholds_and_bim(tmp_path):

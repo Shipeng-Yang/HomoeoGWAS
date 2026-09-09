@@ -1408,7 +1408,10 @@ def test_group_omnib_evidence_seed_resolution_is_role_aware():
     }
     assert I._resolve_group_omnib_evidence(
         benchmark, verified_launch=None
-    ) == (17, "benchmark")
+    ) == (17, "benchmark_qa")
+    assert I._resolve_group_omnib_evidence(
+        benchmark, verified_launch=object()
+    ) == (17, "benchmark_formal")
     benchmark["burden"]["feature_seed"] = 19
     with pytest.raises(ValueError, match="disagrees"):
         I._resolve_group_omnib_evidence(benchmark, verified_launch=None)

@@ -285,3 +285,27 @@ def test_native_and_conditional_paths_share_one_prepared_identity():
     np.testing.assert_array_equal(native.group_p, conditional[1])
     np.testing.assert_array_equal(
         native.edge_components_obs, conditional[2][:, :, 0])
+
+
+def test_noncheckpoint_result_serializes_recomputable_prepared_identity():
+    subdata, family, phenotype, sample_idx, masks = _prepared_fixture()
+    result = F.run_group_scan_omnib(
+        subdata,
+        family,
+        phenotype,
+        sample_idx,
+        feature_seed=17,
+        evidence_role="formal",
+        retained_variant_masks=masks,
+        bootstrap_B=1,
+        n_jobs=1,
+        grm_method="grm_from_X",
+        min_snp=3,
+    )
+
+    prepared = result.model_diagnostics["prepared_design"]
+    assert prepared["sha256"] == F._text_identity(prepared["identity"])
+    assert prepared["identity"]["implementation"]["score_algorithm"] == (
+        F.PREPARED_SCORE_ALGORITHM
+    )
+    assert result.model_diagnostics["evidence_role"] == "formal"

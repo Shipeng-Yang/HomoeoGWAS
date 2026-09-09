@@ -3855,7 +3855,8 @@ def _resolve_group_omnib_evidence(
             raise ValueError(
                 "burden feature_seed disagrees with benchmark identity"
             )
-        return int(root), "benchmark"
+        role = "benchmark_formal" if verified_launch is not None else "benchmark_qa"
+        return int(root), role
     if verified_launch is not None:
         if configured is None:
             raise ValueError("formal group omniB requires an explicit feature_seed")
@@ -4090,7 +4091,11 @@ def cmd_interact(args) -> int:
     maf_min = float(grm_cfg.get("maf_min", 0.01))
     n_jobs = int(args.n_jobs)
     retained_variant_masks = None
-    if mode == "group" and statistic == "omnib" and evidence_role == "benchmark":
+    if (
+        mode == "group"
+        and statistic == "omnib"
+        and evidence_role.startswith("benchmark_")
+    ):
         try:
             retained_variant_masks = _build_benchmark_mask_records(
                 ic, subdata, sample_idx
