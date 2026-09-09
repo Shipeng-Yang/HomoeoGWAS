@@ -8,6 +8,7 @@ DL-weighting and multi-trait extensions are layered on.
 import copy
 import hashlib
 import json
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -1865,6 +1866,27 @@ def test_batched_nested_f_handles_duplicate_nuisance_columns():
     p_duplicated = I._batch_nested_f(y, duplicated, z.reshape(-1, 1))
     p_unique = I._batch_nested_f(y, unique, z.reshape(-1, 1))
     assert p_duplicated == pytest.approx(p_unique, rel=1e-11, abs=1e-12)
+
+
+def test_ordered_weighted_sum_has_a_high_precision_error_bound():
+    rng = np.random.default_rng(20260908)
+    weights = rng.normal(size=257)
+    values = rng.normal(size=(257, 3)) * np.array([1.0, 1.0e8, 1.0e-8])
+
+    observed = I._ordered_weighted_sum_rows(weights, values)
+    reference = np.array([
+        math.fsum(
+            float(weights[row]) * float(values[row, column])
+            for row in range(values.shape[0])
+        )
+        for column in range(values.shape[1])
+    ])
+    absolute_terms = np.sum(np.abs(weights[:, None] * values), axis=0)
+    error_bound = (
+        np.finfo(np.float64).eps * values.shape[0] * absolute_terms
+    )
+
+    assert np.all(np.abs(observed - reference) <= error_bound)
 
 
 def test_batched_nested_f_stable_path_normalizes_integer_and_float32_responses():

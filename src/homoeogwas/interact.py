@@ -1668,6 +1668,36 @@ def run_pair_scan(
                  "same hypotheses, so exactly one of them is inferential"))
 
 
+def _ordered_weighted_sum_rows(
+    weights: np.ndarray,
+    values: np.ndarray,
+) -> np.ndarray:
+    """Reduce in sample order with O(response-width) float64 scratch.
+
+    The ordinary, non-compensated accumulation deliberately fixes the row
+    order so response partitioning cannot select a different BLAS reduction.
+    Its rounding error is bounded by the standard sequential-sum error bound;
+    the benchmark tests that bound against ``math.fsum``.
+    """
+
+    weights = np.asarray(weights, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    total = np.zeros(values.shape[1], dtype=np.float64)
+    for row in range(values.shape[0]):
+        total += weights[row] * values[row]
+    return total
+
+
+def _ordered_squared_sum_rows(values: np.ndarray) -> np.ndarray:
+    """Columnwise squared norm with fixed sample order and bounded scratch."""
+
+    values = np.asarray(values, dtype=np.float64)
+    total = np.zeros(values.shape[1], dtype=np.float64)
+    for row in range(values.shape[0]):
+        total += values[row] * values[row]
+    return total
+
+
 def _batch_nested_f(
     Yw: np.ndarray,
     Xred: np.ndarray,
@@ -1698,31 +1728,13 @@ def _batch_nested_f(
     # Explicit residual norms avoid catastrophic cancellation from
     # ||Y||^2 - ||Q'Y||^2 when the fitted model explains almost all variation.
     if response_axis_stable:
-        def ordered_weighted_sum_rows(
-            weights: np.ndarray, values: np.ndarray,
-        ) -> np.ndarray:
-            # One float64 response-width accumulator fixes the sample reduction
-            # order without the old sample-by-response cumulative-sum copy.
-            # This intentionally uses an ordinary, non-compensated sum so that
-            # response partitioning cannot select a different BLAS reduction.
-            total = np.zeros(values.shape[1], dtype=np.float64)
-            for row in range(values.shape[0]):
-                total += weights[row] * values[row]
-            return total
-
-        def ordered_squared_sum_rows(values: np.ndarray) -> np.ndarray:
-            total = np.zeros(values.shape[1], dtype=np.float64)
-            for row in range(values.shape[0]):
-                total += values[row] * values[row]
-            return total
-
         def stable_projection(
             basis: np.ndarray, values: np.ndarray,
         ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
             projection = np.zeros(values.shape, dtype=np.float64)
             coefficients = []
             for column in range(basis.shape[1]):
-                coefficient = ordered_weighted_sum_rows(
+                coefficient = _ordered_weighted_sum_rows(
                     basis[:, column], values
                 )
                 projection += basis[:, column, None] * coefficient[None, :]
@@ -1731,14 +1743,14 @@ def _batch_nested_f(
 
         reduced_fit, _ = stable_projection(Qr, Yw)
         Yres = Yw - reduced_fit
-        response_ss = ordered_squared_sum_rows(Yw)
-        reduced_residual_ss = ordered_squared_sum_rows(Yres)
+        response_ss = _ordered_squared_sum_rows(Yw)
+        reduced_residual_ss = _ordered_squared_sum_rows(Yres)
         added_fit, added_coefficients = stable_projection(Qa, Yres)
         added_ss = np.zeros(Yw.shape[1], dtype=float)
         for coefficient in added_coefficients:
             added_ss += coefficient * coefficient
         full_resid = Yres - added_fit
-        rss_f = ordered_squared_sum_rows(full_resid)
+        rss_f = _ordered_squared_sum_rows(full_resid)
     else:
         Yres = Yw - Qr @ (Qr.T @ Yw) if Qr.size else Yw.copy()
         response_ss = (Yw ** 2).sum(0)
