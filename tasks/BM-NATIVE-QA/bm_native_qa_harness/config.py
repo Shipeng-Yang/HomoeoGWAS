@@ -9,6 +9,7 @@ from scripts.benchmarks.v201.contracts import sha256_payload
 
 from .identity import sha256_file
 from .plan import ContextSpec, InvocationSpec, ResponseSpec
+from .policy import canonical_interact
 
 
 class ConfigError(RuntimeError):
@@ -62,17 +63,20 @@ def build_interact_config(
         raise ConfigError(f"output target already exists: {output_root}")
     if checkpoint_root.exists():
         raise ConfigError(f"checkpoint target already exists: {checkpoint_root}")
+    science = canonical_interact()
+    burden = dict(science["burden"])
+    calibration = science["calibration"]
     return {
         "interact": {
-            "mode": "group",
+            "mode": science["mode"],
             "subgenomes": list(context.subgenomes),
             "groups": str(context.groups_path),
-            "statistic": "omniB",
-            "hypothesis_unit": "group",
-            "subset_order": 2,
-            "family_scope": "primary_only",
-            "primary_transform": "INT",
-            "primary_multiplicity": "bootstrap_minp",
+            "statistic": science["statistic"],
+            "hypothesis_unit": science["hypothesis_unit"],
+            "subset_order": science["subset_order"],
+            "family_scope": science["family_scope"],
+            "primary_transform": science["primary_transform"],
+            "primary_multiplicity": science["primary_multiplicity"],
             "benchmark_identity": {
                 "panel_id": context.panel_id,
                 "sample_context": context.sample_context,
@@ -81,31 +85,24 @@ def build_interact_config(
             "genotype": dict(context.bed_prefixes),
             "snp_to_gene": dict(context.snp_to_gene),
             "phenotype": str(phenotype_path),
-            "sample_col": "sample",
-            "trait": "qa_trait",
-            "burden": {
-                "cap": 150,
-                "min_snp": 3,
-                "maf_min": 0.01,
-                "n_pc": 3,
-                "feature_seed": context.feature_seed,
-            },
-            "grm": {
-                "method": "grm_from_X",
-                "maf_min": 0.01,
-                "scope": "all_subgenomes",
-            },
+            "sample_col": science["sample_col"],
+            "trait": science["trait"],
+            "burden": {**burden, "feature_seed": context.feature_seed},
+            "grm": dict(science["grm"]),
             "calibration": {
-                "method": "bootstrap",
-                "B": 199,
+                "method": calibration["method"],
+                "B": calibration["B"],
                 "seed": int(bootstrap_seed),
-                "qa_only": True,
+                "qa_only": calibration["qa_only"],
                 "checkpoint": {
-                    "enabled": True,
+                    "enabled": calibration["checkpoint_enabled"],
                     "root": str(checkpoint_root),
-                    "block_size": 25,
+                    "block_size": calibration["checkpoint_block_size"],
                 },
             },
         },
-        "outputs": {"out_dir": str(output_root), "full_ranking": True},
+        "outputs": {
+            "out_dir": str(output_root),
+            "full_ranking": science["full_ranking"],
+        },
     }

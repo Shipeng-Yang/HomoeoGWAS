@@ -24,6 +24,8 @@ from scripts.benchmarks.v201.track_omnib import (
     _root_from_covariance,
 )
 
+from .policy import canonical_interact, preparation_options
+
 
 class MaterializationBlocked(RuntimeError):
     """Response materialization lacks a complete, reviewed authorization."""
@@ -137,15 +139,10 @@ def prepare_anchor(
         anchored_context.family,
         anchored_context.phenotype,
         anchored_context.sample_idx,
-        transform="INT",
-        feature_seed=anchored_context.feature_seed,
-        retained_variant_masks=anchored_context.retained_variant_masks,
-        grm_method="grm_from_X",
-        maf_min=0.01,
-        burden_maf=0.01,
-        min_snp=3,
-        cap=150,
-        n_pc=3,
+        **preparation_options(
+            feature_seed=anchored_context.feature_seed,
+            retained_variant_masks=anchored_context.retained_variant_masks,
+        ),
     )
     if scores.null_covariance is None:
         raise MaterializationBlocked(
@@ -212,14 +209,24 @@ def generate_response(
             ]
             for copy_index, subgenome in enumerate(family.subgenomes)
         }
-        signal, signal_metadata = interaction_signal("mixed_sign", blocks)
+        declared_first_edge = tuple(family.subgenomes[:2])
+        signal, signal_metadata = interaction_signal(
+            "mixed_sign",
+            blocks,
+            causal_edges=(declared_first_edge,),
+        )
+        causal_edges = signal_metadata["causal_pair_edges"]
+        if not isinstance(causal_edges, list) or len(causal_edges) != 1:
+            raise MaterializationBlocked(
+                "accepted mixed-sign primitive did not return exactly one causal edge"
+            )
         values, pve_metadata = compose_exact_pve(signal, residual, 0.03)
         metadata = {
             "truth_id": truth_id,
             "generator_scale_interaction_pve": pve_metadata["realized_pve"],
             "generator_scale_target_pve": pve_metadata["target_pve"],
             "causal_group_id": family.group_ids[group_index],
-            "causal_pair_edge": list(family.subgenomes[:2]),
+            "causal_pair_edge": causal_edges[0],
             "null_generation": null_metadata,
             "signal_generation": signal_metadata,
         }
@@ -291,7 +298,8 @@ def write_roundtrip_response(
         raise ValueError("sample IDs must be nonempty TSV-safe strings")
     if len(set(ordered_samples)) != len(ordered_samples):
         raise ValueError("sample IDs must be unique")
-    if sample_col != "sample" or trait != "qa_trait":
+    science = canonical_interact()
+    if sample_col != science["sample_col"] or trait != science["trait"]:
         raise ValueError("phenotype columns must match the frozen native config")
 
     with npy_path.open("xb") as npy_handle:

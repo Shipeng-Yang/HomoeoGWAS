@@ -8,6 +8,7 @@
   "design_payload": {
     "aggregate_caps": {
       "cpu_seconds": 115200,
+      "large_tmp_output_forbidden": true,
       "output_storage_gib": 20,
       "peak_aggregate_pss_gib": 128,
       "wall_seconds": 7200
@@ -63,6 +64,48 @@
         "feature_seed": 5177468918036905819,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
         "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+            "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/cotton_samples_pc1_spread_192.tsv",
+            "fd67db96a7b43576568a6ce0d90cbee252d424fed74ef9659cc6ef14a6815175"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bed",
+            "01aa0d289c8641e4abda53319396fcd0035c6e98fcbb837e0a5ecc52293a1294"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bim",
+            "d32be184e820a2b5b5fc530e3b1f8a42f0b1b994c688ce529a97853a49f29b1f"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+            "d8ae963b96453af3212f3dfde8fe825045eface2220a84d95c97a26eb15830bc"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bed",
+            "8b5d64f0b9170c9457e5eb568d5ca0adf251aaa95188f4f4e4699f424da24fcd"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bim",
+            "8b08f945914010fb9c4c4308aea2a210a6ba08a49ec0be38b68f39167beadd94"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz",
+            "e08cd70ccfd95a013728eed8c7ccd46ca1edf103e9db1d6cb0f2489575a17b7d"
+          ]
+        ],
         "key": "cotton.pc1_spread_192",
         "panel_id": "REALG.CGVD1245",
         "sample_context": "pc1_spread_192",
@@ -98,6 +141,48 @@
         "feature_seed": 5177468918036905819,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
         "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+            "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/cotton_samples_seeded_random_192.tsv",
+            "c3e21a67a2919db26f3fff9811db81b9d5d21b78676d3126d6de0008c9704780"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bed",
+            "01aa0d289c8641e4abda53319396fcd0035c6e98fcbb837e0a5ecc52293a1294"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bim",
+            "d32be184e820a2b5b5fc530e3b1f8a42f0b1b994c688ce529a97853a49f29b1f"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+            "d8ae963b96453af3212f3dfde8fe825045eface2220a84d95c97a26eb15830bc"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bed",
+            "8b5d64f0b9170c9457e5eb568d5ca0adf251aaa95188f4f4e4699f424da24fcd"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bim",
+            "8b08f945914010fb9c4c4308aea2a210a6ba08a49ec0be38b68f39167beadd94"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz",
+            "e08cd70ccfd95a013728eed8c7ccd46ca1edf103e9db1d6cb0f2489575a17b7d"
+          ]
+        ],
         "key": "cotton.seeded_random_192",
         "panel_id": "REALG.CGVD1245",
         "sample_context": "seeded_random_192",
@@ -133,6 +218,48 @@
         "feature_seed": 5177468918036905819,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
         "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+            "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v4-holdout-subsets/cotton_samples_holdout_192.tsv",
+            "3f06b311d5580195d0c3d9436c447a5a91a159f98531d9395d71143c004a6225"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bed",
+            "01aa0d289c8641e4abda53319396fcd0035c6e98fcbb837e0a5ecc52293a1294"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bim",
+            "d32be184e820a2b5b5fc530e3b1f8a42f0b1b994c688ce529a97853a49f29b1f"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+            "d8ae963b96453af3212f3dfde8fe825045eface2220a84d95c97a26eb15830bc"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bed",
+            "8b5d64f0b9170c9457e5eb568d5ca0adf251aaa95188f4f4e4699f424da24fcd"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.bim",
+            "8b08f945914010fb9c4c4308aea2a210a6ba08a49ec0be38b68f39167beadd94"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd.fam",
+            "ddaaf741b2aa7ae3222cda8de3f11a7fd83cdf085777df089a587b43bacde1e5"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz",
+            "e08cd70ccfd95a013728eed8c7ccd46ca1edf103e9db1d6cb0f2489575a17b7d"
+          ]
+        ],
         "key": "cotton.holdout_192",
         "panel_id": "REALG.CGVD1245",
         "sample_context": "holdout_192",
@@ -172,6 +299,64 @@
         "feature_seed": 4248740791639463210,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
         "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+            "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/wheat_samples_pc1_spread_192.tsv",
+            "7ef83847173276b29b3f28f0d1669c270849aa32756c5ad0fccc95baee893764"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bed",
+            "d449c0ecaf101fdf4a089e4df9fc0ff30952079f74648417e11a23f8d47817ef"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bim",
+            "8931369c38ad8a4e2a6c9a19e4f51b361c4f6a81861cf8a20398c18ef0b93e2b"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+            "8afc846f8a69d50f75b725b9327c9a163abe179d3d10ebcae9b47e75a27bf9b3"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bed",
+            "fbdea804c0694eb07b23782b802be9befb5042e34c086f43bfc9e50109955a09"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bim",
+            "b63aa13d0eb492a661ce6b40d0c1a0bf4a46c14e33ff00e2a90a0a5738dc4158"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+            "a14c05ed5671a17942cba90dde38f81bc09530b5c002140d1b992cb44aefc24a"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bed",
+            "e750531fee811dd54b7d47b8c5e9d86e0d47dbdfe6d655c9ea120a2247f41e53"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bim",
+            "292d6e4c891ae40372142a919518f8fd6a35f09a4ab7cc27fa4bd5b52b3cff22"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz",
+            "6f52560a7690b7fe3d9f26cd3fd790b0910e125418c42102da6c8968aaa1a13f"
+          ]
+        ],
         "key": "wheat.pc1_spread_192",
         "panel_id": "REALG.WATKINS_F2143",
         "sample_context": "pc1_spread_192",
@@ -216,6 +401,64 @@
         "feature_seed": 4248740791639463210,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
         "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+            "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/wheat_samples_seeded_random_192.tsv",
+            "7099a1fb0210b3aafbba261db37aa3b659426fbd0c01d29698a98a2ab401a879"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bed",
+            "d449c0ecaf101fdf4a089e4df9fc0ff30952079f74648417e11a23f8d47817ef"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bim",
+            "8931369c38ad8a4e2a6c9a19e4f51b361c4f6a81861cf8a20398c18ef0b93e2b"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+            "8afc846f8a69d50f75b725b9327c9a163abe179d3d10ebcae9b47e75a27bf9b3"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bed",
+            "fbdea804c0694eb07b23782b802be9befb5042e34c086f43bfc9e50109955a09"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bim",
+            "b63aa13d0eb492a661ce6b40d0c1a0bf4a46c14e33ff00e2a90a0a5738dc4158"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+            "a14c05ed5671a17942cba90dde38f81bc09530b5c002140d1b992cb44aefc24a"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bed",
+            "e750531fee811dd54b7d47b8c5e9d86e0d47dbdfe6d655c9ea120a2247f41e53"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bim",
+            "292d6e4c891ae40372142a919518f8fd6a35f09a4ab7cc27fa4bd5b52b3cff22"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz",
+            "6f52560a7690b7fe3d9f26cd3fd790b0910e125418c42102da6c8968aaa1a13f"
+          ]
+        ],
         "key": "wheat.seeded_random_192",
         "panel_id": "REALG.WATKINS_F2143",
         "sample_context": "seeded_random_192",
@@ -260,6 +503,64 @@
         "feature_seed": 4248740791639463210,
         "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
         "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "input_file_sha256s": [
+          [
+            "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+            "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e"
+          ],
+          [
+            "tasks/BM-INPUTS/staging/real-core-v4-holdout-subsets/wheat_samples_holdout_192.tsv",
+            "1bbb3e467305e7c3bc24662eae1dce01810fe25a16d27fad48124d472e5407ef"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bed",
+            "d449c0ecaf101fdf4a089e4df9fc0ff30952079f74648417e11a23f8d47817ef"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.bim",
+            "8931369c38ad8a4e2a6c9a19e4f51b361c4f6a81861cf8a20398c18ef0b93e2b"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_A_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+            "8afc846f8a69d50f75b725b9327c9a163abe179d3d10ebcae9b47e75a27bf9b3"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bed",
+            "fbdea804c0694eb07b23782b802be9befb5042e34c086f43bfc9e50109955a09"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.bim",
+            "b63aa13d0eb492a661ce6b40d0c1a0bf4a46c14e33ff00e2a90a0a5738dc4158"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_B_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+            "a14c05ed5671a17942cba90dde38f81bc09530b5c002140d1b992cb44aefc24a"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bed",
+            "e750531fee811dd54b7d47b8c5e9d86e0d47dbdfe6d655c9ea120a2247f41e53"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.bim",
+            "292d6e4c891ae40372142a919518f8fd6a35f09a4ab7cc27fa4bd5b52b3cff22"
+          ],
+          [
+            "/mnt/nvme/wheat_genomewide/gw_D_flank.fam",
+            "607c4d63305dbeeed2deaa39fd4dddcfc2dd36d59f7e75b4e8c232de1a833f09"
+          ],
+          [
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz",
+            "6f52560a7690b7fe3d9f26cd3fd790b0910e125418c42102da6c8968aaa1a13f"
+          ]
+        ],
         "key": "wheat.holdout_192",
         "panel_id": "REALG.WATKINS_F2143",
         "sample_context": "holdout_192",
@@ -741,39 +1042,43 @@
     ],
     "runner_test_sha256s": {
       "bm_native_qa_harness/__init__.py": "7b6cddbe0606d023dc661fed7bd9b497d98d47e652e29baeea861dc7af0347fe",
-      "bm_native_qa_harness/cli.py": "dc1ae3894321481d4e2a85ab2a9246b8d3d5e9f74e172ab74c5d04b4a48b3418",
-      "bm_native_qa_harness/config.py": "2152b61766d08bf1b2a7203fa069ec336a62972e8e8c879d9b1dee944a1f8cbb",
-      "bm_native_qa_harness/execute.py": "bbb47711acfb6e2ab372f659dfc2d53d63df059af59aafc60858fd97b8060095",
-      "bm_native_qa_harness/identity.py": "642d5d5b6cd3cc0702db48650663aa31775ba370715c9074a02f19fd44d11adc",
-      "bm_native_qa_harness/materialize.py": "d69b63829c0099e6d75357d054270e94a604968b1ee830ea989b6e5f61c80f5e",
-      "bm_native_qa_harness/plan.py": "d2e2bf132ef8ffab9b56be934a1c047e9c4af7ff85df4080b2c4e0c39a45c0bf",
+      "bm_native_qa_harness/cli.py": "48191fef4414b1eeb7fe11a3187533258bad79141afb14630ada29f08580a70a",
+      "bm_native_qa_harness/config.py": "bf29280591618363bc753f34fb6793490117ffcbca69b65427f29361717f7624",
+      "bm_native_qa_harness/execute.py": "4066cd143a9109bc9346d70cf91ea992eb8a88d6176c99221e7608c9c960daaa",
+      "bm_native_qa_harness/identity.py": "db94e7cc9b6c617f7ecf763d03b052a3ac1875bd2f39ea7e06471df64f856d98",
+      "bm_native_qa_harness/materialize.py": "9754d4e38aa6cfa33398f5e4779c04e892857f696a264a192efb99131df6af6c",
+      "bm_native_qa_harness/plan.py": "b8f63ba408b370be3ed97a3dd9966e034ad6bf695258068f070a682bb12f9007",
+      "bm_native_qa_harness/policy.py": "22e39b4a8bb217f1d9c26a29e5e77f46b64bdb6bb321dffe359b01d4e0f7111a",
       "tests/conftest.py": "eb45a73fbf38679e2d31a0357621825b9f675b6315cb363e87c3a75ce718ae99",
-      "tests/test_cli.py": "3548ccacdebbaed11452f2052c0ed053e26982c7d8d705a23a9ffa36981e50a6",
+      "tests/test_cli.py": "521f8abd38efe7205a4ebb6d8351988034e215b60cb51ae40618e3a396b9050e",
       "tests/test_config.py": "2c33259554b5546c20cbfd7e51f6dba91663628f883dd65bc09a9b53c3cbd0eb",
-      "tests/test_execute.py": "6fb6a107b986ee2d170ecdac018556a049c4d0bb6cf2eb868005381bf6c13a68",
-      "tests/test_identity.py": "510ba2c3b81e10c38e459f676f008e9526297a1e73670a6403117002b519909b",
-      "tests/test_materialize.py": "fe0ea069f65b495194c184c4450d82fa613865343e2cf096505dab093dc31241",
-      "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a"
+      "tests/test_execute.py": "f1349bd3e4473d9e292450edd80c0748eecc59e5ab3c75ccbee53be1980f58a9",
+      "tests/test_identity.py": "c5909f42108bf0fe69361228c438ab43f1b940a58ef221d36ac71a6578089467",
+      "tests/test_materialize.py": "85cbcd23166ebcaac8e6a5e44a6d8a0e52553cf03c0243870dd8e03224c83efc",
+      "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a",
+      "tests/test_policy.py": "4dfda84517dc76154bb4481729902d3f02ac2aaa1f9115a0aa1a4548c092b530"
     }
   },
   "execution_authorized": false,
-  "qa_design_hash": "b3d760d09661d2ea1164f5793a2eee93ef43d7ecb40b16a235f92522e7669c24",
+  "qa_design_hash": "65ba6556d86db4d27b03169ff70d5b39796c5968ce8ece9f782e866995cf5d5e",
   "response_materialization_authorized": false,
   "runner_test_sha256s": {
     "bm_native_qa_harness/__init__.py": "7b6cddbe0606d023dc661fed7bd9b497d98d47e652e29baeea861dc7af0347fe",
-    "bm_native_qa_harness/cli.py": "dc1ae3894321481d4e2a85ab2a9246b8d3d5e9f74e172ab74c5d04b4a48b3418",
-    "bm_native_qa_harness/config.py": "2152b61766d08bf1b2a7203fa069ec336a62972e8e8c879d9b1dee944a1f8cbb",
-    "bm_native_qa_harness/execute.py": "bbb47711acfb6e2ab372f659dfc2d53d63df059af59aafc60858fd97b8060095",
-    "bm_native_qa_harness/identity.py": "642d5d5b6cd3cc0702db48650663aa31775ba370715c9074a02f19fd44d11adc",
-    "bm_native_qa_harness/materialize.py": "d69b63829c0099e6d75357d054270e94a604968b1ee830ea989b6e5f61c80f5e",
-    "bm_native_qa_harness/plan.py": "d2e2bf132ef8ffab9b56be934a1c047e9c4af7ff85df4080b2c4e0c39a45c0bf",
+    "bm_native_qa_harness/cli.py": "48191fef4414b1eeb7fe11a3187533258bad79141afb14630ada29f08580a70a",
+    "bm_native_qa_harness/config.py": "bf29280591618363bc753f34fb6793490117ffcbca69b65427f29361717f7624",
+    "bm_native_qa_harness/execute.py": "4066cd143a9109bc9346d70cf91ea992eb8a88d6176c99221e7608c9c960daaa",
+    "bm_native_qa_harness/identity.py": "db94e7cc9b6c617f7ecf763d03b052a3ac1875bd2f39ea7e06471df64f856d98",
+    "bm_native_qa_harness/materialize.py": "9754d4e38aa6cfa33398f5e4779c04e892857f696a264a192efb99131df6af6c",
+    "bm_native_qa_harness/plan.py": "b8f63ba408b370be3ed97a3dd9966e034ad6bf695258068f070a682bb12f9007",
+    "bm_native_qa_harness/policy.py": "22e39b4a8bb217f1d9c26a29e5e77f46b64bdb6bb321dffe359b01d4e0f7111a",
     "tests/conftest.py": "eb45a73fbf38679e2d31a0357621825b9f675b6315cb363e87c3a75ce718ae99",
-    "tests/test_cli.py": "3548ccacdebbaed11452f2052c0ed053e26982c7d8d705a23a9ffa36981e50a6",
+    "tests/test_cli.py": "521f8abd38efe7205a4ebb6d8351988034e215b60cb51ae40618e3a396b9050e",
     "tests/test_config.py": "2c33259554b5546c20cbfd7e51f6dba91663628f883dd65bc09a9b53c3cbd0eb",
-    "tests/test_execute.py": "6fb6a107b986ee2d170ecdac018556a049c4d0bb6cf2eb868005381bf6c13a68",
-    "tests/test_identity.py": "510ba2c3b81e10c38e459f676f008e9526297a1e73670a6403117002b519909b",
-    "tests/test_materialize.py": "fe0ea069f65b495194c184c4450d82fa613865343e2cf096505dab093dc31241",
-    "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a"
+    "tests/test_execute.py": "f1349bd3e4473d9e292450edd80c0748eecc59e5ab3c75ccbee53be1980f58a9",
+    "tests/test_identity.py": "c5909f42108bf0fe69361228c438ab43f1b940a58ef221d36ac71a6578089467",
+    "tests/test_materialize.py": "85cbcd23166ebcaac8e6a5e44a6d8a0e52553cf03c0243870dd8e03224c83efc",
+    "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a",
+    "tests/test_policy.py": "4dfda84517dc76154bb4481729902d3f02ac2aaa1f9115a0aa1a4548c092b530"
   },
   "schema": "homoeogwas-bm-native-qa-prospective-inventory-v1",
   "seed_derivations": [

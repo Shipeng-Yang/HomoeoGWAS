@@ -12,6 +12,7 @@ from typing import Any
 from scripts.benchmarks.v201.contracts import sha256_payload
 
 from .plan import InvocationSpec
+from .policy import NATIVE_CAPS
 
 _THREAD_ENV = MappingProxyType(
     {
@@ -22,15 +23,6 @@ _THREAD_ENV = MappingProxyType(
     }
 )
 _GIB = 1024**3
-NATIVE_CAPS = MappingProxyType(
-    {
-        "wall_seconds": 7200,
-        "cpu_seconds": 115200,
-        "peak_aggregate_pss_gib": 128,
-        "output_storage_gib": 20,
-        "large_tmp_output_forbidden": True,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -144,17 +136,24 @@ def _require_number(record: Mapping[str, Any], field: str) -> float:
 def evaluate_static_preflight(record: Mapping[str, Any]) -> StaticPreflight:
     """Evaluate only recorded host availability and supervisor configuration."""
 
-    forbidden = {
-        "supervisor_self_test",
-        "resource_projection",
-        "timing_workload",
-        "genotype_computation",
-        "phenotype_computation",
-    } & set(record)
-    if forbidden:
+    allowed = {
+        "utc_timestamp",
+        "logical_cpu_count",
+        "mem_available_bytes",
+        "output_filesystem_free_bytes",
+        "temporary_filesystem_free_bytes",
+        "output_root_exists",
+        "output_lock_exists",
+        "supervisor_executable_present_and_executable",
+        "supervisor_executable_sha256",
+        "supervisor_configuration_sha256",
+        "configured_thresholds",
+    }
+    unknown = set(record) - allowed
+    if unknown:
         raise ExecutionBlocked(
-            "static preflight contains prohibited workload evidence: "
-            + ", ".join(sorted(forbidden))
+            "static preflight contains unknown fields: "
+            + ", ".join(sorted(unknown))
         )
     timestamp = record.get("utc_timestamp")
     if not isinstance(timestamp, str) or not timestamp.endswith("Z"):

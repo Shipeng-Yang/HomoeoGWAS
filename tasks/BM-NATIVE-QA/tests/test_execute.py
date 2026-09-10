@@ -222,6 +222,14 @@ def test_static_preflight_rejects_threshold_drift() -> None:
         evaluate_static_preflight(record)
 
 
+def test_static_preflight_rejects_every_unknown_field() -> None:
+    record = _static_preflight_record()
+    record["estimated_runtime_seconds"] = 123
+
+    with pytest.raises(RuntimeError, match="unknown fields.*estimated_runtime_seconds"):
+        evaluate_static_preflight(record)
+
+
 def _commands(tmp_path: Path):
     return commands_for_invocation(
         _invocation(),
@@ -277,6 +285,26 @@ def test_first_cap_breach_terminates_process_group_and_prevents_audit(
     assert raised.value.dimension == dimension
     assert calls == ["validate", "interact"]
     assert terminated == ["interact"]
+
+
+def test_simultaneous_cap_breaches_report_wall_first(tmp_path: Path) -> None:
+    sample = ResourceSample(
+        wall_seconds=7201,
+        cpu_seconds=115201,
+        aggregate_pss_bytes=128 * 1024**3 + 1,
+        output_bytes=20 * 1024**3 + 1,
+    )
+
+    with pytest.raises(CapBreach) as raised:
+        run_sequence(
+            _commands(tmp_path),
+            authority=_native_authority(),
+            executor=lambda command: command.purpose,
+            sampler=lambda _handle: (RuntimeObservation(sample, exit_code=0),),
+            terminator=lambda _handle: None,
+        )
+
+    assert raised.value.dimension == "wall_seconds"
 
 
 def test_nonzero_interact_exit_is_terminal_without_retry_or_audit(tmp_path: Path) -> None:

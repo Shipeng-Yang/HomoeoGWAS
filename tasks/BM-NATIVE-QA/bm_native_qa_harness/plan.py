@@ -23,6 +23,7 @@ class ContextSpec:
     subgenomes: tuple[str, ...] = ()
     bed_prefixes: tuple[tuple[str, str], ...] = ()
     snp_to_gene: tuple[tuple[str, str], ...] = ()
+    input_file_sha256s: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,27 @@ class ProspectiveInventory:
 def bind_context_inputs(
     inventory: ProspectiveInventory,
     context_evidence: dict[str, Any],
+    input_file_sha256s: dict[str, str] | None = None,
 ) -> ProspectiveInventory:
     evidence_contexts = context_evidence["contexts"]
     contexts: list[ContextSpec] = []
     for context in inventory.contexts:
         copies = evidence_contexts[context.key]["copies"]
         subgenomes = tuple(str(label) for label in copies)
+        declared_paths = declared_context_input_paths(context, context_evidence)
+        bound_hashes: tuple[tuple[str, str], ...] = ()
+        if input_file_sha256s is not None:
+            missing = [path for path in declared_paths if path not in input_file_sha256s]
+            if missing:
+                raise PlanError(f"missing prospective input hash: {missing[0]}")
+            bound_hashes = tuple(
+                (path, str(input_file_sha256s[path])) for path in declared_paths
+            )
+            hashes = dict(bound_hashes)
+            if hashes[str(context.groups_path)] != context.groups_sha256:
+                raise PlanError("prospective groups hash differs from amendment")
+            if hashes[str(context.samples_path)] != context.samples_sha256:
+                raise PlanError("prospective samples hash differs from amendment")
         contexts.append(
             replace(
                 context,
@@ -70,9 +86,33 @@ def bind_context_inputs(
                 snp_to_gene=tuple(
                     (label, str(copies[label]["mapping"])) for label in subgenomes
                 ),
+                input_file_sha256s=bound_hashes,
             )
         )
     return replace(inventory, contexts=tuple(contexts))
+
+
+def declared_context_input_paths(
+    context: ContextSpec,
+    context_evidence: dict[str, Any],
+) -> tuple[str, ...]:
+    copies = context_evidence["contexts"][context.key]["copies"]
+    paths = [str(context.groups_path), str(context.samples_path)]
+    for label in copies:
+        bed = Path(copies[label]["bed"])
+        if bed.suffix != ".bed":
+            raise PlanError(f"context BED path lacks .bed suffix: {bed}")
+        paths.extend(
+            (
+                str(bed),
+                str(bed.with_suffix(".bim")),
+                str(bed.with_suffix(".fam")),
+                str(copies[label]["mapping"]),
+            )
+        )
+    if len(paths) != len(set(paths)):
+        raise PlanError(f"duplicate declared input path within context {context.key}")
+    return tuple(paths)
 
 
 def _context_spec(key: str, record: dict[str, Any]) -> ContextSpec:

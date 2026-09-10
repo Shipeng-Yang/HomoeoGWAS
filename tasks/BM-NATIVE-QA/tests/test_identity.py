@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from bm_native_qa_harness import identity
 from bm_native_qa_harness.identity import freeze_identity
-from bm_native_qa_harness.plan import build_inventory
+from bm_native_qa_harness.plan import bind_context_inputs, build_inventory
 
 
 def test_design_payload_excludes_generated_values(amendment: dict) -> None:
@@ -119,6 +119,21 @@ def test_freeze_identity_rejects_non_sha256_binding(amendment: dict) -> None:
         freeze_identity(
             build_inventory(amendment),
             fixture_manifest_sha256="7e77399a",
+            amendment_sha256="a" * 64,
+            runner_test_sha256s={"runner.py": "b" * 64},
+        )
+
+
+def test_freeze_identity_rejects_real_input_paths_without_file_hashes(
+    amendment: dict,
+    context_evidence: dict,
+) -> None:
+    inventory = bind_context_inputs(build_inventory(amendment), context_evidence)
+
+    with pytest.raises(RuntimeError, match="prospective input-file SHA-256"):
+        freeze_identity(
+            inventory,
+            fixture_manifest_sha256="7" * 64,
             amendment_sha256="a" * 64,
             runner_test_sha256s={"runner.py": "b" * 64},
         )

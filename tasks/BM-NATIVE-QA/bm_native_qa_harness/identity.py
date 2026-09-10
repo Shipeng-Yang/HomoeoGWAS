@@ -10,6 +10,7 @@ from typing import Any
 from scripts.benchmarks.v201.contracts import derive_seed, sha256_payload
 
 from .plan import ProspectiveInventory
+from .policy import NATIVE_CAPS, canonical_interact
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -118,6 +119,17 @@ def freeze_identity(
         raise IdentityError("runner/test SHA-256 mapping must not be empty")
     for name, value in runner_test_sha256s.items():
         _require_sha256(value, name)
+    for context in inventory.contexts:
+        if context.subgenomes and not context.input_file_sha256s:
+            raise IdentityError(
+                f"prospective input-file SHA-256 bindings missing for {context.key}"
+            )
+        paths = [path for path, _digest in context.input_file_sha256s]
+        if len(paths) != len(set(paths)):
+            raise IdentityError(f"duplicate prospective input path for {context.key}")
+        for path, digest in context.input_file_sha256s:
+            _require_sha256(digest, f"{context.key}:{path}")
+    science = canonical_interact()
     payload: dict[str, object] = {
         "fixture_manifest_sha256": fixture_manifest_sha256,
         "amendment_sha256": amendment_sha256,
@@ -130,38 +142,12 @@ def freeze_identity(
         "response_generation_policy_id": (
             "fitted_vhat_from_independent_standard_normal_anchor_v1"
         ),
-        "canonical_interact": {
-            "mode": "group",
-            "statistic": "omniB",
-            "hypothesis_unit": "group",
-            "subset_order": 2,
-            "family_scope": "primary_only",
-            "primary_transform": "INT",
-            "primary_multiplicity": "bootstrap_minp",
-            "burden": {"cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3},
-            "grm": {
-                "method": "grm_from_X",
-                "maf_min": 0.01,
-                "scope": "all_subgenomes",
-            },
-            "calibration": {
-                "method": "bootstrap",
-                "B": 199,
-                "qa_only": True,
-                "checkpoint_enabled": True,
-                "checkpoint_block_size": 25,
-            },
-            "sample_col": "sample",
-            "trait": "qa_trait",
-            "full_ranking": True,
+        "canonical_interact": science,
+        "bootstrap": {
+            "B": science["calibration"]["B"],
+            "checkpoint_mode": "indexed_required",
         },
-        "bootstrap": {"B": 199, "checkpoint_mode": "indexed_required"},
-        "aggregate_caps": {
-            "wall_seconds": 7200,
-            "cpu_seconds": 115200,
-            "peak_aggregate_pss_gib": 128,
-            "output_storage_gib": 20,
-        },
+        "aggregate_caps": dict(NATIVE_CAPS),
         "future_artifacts": _future_artifact_layout(inventory),
     }
     design_hash = sha256_payload(payload)

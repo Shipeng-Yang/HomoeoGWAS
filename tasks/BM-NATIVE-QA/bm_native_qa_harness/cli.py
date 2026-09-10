@@ -52,8 +52,8 @@ def _runner_test_sha256s(task_root: Path) -> dict[str, str]:
     from .identity import sha256_file
 
     members = sorted(
-        (*task_root.joinpath("bm_native_qa_harness").glob("*.py"),)
-        + (*task_root.joinpath("tests").glob("*.py"),),
+        (*task_root.joinpath("bm_native_qa_harness").rglob("*.py"),)
+        + (*task_root.joinpath("tests").rglob("*.py"),),
         key=lambda path: path.relative_to(task_root).as_posix(),
     )
     if not members:
@@ -181,6 +181,26 @@ def _validate_amendment_acceptance(amendment: dict[str, Any], path: Path) -> Non
             raise CLIError(f"{label} report differs from its accepted binding")
 
 
+def _prospective_input_hashes(
+    inventory,
+    context_evidence: dict[str, Any],
+    project_root: Path,
+) -> dict[str, str]:
+    from .identity import sha256_file
+    from .plan import declared_context_input_paths
+
+    hashes: dict[str, str] = {}
+    for context in inventory.contexts:
+        for declared in declared_context_input_paths(context, context_evidence):
+            path = Path(declared)
+            resolved = path if path.is_absolute() else project_root / path
+            observed = sha256_file(resolved)
+            previous = hashes.setdefault(declared, observed)
+            if previous != observed:
+                raise CLIError(f"prospective input changed while hashing: {declared}")
+    return hashes
+
+
 def _write_plan(args: argparse.Namespace) -> None:
     _ensure_repo_import_root()
     from .identity import freeze_identity, sha256_file
@@ -210,7 +230,18 @@ def _write_plan(args: argparse.Namespace) -> None:
 
     task_root = Path(__file__).resolve().parents[1]
     runner_test_sha256s = _runner_test_sha256s(task_root)
-    inventory = bind_context_inputs(build_inventory(amendment), context_evidence)
+    inventory = build_inventory(amendment)
+    project_root = args.amendment.parent.parent.parent
+    input_file_sha256s = _prospective_input_hashes(
+        inventory,
+        context_evidence,
+        project_root,
+    )
+    inventory = bind_context_inputs(
+        inventory,
+        context_evidence,
+        input_file_sha256s,
+    )
     frozen = freeze_identity(
         inventory,
         fixture_manifest_sha256=fixture_hash,

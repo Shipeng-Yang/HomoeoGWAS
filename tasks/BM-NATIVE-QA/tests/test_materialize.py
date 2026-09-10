@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 
 import numpy as np
 import pytest
 from bm_native_qa_harness import materialize
 
+from homoeogwas.group_family import MasterGroupFamily
 from scripts.benchmarks.v201.track_omnib import build_synthetic_omnib_context
 
 
@@ -129,6 +131,34 @@ def test_generate_gaussian_and_mixed_sign_responses_from_fitted_vhat() -> None:
     assert diagnostic["status"] == "descriptive_noninferential_only"
     assert "exact_pve" not in diagnostic
     assert 0.0 <= diagnostic["squared_correlation"] <= 1.0
+
+
+def test_mixed_sign_uses_first_declared_edge_for_nonalphabetical_three_copy_family(
+) -> None:
+    context = build_synthetic_omnib_context(n=24, groups=2, copies=3, seed=7)
+    original = context.family
+    reordered = MasterGroupFamily(
+        subgenomes=("C", "A", "B"),
+        group_ids=original.group_ids,
+        genes=tuple((row[2], row[0], row[1]) for row in original.genes),
+    )
+    context = replace(context, family=reordered)
+    prepared = materialize.prepare_anchor(
+        context,
+        design_hash="0" * 64,
+        scenario_id="qa_test.synthetic.reordered",
+        anchor_seed=11,
+    )
+
+    mixed = materialize.generate_response(
+        prepared,
+        response_id="qa_test.synthetic.mixed_sign_diagnostic_pve0p03",
+        truth_id="mixed_sign_diagnostic_pve0p03",
+        response_seed=13,
+    )
+
+    assert mixed.metadata["causal_pair_edge"] == ["A", "C"]
+    assert mixed.metadata["signal_generation"]["causal_pair_edges"] == [["A", "C"]]
 
 
 def test_write_response_round_trips_little_endian_npy_and_17_digit_tsv(
