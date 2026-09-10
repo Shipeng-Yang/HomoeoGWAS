@@ -1,0 +1,112 @@
+schema: homoeogwas-bm-native-qa-runner-config-verification-v1
+created_utc: 2026-09-10T11:16:55Z
+status: candidate_awaiting_independent_runner_config_review
+scope: prospective_runner_and_config_only
+
+accepted_product:
+  source_commit: 9d7faee655c020d84bdd6a6fba33b42a8428aea6
+  source_tree: 92355ddcbb2cd3d749169291fcbf6065eb556311
+  product_diff_from_source_commit: empty
+  checked_paths:
+    - src
+    - scripts
+    - tests
+    - pyproject.toml
+  exact_members:
+    scripts/benchmarks/v201/contracts.py: 9a0c7b2ca174b4d22c25905f9dcb03a2716416ca3e32c7c7a223bfdc1648f5ab
+    scripts/benchmarks/v201/simulation.py: e41d751e9196ce28748190fbf0debf681db47140ff0e60760f3c1a03e5d77b10
+    scripts/benchmarks/v201/track_omnib.py: e9f697ef4afa2c1257cc0141fae7116d4966eda25cf3440467760e083060c528
+    src/homoeogwas/interact.py: df52a2ecc0d0ec440b01ea4b949377ef48d77ab704ebb5e78b75253f28dacd52
+
+candidate_branch:
+  worktree: /tmp/U7_GWAS-v5-benchmark-remediation
+  branch: codex/v5-benchmark-remediation
+  head_before_final_evidence_commit: 58aefc6fbfd33a05ca02d6e2aeaec1e753ba0e68
+  tree_before_final_evidence_commit: 2706445b9724a235c0368c26a86d785d3317d883
+  task_commits:
+    - eeac718
+    - ddd8890
+    - dc65309
+    - 1692937
+    - e229e63
+    - 58aefc6
+  changes_outside_tasks_BM_NATIVE_QA: false
+
+authoritative_bindings:
+  amendment:
+    path: tasks/BM-NATIVE-QA/QA-EXECUTION-AMENDMENT-v1-20260910.yaml
+    sha256: c624b675869315e8e7dca5a68df2c213eeb51310df23706a326181b0dab51fd9
+    status: accepted_for_runner_config_TDD_only
+  fixture_manifest:
+    path: tasks/BM-FIXTURE-V3/manifest.20260910-v5-r3.json
+    sha256: 7e77399ab34cdabf91f3ca92641eac37f3f0d9f4556b98131c97b45fcdadb08a
+  context_evidence:
+    path: tasks/BM-INPUTS/staging/real-core-v4-primary80-estimability/manifest.json
+    sha256: 209614c5ae97956ab1c87e6c86c3da0ee3f541bd908e4fc43fb3d8280b8166b6
+    phenotype_values_read: false
+
+runner_and_test_sha256s:
+  bm_native_qa_harness/__init__.py: 7b6cddbe0606d023dc661fed7bd9b497d98d47e652e29baeea861dc7af0347fe
+  bm_native_qa_harness/cli.py: dc1ae3894321481d4e2a85ab2a9246b8d3d5e9f74e172ab74c5d04b4a48b3418
+  bm_native_qa_harness/config.py: 2152b61766d08bf1b2a7203fa069ec336a62972e8e8c879d9b1dee944a1f8cbb
+  bm_native_qa_harness/execute.py: bbb47711acfb6e2ab372f659dfc2d53d63df059af59aafc60858fd97b8060095
+  bm_native_qa_harness/identity.py: 642d5d5b6cd3cc0702db48650663aa31775ba370715c9074a02f19fd44d11adc
+  bm_native_qa_harness/materialize.py: d69b63829c0099e6d75357d054270e94a604968b1ee830ea989b6e5f61c80f5e
+  bm_native_qa_harness/plan.py: d2e2bf132ef8ffab9b56be934a1c047e9c4af7ff85df4080b2c4e0c39a45c0bf
+  tests/conftest.py: eb45a73fbf38679e2d31a0357621825b9f675b6315cb363e87c3a75ce718ae99
+  tests/test_cli.py: 3548ccacdebbaed11452f2052c0ed053e26982c7d8d705a23a9ffa36981e50a6
+  tests/test_config.py: 2c33259554b5546c20cbfd7e51f6dba91663628f883dd65bc09a9b53c3cbd0eb
+  tests/test_execute.py: 6fb6a107b986ee2d170ecdac018556a049c4d0bb6cf2eb868005381bf6c13a68
+  tests/test_identity.py: 510ba2c3b81e10c38e459f676f008e9526297a1e73670a6403117002b519909b
+  tests/test_materialize.py: fe0ea069f65b495194c184c4450d82fa613865343e2cf096505dab093dc31241
+  tests/test_plan.py: 52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a
+
+prospective_inventory:
+  path: tasks/BM-NATIVE-QA/prospective-inventory.v1.json
+  sha256: ec8e1b89015afc59aad16634fbb6d5f2a7947f36c0d66ebe11986852476961b0
+  qa_design_hash: b3d760d09661d2ea1164f5793a2eee93ef43d7ecb40b16a235f92522e7669c24
+  counts:
+    anchors: 6
+    contexts: 6
+    responses: 12
+    invocations: 16
+  generated_seed_values_present: false
+  generated_array_hashes_present: false
+  response_arrays_present: false
+  phenotype_TSVs_present: false
+  checkpoint_or_result_outputs_present: false
+
+verification:
+  task_pytest:
+    command: .venv/bin/python -m pytest -q tasks/BM-NATIVE-QA/tests
+    status: PASS
+    tests_passed: 60
+  ruff:
+    command: .venv/bin/ruff check tasks/BM-NATIVE-QA/bm_native_qa_harness tasks/BM-NATIVE-QA/tests
+    status: PASS
+  diff_check:
+    command: git diff --check
+    status: PASS
+  accepted_product_diff:
+    command: git diff --name-only 9d7faee -- src scripts tests pyproject.toml
+    status: PASS_EMPTY
+  module_entrypoint:
+    command: >-
+      ../../.venv/bin/python -m bm_native_qa_harness.cli plan
+      --amendment /mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/QA-EXECUTION-AMENDMENT-v1-20260910.yaml
+      --context-evidence /mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-INPUTS/staging/real-core-v4-primary80-estimability/manifest.json
+      --fixture-manifest /mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-FIXTURE-V3/manifest.20260910-v5-r3.json
+      --out prospective-inventory.v1.json
+    workdir: /tmp/U7_GWAS-v5-benchmark-remediation/tasks/BM-NATIVE-QA
+    status: PASS_AFTER_TDD_IMPORT_ROOT_FIX
+    first_failed_attempt_wrote_output: false
+
+authorization_boundary:
+  response_materialization_authorized: false
+  execution_authorized: false
+  real_panel_response_materialization: not_run
+  native_QA: not_run
+  static_host_preflight: not_run
+  resource_probe: not_run
+  formal_benchmark: not_run
+  runner_config_independent_review: pending

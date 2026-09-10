@@ -1,0 +1,2013 @@
+{
+  "counts": {
+    "anchors": 6,
+    "contexts": 6,
+    "invocations": 16,
+    "responses": 12
+  },
+  "design_payload": {
+    "aggregate_caps": {
+      "cpu_seconds": 115200,
+      "output_storage_gib": 20,
+      "peak_aggregate_pss_gib": 128,
+      "wall_seconds": 7200
+    },
+    "amendment_sha256": "c624b675869315e8e7dca5a68df2c213eeb51310df23706a326181b0dab51fd9",
+    "bootstrap": {
+      "B": 199,
+      "checkpoint_mode": "indexed_required"
+    },
+    "canonical_interact": {
+      "burden": {
+        "cap": 150,
+        "maf_min": 0.01,
+        "min_snp": 3,
+        "n_pc": 3
+      },
+      "calibration": {
+        "B": 199,
+        "checkpoint_block_size": 25,
+        "checkpoint_enabled": true,
+        "method": "bootstrap",
+        "qa_only": true
+      },
+      "family_scope": "primary_only",
+      "full_ranking": true,
+      "grm": {
+        "maf_min": 0.01,
+        "method": "grm_from_X",
+        "scope": "all_subgenomes"
+      },
+      "hypothesis_unit": "group",
+      "mode": "group",
+      "primary_multiplicity": "bootstrap_minp",
+      "primary_transform": "INT",
+      "sample_col": "sample",
+      "statistic": "omniB",
+      "subset_order": 2,
+      "trait": "qa_trait"
+    },
+    "contexts": [
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+          ]
+        ],
+        "expected_calibrated_groups": 80,
+        "feature_seed": 5177468918036905819,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+        "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "key": "cotton.pc1_spread_192",
+        "panel_id": "REALG.CGVD1245",
+        "sample_context": "pc1_spread_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/cotton_samples_pc1_spread_192.tsv",
+        "samples_sha256": "fd67db96a7b43576568a6ce0d90cbee252d424fed74ef9659cc6ef14a6815175",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "D"
+        ]
+      },
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+          ]
+        ],
+        "expected_calibrated_groups": 80,
+        "feature_seed": 5177468918036905819,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+        "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "key": "cotton.seeded_random_192",
+        "panel_id": "REALG.CGVD1245",
+        "sample_context": "seeded_random_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/cotton_samples_seeded_random_192.tsv",
+        "samples_sha256": "c3e21a67a2919db26f3fff9811db81b9d5d21b78676d3126d6de0008c9704780",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "D"
+        ]
+      },
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+          ]
+        ],
+        "expected_calibrated_groups": 80,
+        "feature_seed": 5177468918036905819,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+        "groups_sha256": "d66688104fa917288c13a8694443260e5be2c963b3e4bf67f8f7548a7865b7ae",
+        "key": "cotton.holdout_192",
+        "panel_id": "REALG.CGVD1245",
+        "sample_context": "holdout_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v4-holdout-subsets/cotton_samples_holdout_192.tsv",
+        "samples_sha256": "3f06b311d5580195d0c3d9436c447a5a91a159f98531d9395d71143c004a6225",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "D"
+        ]
+      },
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/nvme/wheat_genomewide/gw_A_flank"
+          ],
+          [
+            "B",
+            "/mnt/nvme/wheat_genomewide/gw_B_flank"
+          ],
+          [
+            "D",
+            "/mnt/nvme/wheat_genomewide/gw_D_flank"
+          ]
+        ],
+        "expected_calibrated_groups": 80,
+        "feature_seed": 4248740791639463210,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+        "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "key": "wheat.pc1_spread_192",
+        "panel_id": "REALG.WATKINS_F2143",
+        "sample_context": "pc1_spread_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/wheat_samples_pc1_spread_192.tsv",
+        "samples_sha256": "7ef83847173276b29b3f28f0d1669c270849aa32756c5ad0fccc95baee893764",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz"
+          ],
+          [
+            "B",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "B",
+          "D"
+        ]
+      },
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/nvme/wheat_genomewide/gw_A_flank"
+          ],
+          [
+            "B",
+            "/mnt/nvme/wheat_genomewide/gw_B_flank"
+          ],
+          [
+            "D",
+            "/mnt/nvme/wheat_genomewide/gw_D_flank"
+          ]
+        ],
+        "expected_calibrated_groups": 79,
+        "feature_seed": 4248740791639463210,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+        "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "key": "wheat.seeded_random_192",
+        "panel_id": "REALG.WATKINS_F2143",
+        "sample_context": "seeded_random_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v2-qa-subsets/wheat_samples_seeded_random_192.tsv",
+        "samples_sha256": "7099a1fb0210b3aafbba261db37aa3b659426fbd0c01d29698a98a2ab401a879",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz"
+          ],
+          [
+            "B",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "B",
+          "D"
+        ]
+      },
+      {
+        "bed_prefixes": [
+          [
+            "A",
+            "/mnt/nvme/wheat_genomewide/gw_A_flank"
+          ],
+          [
+            "B",
+            "/mnt/nvme/wheat_genomewide/gw_B_flank"
+          ],
+          [
+            "D",
+            "/mnt/nvme/wheat_genomewide/gw_D_flank"
+          ]
+        ],
+        "expected_calibrated_groups": 79,
+        "feature_seed": 4248740791639463210,
+        "groups_path": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+        "groups_sha256": "ad164b688140ab53cf232c6ffc8ea3d6d2c7b561fcfca94b5200d4c50db7a17e",
+        "key": "wheat.holdout_192",
+        "panel_id": "REALG.WATKINS_F2143",
+        "sample_context": "holdout_192",
+        "samples_path": "tasks/BM-INPUTS/staging/real-core-v4-holdout-subsets/wheat_samples_holdout_192.tsv",
+        "samples_sha256": "1bbb3e467305e7c3bc24662eae1dce01810fe25a16d27fad48124d472e5407ef",
+        "snp_to_gene": [
+          [
+            "A",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz"
+          ],
+          [
+            "B",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz"
+          ],
+          [
+            "D",
+            "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+          ]
+        ],
+        "subgenomes": [
+          "A",
+          "B",
+          "D"
+        ]
+      }
+    ],
+    "fixture_manifest_sha256": "7e77399ab34cdabf91f3ca92641eac37f3f0d9f4556b98131c97b45fcdadb08a",
+    "future_artifacts": {
+      "anchors": [
+        {
+          "anchor_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.pc1_spread_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.pc1_spread_192/anchor.npy",
+          "context_key": "cotton.pc1_spread_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.pc1_spread_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.pc1_spread_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.pc1_spread_192/v_hat.npy"
+        },
+        {
+          "anchor_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.seeded_random_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.seeded_random_192/anchor.npy",
+          "context_key": "cotton.seeded_random_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.seeded_random_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.seeded_random_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.seeded_random_192/v_hat.npy"
+        },
+        {
+          "anchor_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.holdout_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.holdout_192/anchor.npy",
+          "context_key": "cotton.holdout_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.holdout_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.holdout_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/cotton.holdout_192/v_hat.npy"
+        },
+        {
+          "anchor_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.pc1_spread_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.pc1_spread_192/anchor.npy",
+          "context_key": "wheat.pc1_spread_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.pc1_spread_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.pc1_spread_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.pc1_spread_192/v_hat.npy"
+        },
+        {
+          "anchor_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.seeded_random_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.seeded_random_192/anchor.npy",
+          "context_key": "wheat.seeded_random_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.seeded_random_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.seeded_random_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.seeded_random_192/v_hat.npy"
+        },
+        {
+          "anchor_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.anchor",
+          "anchor_int_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.holdout_192/anchor_int.npy",
+          "anchor_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.holdout_192/anchor.npy",
+          "context_key": "wheat.holdout_192",
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.holdout_192/manifest.json",
+          "root_v_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.holdout_192/root_v.npy",
+          "v_hat_npy": "tasks/BM-NATIVE-QA/materialized/v1/anchors/wheat.holdout_192/v_hat.npy"
+        }
+      ],
+      "invocations": [
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        },
+        {
+          "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+          "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+          "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4"
+        }
+      ],
+      "responses": [
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null/response.npy"
+        },
+        {
+          "manifest_json": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03/manifest.json",
+          "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+          "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+          "response_npy": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03/response.npy"
+        }
+      ],
+      "root": "tasks/BM-NATIVE-QA/materialized/v1"
+    },
+    "invocations": [
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+        "jobs": 1,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+        "sample_context": "seeded_random_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+        "sample_context": "holdout_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+        "jobs": 1,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "seeded_random_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.CGVD1245",
+        "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "holdout_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+        "jobs": 1,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+        "sample_context": "seeded_random_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+        "sample_context": "holdout_192",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+        "jobs": 1,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "pc1_spread_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "seeded_random_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+        "jobs": 4,
+        "panel_id": "REALG.WATKINS_F2143",
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+        "sample_context": "holdout_192",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      }
+    ],
+    "response_generation_policy_id": "fitted_vhat_from_independent_standard_normal_anchor_v1",
+    "responses": [
+      {
+        "context_key": "cotton.pc1_spread_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "cotton.pc1_spread_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "context_key": "cotton.seeded_random_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "cotton.seeded_random_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "context_key": "cotton.holdout_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "cotton.holdout_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "context_key": "wheat.pc1_spread_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "wheat.pc1_spread_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "context_key": "wheat.seeded_random_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "wheat.seeded_random_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      },
+      {
+        "context_key": "wheat.holdout_192",
+        "generator_scale_interaction_pve": 0.0,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+        "truth_id": "gaussian_null"
+      },
+      {
+        "context_key": "wheat.holdout_192",
+        "generator_scale_interaction_pve": 0.03,
+        "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+        "truth_id": "mixed_sign_diagnostic_pve0p03"
+      }
+    ],
+    "runner_test_sha256s": {
+      "bm_native_qa_harness/__init__.py": "7b6cddbe0606d023dc661fed7bd9b497d98d47e652e29baeea861dc7af0347fe",
+      "bm_native_qa_harness/cli.py": "dc1ae3894321481d4e2a85ab2a9246b8d3d5e9f74e172ab74c5d04b4a48b3418",
+      "bm_native_qa_harness/config.py": "2152b61766d08bf1b2a7203fa069ec336a62972e8e8c879d9b1dee944a1f8cbb",
+      "bm_native_qa_harness/execute.py": "bbb47711acfb6e2ab372f659dfc2d53d63df059af59aafc60858fd97b8060095",
+      "bm_native_qa_harness/identity.py": "642d5d5b6cd3cc0702db48650663aa31775ba370715c9074a02f19fd44d11adc",
+      "bm_native_qa_harness/materialize.py": "d69b63829c0099e6d75357d054270e94a604968b1ee830ea989b6e5f61c80f5e",
+      "bm_native_qa_harness/plan.py": "d2e2bf132ef8ffab9b56be934a1c047e9c4af7ff85df4080b2c4e0c39a45c0bf",
+      "tests/conftest.py": "eb45a73fbf38679e2d31a0357621825b9f675b6315cb363e87c3a75ce718ae99",
+      "tests/test_cli.py": "3548ccacdebbaed11452f2052c0ed053e26982c7d8d705a23a9ffa36981e50a6",
+      "tests/test_config.py": "2c33259554b5546c20cbfd7e51f6dba91663628f883dd65bc09a9b53c3cbd0eb",
+      "tests/test_execute.py": "6fb6a107b986ee2d170ecdac018556a049c4d0bb6cf2eb868005381bf6c13a68",
+      "tests/test_identity.py": "510ba2c3b81e10c38e459f676f008e9526297a1e73670a6403117002b519909b",
+      "tests/test_materialize.py": "fe0ea069f65b495194c184c4450d82fa613865343e2cf096505dab093dc31241",
+      "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a"
+    }
+  },
+  "execution_authorized": false,
+  "qa_design_hash": "b3d760d09661d2ea1164f5793a2eee93ef43d7ecb40b16a235f92522e7669c24",
+  "response_materialization_authorized": false,
+  "runner_test_sha256s": {
+    "bm_native_qa_harness/__init__.py": "7b6cddbe0606d023dc661fed7bd9b497d98d47e652e29baeea861dc7af0347fe",
+    "bm_native_qa_harness/cli.py": "dc1ae3894321481d4e2a85ab2a9246b8d3d5e9f74e172ab74c5d04b4a48b3418",
+    "bm_native_qa_harness/config.py": "2152b61766d08bf1b2a7203fa069ec336a62972e8e8c879d9b1dee944a1f8cbb",
+    "bm_native_qa_harness/execute.py": "bbb47711acfb6e2ab372f659dfc2d53d63df059af59aafc60858fd97b8060095",
+    "bm_native_qa_harness/identity.py": "642d5d5b6cd3cc0702db48650663aa31775ba370715c9074a02f19fd44d11adc",
+    "bm_native_qa_harness/materialize.py": "d69b63829c0099e6d75357d054270e94a604968b1ee830ea989b6e5f61c80f5e",
+    "bm_native_qa_harness/plan.py": "d2e2bf132ef8ffab9b56be934a1c047e9c4af7ff85df4080b2c4e0c39a45c0bf",
+    "tests/conftest.py": "eb45a73fbf38679e2d31a0357621825b9f675b6315cb363e87c3a75ce718ae99",
+    "tests/test_cli.py": "3548ccacdebbaed11452f2052c0ed053e26982c7d8d705a23a9ffa36981e50a6",
+    "tests/test_config.py": "2c33259554b5546c20cbfd7e51f6dba91663628f883dd65bc09a9b53c3cbd0eb",
+    "tests/test_execute.py": "6fb6a107b986ee2d170ecdac018556a049c4d0bb6cf2eb868005381bf6c13a68",
+    "tests/test_identity.py": "510ba2c3b81e10c38e459f676f008e9526297a1e73670a6403117002b519909b",
+    "tests/test_materialize.py": "fe0ea069f65b495194c184c4450d82fa613865343e2cf096505dab093dc31241",
+    "tests/test_plan.py": "52324f7f5f562b84210e00ff22a8e7acfcb14ccc9e5c5f7ae13fe637fd7f934a"
+  },
+  "schema": "homoeogwas-bm-native-qa-prospective-inventory-v1",
+  "seed_derivations": [
+    {
+      "context_key": "cotton.pc1_spread_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "cotton.pc1_spread_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.pc1_spread_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.pc1_spread_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "cotton.pc1_spread_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "cotton.seeded_random_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "cotton.seeded_random_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.seeded_random_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.seeded_random_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "cotton.seeded_random_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "cotton.holdout_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.holdout_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "cotton.holdout_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.holdout_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "cotton.holdout_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "cotton.holdout_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.pc1_spread_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "wheat.pc1_spread_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.pc1_spread_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.pc1_spread_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.pc1_spread_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.seeded_random_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "wheat.seeded_random_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.seeded_random_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.seeded_random_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.seeded_random_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.holdout_192",
+      "purpose": "anchor",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192",
+      "stage_or_role": "pilot:qa_anchor",
+      "track": "omnib",
+      "truth_id": null
+    },
+    {
+      "context_key": "wheat.holdout_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.holdout_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "gaussian_null"
+    },
+    {
+      "context_key": "wheat.holdout_192",
+      "purpose": "observed",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:qa_observed",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "context_key": "wheat.holdout_192",
+      "purpose": "bootstrap",
+      "replicate_index": 0,
+      "scenario_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "stage_or_role": "pilot:native_bootstrap",
+      "track": "omnib",
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    }
+  ],
+  "semantic_invocations": [
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1.yaml",
+      "context_key": "cotton.pc1_spread_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+      "jobs": 1,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs1",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4.yaml",
+      "context_key": "cotton.pc1_spread_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.gaussian_null.jobs4",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4.yaml",
+      "context_key": "cotton.seeded_random_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.seeded_random_192.gaussian_null.jobs4",
+      "sample_context": "seeded_random_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4.yaml",
+      "context_key": "cotton.holdout_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.holdout_192.gaussian_null.jobs4",
+      "sample_context": "holdout_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1.yaml",
+      "context_key": "cotton.pc1_spread_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "jobs": 1,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "cotton.pc1_spread_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "cotton.seeded_random_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "seeded_random_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "cotton.holdout_192",
+      "feature_seed": 5177468918036905819,
+      "genotype": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/A_cgvd",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/fig3_cotton_locus/rescue_cgvd1245/D_cgvd"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/cotton_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.CGVD1245",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.CGVD1245.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "holdout_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_A.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/pairwise_omnib_unified_v1/prep/cotton/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1.yaml",
+      "context_key": "wheat.pc1_spread_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+      "jobs": 1,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs1",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4.yaml",
+      "context_key": "wheat.pc1_spread_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.gaussian_null.jobs4",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4.yaml",
+      "context_key": "wheat.seeded_random_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.gaussian_null.jobs4",
+      "sample_context": "seeded_random_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4.yaml",
+      "context_key": "wheat.holdout_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.gaussian_null.jobs4",
+      "sample_context": "holdout_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "gaussian_null"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1.yaml",
+      "context_key": "wheat.pc1_spread_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "jobs": 1,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs1",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "wheat.pc1_spread_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.pc1_spread_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "pc1_spread_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "wheat.seeded_random_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.seeded_random_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "seeded_random_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    },
+    {
+      "audit_dir": "tasks/BM-NATIVE-QA/materialized/v1/audits/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "canonical_interact": {
+        "burden": {
+          "cap": 150,
+          "maf_min": 0.01,
+          "min_snp": 3,
+          "n_pc": 3
+        },
+        "calibration": {
+          "B": 199,
+          "checkpoint_block_size": 25,
+          "checkpoint_enabled": true,
+          "method": "bootstrap",
+          "qa_only": true
+        },
+        "family_scope": "primary_only",
+        "full_ranking": true,
+        "grm": {
+          "maf_min": 0.01,
+          "method": "grm_from_X",
+          "scope": "all_subgenomes"
+        },
+        "hypothesis_unit": "group",
+        "mode": "group",
+        "primary_multiplicity": "bootstrap_minp",
+        "primary_transform": "INT",
+        "sample_col": "sample",
+        "statistic": "omniB",
+        "subset_order": 2,
+        "trait": "qa_trait"
+      },
+      "checkpoint_root": "tasks/BM-NATIVE-QA/materialized/v1/checkpoints/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "config_yaml": "tasks/BM-NATIVE-QA/materialized/v1/configs/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4.yaml",
+      "context_key": "wheat.holdout_192",
+      "feature_seed": 4248740791639463210,
+      "genotype": {
+        "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
+        "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
+        "D": "/mnt/nvme/wheat_genomewide/gw_D_flank"
+      },
+      "groups": "tasks/BM-INPUTS/staging/real-core-v2-stratified-candidate/wheat_groups_80.tsv",
+      "invocation_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "jobs": 4,
+      "panel_id": "REALG.WATKINS_F2143",
+      "phenotype_tsv": "tasks/BM-NATIVE-QA/materialized/v1/responses/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03/phenotype.tsv",
+      "response_id": "qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03",
+      "result_dir": "tasks/BM-NATIVE-QA/materialized/v1/results/qa_real80_v4.REALG.WATKINS_F2143.holdout_192.mixed_sign_diagnostic_pve0p03.jobs4",
+      "sample_context": "holdout_192",
+      "snp_to_gene": {
+        "A": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",
+        "B": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_B.npz",
+        "D": "/mnt/7302share/fast_ysp/U7_GWAS/data/processed/wheat/scanT/verified_mapping/snp_to_gene_D.npz"
+      },
+      "subgenomes": [
+        "A",
+        "B",
+        "D"
+      ],
+      "truth_id": "mixed_sign_diagnostic_pve0p03"
+    }
+  ],
+  "source_bindings": {
+    "amendment_sha256": "c624b675869315e8e7dca5a68df2c213eeb51310df23706a326181b0dab51fd9",
+    "context_evidence_sha256": "209614c5ae97956ab1c87e6c86c3da0ee3f541bd908e4fc43fb3d8280b8166b6",
+    "fixture_manifest_sha256": "7e77399ab34cdabf91f3ca92641eac37f3f0d9f4556b98131c97b45fcdadb08a",
+    "fixture_source_commit": "9d7faee655c020d84bdd6a6fba33b42a8428aea6",
+    "fixture_source_tree": "92355ddcbb2cd3d749169291fcbf6065eb556311"
+  },
+  "status": "prospective_only_no_generated_values"
+}
