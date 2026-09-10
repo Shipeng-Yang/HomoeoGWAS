@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,9 @@ class ContextSpec:
     samples_path: Path
     samples_sha256: str
     expected_calibrated_groups: int
+    subgenomes: tuple[str, ...] = ()
+    bed_prefixes: tuple[tuple[str, str], ...] = ()
+    snp_to_gene: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,31 @@ class ProspectiveInventory:
     contexts: tuple[ContextSpec, ...]
     responses: tuple[ResponseSpec, ...]
     invocations: tuple[InvocationSpec, ...]
+
+
+def bind_context_inputs(
+    inventory: ProspectiveInventory,
+    context_evidence: dict[str, Any],
+) -> ProspectiveInventory:
+    evidence_contexts = context_evidence["contexts"]
+    contexts: list[ContextSpec] = []
+    for context in inventory.contexts:
+        copies = evidence_contexts[context.key]["copies"]
+        subgenomes = tuple(str(label) for label in copies)
+        contexts.append(
+            replace(
+                context,
+                subgenomes=subgenomes,
+                bed_prefixes=tuple(
+                    (label, str(Path(copies[label]["bed"]).with_suffix("")))
+                    for label in subgenomes
+                ),
+                snp_to_gene=tuple(
+                    (label, str(copies[label]["mapping"])) for label in subgenomes
+                ),
+            )
+        )
+    return replace(inventory, contexts=tuple(contexts))
 
 
 def _context_spec(key: str, record: dict[str, Any]) -> ContextSpec:

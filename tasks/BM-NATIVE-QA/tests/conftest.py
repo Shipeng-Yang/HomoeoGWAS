@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -16,3 +17,12 @@ if str(TASK_ROOT) not in sys.path:
 def amendment() -> dict:
     path = MANAGEMENT_ROOT / "tasks/BM-NATIVE-QA/QA-EXECUTION-AMENDMENT-v1-20260910.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def context_evidence() -> dict:
+    path = (
+        MANAGEMENT_ROOT
+        / "tasks/BM-INPUTS/staging/real-core-v4-primary80-estimability/manifest.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
