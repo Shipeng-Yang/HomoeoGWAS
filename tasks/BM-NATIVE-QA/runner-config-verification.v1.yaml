@@ -1,6 +1,6 @@
 schema: homoeogwas-bm-native-qa-runner-config-verification-v1
 created_utc: 2026-09-10T11:53:28Z
-status: review_v1_remediated_awaiting_focused_delta_accept
+status: runner_config_ACCEPT_downstream_prerequisites_pending
 scope: prospective_runner_and_config_only
 
 accepted_product:
@@ -101,7 +101,16 @@ independent_review_v1:
     simultaneous_cap_priority_test: added
     true_flag_without_activation_adapter_test: added
     recursive_runner_test_source_inventory: fixed_and_tested
-  focused_delta_review: pending
+  disposition:
+    path: /mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/CLAUDE-RUNNER-CONFIG-REVIEW-v1-DISPOSITION-20260910.md
+    sha256: 52487fa789da865d288dca0c3f034f90495b7481756ad56142e5bedd11838bbf
+  focused_delta_review:
+    path: /mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/CLAUDE-RUNNER-CONFIG-REVIEW-v1-DELTA-20260910.md
+    sha256: 97e3ac155c7b7f7cf4979829a6d79b0fe4eff5d898599c01e50a8bcfccb4e4f3
+    reviewed_candidate: f8ef5de3b042969a517a66a5c7876f15aa0d3eb7
+    process_exit_code: 0
+    verdict: ACCEPT
+  final_scope_verdict: ACCEPT_FOR_RUNNER_CONFIG_ONLY
 
 verification:
   task_pytest:
@@ -136,4 +145,4 @@ authorization_boundary:
   static_host_preflight: not_run
   resource_probe: not_run
   formal_benchmark: not_run
-  runner_config_independent_review: changes_required_remediated_awaiting_delta
+  runner_config_independent_review: ACCEPT_FOR_RUNNER_CONFIG_ONLY
