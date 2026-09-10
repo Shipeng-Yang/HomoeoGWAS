@@ -165,11 +165,13 @@ def test_write_response_round_trips_little_endian_npy_and_17_digit_tsv(
     )
     with tsv_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
-    assert [row["sample_id"] for row in rows] == list(sample_ids)
+    assert [row["sample"] for row in rows] == list(sample_ids)
     loaded_tsv = np.asarray([float(row["qa_trait"]) for row in rows])
     assert np.array_equal(loaded_tsv.view(np.uint64), response.values.view(np.uint64))
     assert len(record["npy_sha256"]) == 64
     assert len(record["tsv_sha256"]) == 64
+    assert record["sample_col"] == "sample"
+    assert record["trait"] == "qa_trait"
 
 
 def test_write_response_rejects_any_existing_target_before_writing(tmp_path) -> None:

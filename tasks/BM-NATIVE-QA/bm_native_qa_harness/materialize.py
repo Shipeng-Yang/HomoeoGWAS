@@ -263,6 +263,8 @@ def write_roundtrip_response(
     sample_ids: Sequence[str],
     npy_path: str | Path,
     tsv_path: str | Path,
+    sample_col: str = "sample",
+    trait: str = "qa_trait",
 ) -> dict[str, Any]:
     """Exclusively serialize a response and prove exact CLI TSV round-trip."""
 
@@ -289,12 +291,14 @@ def write_roundtrip_response(
         raise ValueError("sample IDs must be nonempty TSV-safe strings")
     if len(set(ordered_samples)) != len(ordered_samples):
         raise ValueError("sample IDs must be unique")
+    if sample_col != "sample" or trait != "qa_trait":
+        raise ValueError("phenotype columns must match the frozen native config")
 
     with npy_path.open("xb") as npy_handle:
         np.save(npy_handle, values, allow_pickle=False)
     with tsv_path.open("x", encoding="utf-8", newline="") as tsv_handle:
         writer = csv.writer(tsv_handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(("sample_id", "qa_trait"))
+        writer.writerow((sample_col, trait))
         writer.writerows(
             (sample_id, format(float(value), ".17g"))
             for sample_id, value in zip(ordered_samples, values, strict=True)
@@ -303,9 +307,9 @@ def write_roundtrip_response(
     loaded_npy = np.load(npy_path, allow_pickle=False)
     with tsv_path.open(encoding="utf-8", newline="") as tsv_handle:
         rows = list(csv.DictReader(tsv_handle, delimiter="\t"))
-    loaded_samples = tuple(row["sample_id"] for row in rows)
+    loaded_samples = tuple(row[sample_col] for row in rows)
     loaded_tsv = np.asarray(
-        [float(row["qa_trait"]) for row in rows], dtype=np.dtype("<f8")
+        [float(row[trait]) for row in rows], dtype=np.dtype("<f8")
     )
     expected_bits = values.view(np.uint64)
     if (
@@ -319,6 +323,8 @@ def write_roundtrip_response(
     return {
         "response_id": response.response_id,
         "sample_count": len(ordered_samples),
+        "sample_col": sample_col,
+        "trait": trait,
         "values_float64_sha256": _float64_sha256(values),
         "post_int_float64_sha256": _float64_sha256(response.post_int_values),
         "npy_path": str(npy_path),

@@ -56,6 +56,55 @@ def _plain_record(value: Any) -> dict[str, object]:
     }
 
 
+def _future_artifact_layout(inventory: ProspectiveInventory) -> dict[str, object]:
+    root = "tasks/BM-NATIVE-QA/materialized/v1"
+    return {
+        "root": root,
+        "anchors": [
+            {
+                "anchor_id": (
+                    f"qa_real80_v4.{context.panel_id}."
+                    f"{context.sample_context}.anchor"
+                ),
+                "context_key": context.key,
+                "anchor_npy": f"{root}/anchors/{context.key}/anchor.npy",
+                "anchor_int_npy": f"{root}/anchors/{context.key}/anchor_int.npy",
+                "v_hat_npy": f"{root}/anchors/{context.key}/v_hat.npy",
+                "root_v_npy": f"{root}/anchors/{context.key}/root_v.npy",
+                "manifest_json": f"{root}/anchors/{context.key}/manifest.json",
+            }
+            for context in inventory.contexts
+        ],
+        "responses": [
+            {
+                "response_id": response.response_id,
+                "response_npy": (
+                    f"{root}/responses/{response.response_id}/response.npy"
+                ),
+                "phenotype_tsv": (
+                    f"{root}/responses/{response.response_id}/phenotype.tsv"
+                ),
+                "manifest_json": (
+                    f"{root}/responses/{response.response_id}/manifest.json"
+                ),
+            }
+            for response in inventory.responses
+        ],
+        "invocations": [
+            {
+                "invocation_id": invocation.invocation_id,
+                "config_yaml": f"{root}/configs/{invocation.invocation_id}.yaml",
+                "checkpoint_root": (
+                    f"{root}/checkpoints/{invocation.invocation_id}"
+                ),
+                "result_dir": f"{root}/results/{invocation.invocation_id}",
+                "audit_dir": f"{root}/audits/{invocation.invocation_id}",
+            }
+            for invocation in inventory.invocations
+        ],
+    }
+
+
 def freeze_identity(
     inventory: ProspectiveInventory,
     *,
@@ -81,6 +130,31 @@ def freeze_identity(
         "response_generation_policy_id": (
             "fitted_vhat_from_independent_standard_normal_anchor_v1"
         ),
+        "canonical_interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "hypothesis_unit": "group",
+            "subset_order": 2,
+            "family_scope": "primary_only",
+            "primary_transform": "INT",
+            "primary_multiplicity": "bootstrap_minp",
+            "burden": {"cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3},
+            "grm": {
+                "method": "grm_from_X",
+                "maf_min": 0.01,
+                "scope": "all_subgenomes",
+            },
+            "calibration": {
+                "method": "bootstrap",
+                "B": 199,
+                "qa_only": True,
+                "checkpoint_enabled": True,
+                "checkpoint_block_size": 25,
+            },
+            "sample_col": "sample",
+            "trait": "qa_trait",
+            "full_ranking": True,
+        },
         "bootstrap": {"B": 199, "checkpoint_mode": "indexed_required"},
         "aggregate_caps": {
             "wall_seconds": 7200,
@@ -88,6 +162,7 @@ def freeze_identity(
             "peak_aggregate_pss_gib": 128,
             "output_storage_gib": 20,
         },
+        "future_artifacts": _future_artifact_layout(inventory),
     }
     design_hash = sha256_payload(payload)
     return FrozenIdentity(

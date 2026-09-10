@@ -28,6 +28,58 @@ def test_design_payload_excludes_generated_values(amendment: dict) -> None:
     assert len(frozen.qa_design_hash) == 64
 
 
+def test_design_payload_binds_canonical_science_and_future_relative_paths(
+    amendment: dict,
+) -> None:
+    frozen = freeze_identity(
+        build_inventory(amendment),
+        fixture_manifest_sha256="7" * 64,
+        amendment_sha256="a" * 64,
+        runner_test_sha256s={"runner.py": "b" * 64},
+    )
+
+    assert frozen.design_payload["canonical_interact"] == {
+        "mode": "group",
+        "statistic": "omniB",
+        "hypothesis_unit": "group",
+        "subset_order": 2,
+        "family_scope": "primary_only",
+        "primary_transform": "INT",
+        "primary_multiplicity": "bootstrap_minp",
+        "burden": {"cap": 150, "min_snp": 3, "maf_min": 0.01, "n_pc": 3},
+        "grm": {
+            "method": "grm_from_X",
+            "maf_min": 0.01,
+            "scope": "all_subgenomes",
+        },
+        "calibration": {
+            "method": "bootstrap",
+            "B": 199,
+            "qa_only": True,
+            "checkpoint_enabled": True,
+            "checkpoint_block_size": 25,
+        },
+        "sample_col": "sample",
+        "trait": "qa_trait",
+        "full_ranking": True,
+    }
+    layout = frozen.design_payload["future_artifacts"]
+    assert layout["root"] == "tasks/BM-NATIVE-QA/materialized/v1"
+    assert len(layout["anchors"]) == 6
+    assert len(layout["responses"]) == 12
+    assert len(layout["invocations"]) == 16
+    assert layout["anchors"][0]["anchor_npy"].endswith("/anchor.npy")
+    assert layout["responses"][0]["phenotype_tsv"].endswith("/phenotype.tsv")
+    assert layout["invocations"][0]["config_yaml"].endswith(".yaml")
+    assert all(
+        not Path(path).is_absolute()
+        for section in ("anchors", "responses", "invocations")
+        for row in layout[section]
+        for key, path in row.items()
+        if key.endswith(("_npy", "_tsv", "_yaml", "_root", "_dir"))
+    )
+
+
 def test_seed_ledger_matches_independently_derived_literals(amendment: dict) -> None:
     records = identity.build_seed_ledger("0" * 64, build_inventory(amendment))
     cotton_pc1 = {
