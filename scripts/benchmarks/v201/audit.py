@@ -2661,6 +2661,20 @@ def _audit_families_and_parallel(evidence: LoadedEvidence) -> None:
                         response_count=response_count,
                     )
                     if (
+                        calibration_snpxsnp_result.failed_response_indices
+                        != tuple(
+                            np.flatnonzero(calibration_failures["snpxsnp"])
+                            .astype(int)
+                        )
+                        or snpxsnp_result.failed_response_indices
+                        != tuple(
+                            np.flatnonzero(target_failures["snpxsnp"]).astype(int)
+                        )
+                    ):
+                        raise BenchmarkAuditError(
+                            "family-size SNPxSNP failure mask differs from raw evidence"
+                        )
+                    if (
                         calibration_snpxsnp_result.member_ids
                         != snpxsnp_result.member_ids
                         or calibration_snpxsnp_result.member_family_sha256

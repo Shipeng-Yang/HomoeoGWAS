@@ -473,13 +473,41 @@ def test_three_copy_shared_edge_family_counts_minima_ties_and_response_invarianc
     )
 
 
+def test_width_one_response_is_bitwise_identical_inside_wide_raw_bank():
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+
+    alone = comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        blocks,
+        responses[:, :1],
+        max_offered_pairs=12,
+    )
+    embedded = comparator_module.score_snpxsnp_family(
+        scores,
+        family,
+        expanded,
+        blocks,
+        responses,
+        max_offered_pairs=12,
+    )
+
+    np.testing.assert_array_equal(alone.group_p[:, 0], embedded.group_p[:, 0])
+    np.testing.assert_array_equal(
+        alone.argmin_member_index[:, 0], embedded.argmin_member_index[:, 0]
+    )
+
+
 def test_snpxsnp_production_explicitly_requests_stable_response_axis(monkeypatch):
     scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
     original = interact_module._batch_nested_f
     stable_flags = []
+    response_widths = []
 
     def recording_score(*args, **kwargs):
         stable_flags.append(kwargs.get("response_axis_stable"))
+        response_widths.append(args[0].shape[1])
         return original(*args, **kwargs)
 
     monkeypatch.setattr(interact_module, "_batch_nested_f", recording_score)
@@ -494,6 +522,7 @@ def test_snpxsnp_production_explicitly_requests_stable_response_axis(monkeypatch
 
     assert stable_flags
     assert all(flag is True for flag in stable_flags)
+    assert set(response_widths) == {omnib_module.INDEXED_SCORE_MICROBLOCK}
 
 
 def test_one_member_fixture_is_only_a_legacy_compatibility_limit():

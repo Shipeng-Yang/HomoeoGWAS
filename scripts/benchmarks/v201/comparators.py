@@ -21,6 +21,7 @@ from homoeogwas.group_family import (
 )
 from homoeogwas.kernel import hadamard_kernel, normalize_kernel
 from homoeogwas.omnib_family import (
+    INDEXED_SCORE_MICROBLOCK,
     OmniBFamilyScores,
     score_omnib_responses,
 )
@@ -699,6 +700,22 @@ def _whiten_columns(W: np.ndarray, responses: np.ndarray) -> np.ndarray:
     )
 
 
+def _fixed_response_axis_blocks(
+    responses: np.ndarray,
+) -> tuple[tuple[int, int, np.ndarray], ...]:
+    """Copy responses into fixed-width, zero-padded contiguous blocks."""
+
+    blocks = []
+    for start in range(0, responses.shape[1], INDEXED_SCORE_MICROBLOCK):
+        stop = min(start + INDEXED_SCORE_MICROBLOCK, responses.shape[1])
+        padded = np.zeros(
+            (responses.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=np.float64
+        )
+        padded[:, : stop - start] = responses[:, start:stop]
+        blocks.append((start, stop, padded))
+    return tuple(blocks)
+
+
 def _nested_snp_product_design(
     W: np.ndarray,
     Cw: np.ndarray,
@@ -836,6 +853,7 @@ def score_snpxsnp_family(
     W = np.asarray(scores.W, dtype=float)
     Cw = W @ np.asarray(scores.null_design, dtype=float)
     target_w = _whiten_columns(W, target)
+    target_w_blocks = _fixed_response_axis_blocks(target_w)
     group_p = np.full((len(family.group_ids), target.shape[1]), np.inf)
     argmin = np.full(group_p.shape, -1, dtype=np.int64)
     member_ids: list[str] = []
@@ -869,15 +887,22 @@ def score_snpxsnp_family(
                 _snpxsnp_member_digest_update(member_digest, member_id, memberships)
                 for group_index in memberships:
                     tested_by_group[group_index] += 1
-                pair_p = np.asarray(
-                    _batch_nested_f(
-                        target_w,
-                        reduced,
-                        added,
-                        response_axis_stable=True,
-                    ),
-                    dtype=float,
-                )
+                pair_p = np.empty(target.shape[1], dtype=float)
+                for start, stop, response_block in target_w_blocks:
+                    block_p = np.asarray(
+                        _batch_nested_f(
+                            response_block,
+                            reduced,
+                            added,
+                            response_axis_stable=True,
+                        ),
+                        dtype=float,
+                    )
+                    if block_p.shape != (INDEXED_SCORE_MICROBLOCK,):
+                        raise RuntimeError(
+                            "nested SNPxSNP scorer returned an invalid block shape"
+                        )
+                    pair_p[start:stop] = block_p[: stop - start]
                 if pair_p.shape != (target.shape[1],):
                     raise RuntimeError("nested SNPxSNP scorer returned an invalid shape")
                 finite = np.isfinite(pair_p)

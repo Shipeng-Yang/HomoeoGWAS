@@ -430,6 +430,43 @@ def test_family_size_stress_preserves_separate_calibration_and_target_failures(
     )
 
 
+@pytest.mark.parametrize("detached_call", [0, 1])
+def test_family_size_rejects_raw_failure_mask_detached_from_bank_evidence(
+    monkeypatch,
+    detached_call,
+):
+    context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=956)
+    original = T._method_scores
+    calls = 0
+
+    def detach_raw_mask(prepared, responses, *, n_jobs):
+        nonlocal calls
+        bank, execution, snpxsnp, original_masks = original(
+            prepared, responses, n_jobs=n_jobs
+        )
+        masks = {
+            method: np.array(mask, dtype=bool, copy=True)
+            for method, mask in original_masks.items()
+        }
+        if calls == detached_call:
+            masks["snpxsnp"][0] = True
+        calls += 1
+        return bank, execution, snpxsnp, masks
+
+    monkeypatch.setattr(T, "_method_scores", detach_raw_mask)
+    with pytest.raises(RuntimeError, match="SNPxSNP failure mask differs"):
+        T.run_family_size_stress(
+            context,
+            family_size=1,
+            response_count=2,
+            calibration_count=3,
+            design_hash="e" * 64,
+            qa_only=True,
+            n_jobs=1,
+            scenario_id="B.family_size.synthetic.raw_failure_join",
+        )
+
+
 def test_robustness_preserves_bank_specific_method_failures(monkeypatch):
     context = build_synthetic_omnib_context(n=44, groups=1, copies=2, seed=955)
     calls = 0

@@ -1535,6 +1535,23 @@ def test_family_size_audit_recomputes_response_level_fwer():
     )
     with pytest.raises(BenchmarkAuditError, match="SNPxSNP streaming evidence"):
         _audit_families_and_parallel(detached_calibration_evidence)
+    for evidence_field in (
+        "snpxsnp_calibration_evidence",
+        "snpxsnp_evidence",
+    ):
+        detached_raw_failure = copy.deepcopy(payload)
+        raw_evidence = detached_raw_failure[evidence_field]
+        raw_evidence["failed_response_indices"] = [0]
+        for row in raw_evidence["argmin_member_index"]:
+            row[0] = -1
+        raw_evidence["nonfinite_pair_score_count"] = 1
+        raw_evidence["nonfinite_pair_score_count_by_group"][0] = 1
+        detached_raw_failure_evidence = SimpleNamespace(
+            shards=((Path("family-raw-failure-detached.json"), detached_raw_failure),),
+            registry=(scenario,),
+        )
+        with pytest.raises(BenchmarkAuditError, match="SNPxSNP failure mask differs"):
+            _audit_families_and_parallel(detached_raw_failure_evidence)
     failure_detached = copy.deepcopy(payload)
     failure_detached["target_response_failures"][
         "failed_response_indices_by_method"

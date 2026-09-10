@@ -1483,10 +1483,24 @@ def run_family_size_stress(
         target_scores, _, target_snpxsnp, target_failure_masks = _method_scores(
             prepared, target, n_jobs=n_jobs,
         )
+        for bank_name, raw_result, failure_masks in (
+            ("calibration", calibration_snpxsnp, calibration_failure_masks),
+            ("target", target_snpxsnp, target_failure_masks),
+        ):
+            raw_failed = tuple(
+                np.flatnonzero(failure_masks["snpxsnp"]).astype(int)
+            )
+            if raw_failed != raw_result.failed_response_indices:
+                raise RuntimeError(
+                    f"family-size {bank_name} SNPxSNP failure mask differs "
+                    "from raw scoring evidence"
+                )
         if (
             calibration_snpxsnp.member_ids != target_snpxsnp.member_ids
             or calibration_snpxsnp.member_family_sha256
             != target_snpxsnp.member_family_sha256
+            or calibration_snpxsnp.input_block_bindings
+            != target_snpxsnp.input_block_bindings
             or calibration_snpxsnp.input_family_sha256
             != target_snpxsnp.input_family_sha256
         ):
