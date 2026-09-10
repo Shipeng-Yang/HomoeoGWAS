@@ -481,7 +481,7 @@ def test_width_one_response_is_bitwise_identical_inside_wide_raw_bank():
         family,
         expanded,
         blocks,
-        responses[:, :1],
+        np.ascontiguousarray(responses[:, :1]),
         max_offered_pairs=12,
     )
     embedded = comparator_module.score_snpxsnp_family(
