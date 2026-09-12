@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from homoeogwas.omnib_family import _array_identity, _text_identity
+
 from .comparators import (
     _SNPXSNP_INPUT_BLOCK_FIELDS,
     SNPxSNPScoreResult,
@@ -233,6 +235,33 @@ def _gated_marker_counts_from_bindings(bindings: Any) -> dict[str, int]:
     return counts
 
 
+def _prepared_score_context_sha256(scores: Any, bound_inputs: Any) -> str:
+    """Close retained prepared/null-fit identities over the bound score context."""
+
+    prepared_identity = getattr(scores, "prepared_design_identity", None)
+    prepared_sha256 = getattr(scores, "prepared_design_sha256", None)
+    null_fit_identity = getattr(scores, "null_fit_identity", None)
+    null_fit_sha256 = getattr(scores, "null_fit_sha256", None)
+    try:
+        valid = (
+            isinstance(prepared_identity, Mapping)
+            and isinstance(null_fit_identity, Mapping)
+            and _lower_hex(prepared_sha256, 64)
+            and _lower_hex(null_fit_sha256, 64)
+            and _text_identity(prepared_identity) == prepared_sha256
+            and prepared_identity.get("null_fit_sha256") == null_fit_sha256
+            and _text_identity(null_fit_identity) == null_fit_sha256
+            and null_fit_identity.get("W") == _array_identity(bound_inputs.W)
+            and null_fit_identity.get("design")
+            == _array_identity(bound_inputs.null_design)
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("resource probe score context identity is detached")
+    return prepared_sha256
+
+
 def produce_snpxsnp_resource_probe(
     prepared: Any,
     response_bank: np.ndarray,
@@ -264,12 +293,6 @@ def produce_snpxsnp_resource_probe(
     )
     if getattr(context, "sample_context", None) != "full":
         raise ValueError("resource probe requires the frozen full sample context")
-    prepared_design_sha256 = prepared.scores.prepared_design_sha256
-    if not all(
-        _lower_hex(value, 64)
-        for value in (design_hash, context_fingerprint, prepared_design_sha256)
-    ):
-        raise ValueError("resource probe design identity is invalid")
     if _context_fingerprint(context) != context_fingerprint:
         raise ValueError("resource probe context fingerprint is detached")
     response_bank_sha256 = sha256_payload(bank_identity)
@@ -279,6 +302,14 @@ def produce_snpxsnp_resource_probe(
     bound_inputs = _bind_snpxsnp_inputs(
         prepared.scores, context.family, prepared.expanded, prepared.gene_blocks,
     )
+    prepared_design_sha256 = _prepared_score_context_sha256(
+        prepared.scores, bound_inputs,
+    )
+    if not all(
+        _lower_hex(value, 64)
+        for value in (design_hash, context_fingerprint, prepared_design_sha256)
+    ):
+        raise ValueError("resource probe design identity is invalid")
     input_family_sha256 = bound_inputs.family_sha256
     authorized_input_family_sha256 = _validate_authorization(
         authorization_payload,
@@ -300,7 +331,6 @@ def produce_snpxsnp_resource_probe(
 
     def score() -> SNPxSNPScoreResult:
         return _score_snpxsnp_bound_inputs(
-            prepared.scores,
             context.family,
             prepared.expanded,
             prefix,

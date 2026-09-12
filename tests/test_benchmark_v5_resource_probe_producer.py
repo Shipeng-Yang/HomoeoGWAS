@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
-from homoeogwas.omnib_family import OmniBFamilyScores
+from homoeogwas.omnib_family import (
+    OmniBFamilyScores,
+    _array_identity,
+    _text_identity,
+)
 from scripts.benchmarks.v201 import comparators as comparator_module
 from scripts.benchmarks.v201 import resource_probe
 from scripts.benchmarks.v201.contracts import canonical_json, sha256_payload
@@ -29,21 +33,32 @@ def _prepared_fixture():
         ("A", "geneA"): rng.binomial(2, 0.31, size=(sample_count, 1)).astype(float),
         ("D", "geneD"): rng.binomial(2, 0.39, size=(sample_count, 1)).astype(float),
     }
+    W = np.eye(sample_count)
+    null_design = np.ones((sample_count, 1))
+    null_fit_identity = {
+        "W": _array_identity(W),
+        "design": _array_identity(null_design),
+    }
+    null_fit_sha256 = _text_identity(null_fit_identity)
+    prepared_design_identity = {"null_fit_sha256": null_fit_sha256}
     scores = OmniBFamilyScores(
         edge_p=np.empty((len(expanded.edges), 0)),
         group_p=np.empty((len(group_ids), 0)),
         edge_components_obs=np.empty((len(expanded.edges), 3)),
         edge_estimable=np.ones(len(expanded.edges), dtype=bool),
         group_estimable=np.ones(len(group_ids), dtype=bool),
-        W=np.eye(sample_count),
+        W=W,
         y=np.zeros(sample_count),
         covariance_components={"e": 1.0},
-        null_design=np.ones((sample_count, 1)),
+        null_design=null_design,
         gated_snp={
             ("A", "geneA"): np.asarray((7,), dtype=int),
             ("D", "geneD"): np.asarray((9,), dtype=int),
         },
-        prepared_design_sha256="c" * 64,
+        null_fit_identity=null_fit_identity,
+        null_fit_sha256=null_fit_sha256,
+        prepared_design_identity=prepared_design_identity,
+        prepared_design_sha256=_text_identity(prepared_design_identity),
     )
     context = SimpleNamespace(
         panel_id="REALG.CGVD1245",
@@ -110,7 +125,7 @@ def _authorization(response_bank, response_ids, *, enabled: bool = True):
             "panel_id": "REALG.CGVD1245",
             "design_hash": "a" * 64,
             "context_fingerprint": "b" * 64,
-            "prepared_design_sha256": "c" * 64,
+            "prepared_design_sha256": prepared.scores.prepared_design_sha256,
             "input_family_sha256": _input_family_sha256(prepared),
             "response_bank_sha256": sha256_payload(bank_identity),
             "response_ids_sha256": sha256_payload({
@@ -341,6 +356,124 @@ def test_producer_scores_authorized_genotype_despite_mutate_restore(
     )
     np.testing.assert_array_equal(artifact["score_evidence"]["group_p"], expected.group_p)
     assert artifact["score_evidence"]["raw_score_evidence"] == expected.evidence_payload()
+
+
+@pytest.mark.parametrize("mutation", ["W", "null_design"])
+def test_producer_scores_private_context_despite_mutate_restore(monkeypatch, mutation):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    expected = comparator_module.score_snpxsnp_family(
+        prepared.scores,
+        prepared.context.family,
+        prepared.expanded,
+        prepared.gene_blocks,
+        np.ascontiguousarray(bank[:, :20]),
+        max_offered_pairs=10000,
+    )
+    old_W = prepared.scores.W.copy()
+    old_design = prepared.scores.null_design.copy()
+    measure = cli._measure_comparator_operation
+
+    def mutate_measure_restore(*args, **kwargs):
+        try:
+            if mutation == "W":
+                prepared.scores.W[:] = np.diag(np.linspace(0.4, 1.6, old_W.shape[0]))
+            else:
+                prepared.scores.null_design[:, 0] = np.linspace(-1.0, 1.0, old_design.shape[0])
+            return measure(*args, **kwargs)
+        finally:
+            prepared.scores.W[:] = old_W
+            prepared.scores.null_design[:] = old_design
+
+    monkeypatch.setattr(cli, "_measure_comparator_operation", mutate_measure_restore)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=20,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    np.testing.assert_array_equal(artifact["score_evidence"]["group_p"], expected.group_p)
+    assert artifact["score_evidence"]["raw_score_evidence"] == expected.evidence_payload()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "live_W",
+        "live_null_design",
+        "prepared_design_identity",
+        "prepared_null_fit_sha256",
+        "null_fit_identity",
+    ],
+)
+def test_producer_rejects_detached_score_context_before_measurement(
+    monkeypatch, mutation,
+):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    if mutation == "live_W":
+        prepared.scores.W[0, 0] += 0.1
+    elif mutation == "live_null_design":
+        prepared.scores.null_design[0, 0] += 0.1
+    elif mutation == "prepared_design_identity":
+        prepared.scores.prepared_design_identity = {"null_fit_sha256": "f" * 64}
+    elif mutation == "prepared_null_fit_sha256":
+        prepared.scores.null_fit_sha256 = "f" * 64
+    else:
+        prepared.scores.null_fit_identity = {
+            **prepared.scores.null_fit_identity,
+            "detached": True,
+        }
+    events = []
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    with pytest.raises(ValueError, match="score context identity is detached"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"detached context reached {events}"
+
+
+def test_producer_private_core_never_receives_live_scores(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+
+    def assert_private_core(*args, **kwargs):
+        assert all(argument is not prepared.scores for argument in args)
+        return scorer(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", assert_private_core)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=1,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
 
 
 def test_authorization_v1_is_rejected_before_scoring(monkeypatch):

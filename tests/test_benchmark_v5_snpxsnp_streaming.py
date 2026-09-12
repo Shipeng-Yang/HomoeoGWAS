@@ -196,6 +196,10 @@ def test_bound_genotype_arrays_are_private_readonly_copies():
         columns = inputs.source_columns[key]
         assert not np.shares_memory(columns, scores.gated_snp[key])
         assert columns.flags.c_contiguous and not columns.flags.writeable
+    assert not np.shares_memory(inputs.W, scores.W)
+    assert inputs.W.flags.c_contiguous and not inputs.W.flags.writeable
+    assert not np.shares_memory(inputs.null_design, scores.null_design)
+    assert inputs.null_design.flags.c_contiguous and not inputs.null_design.flags.writeable
 
 
 def test_streamed_raw_score_matches_direct_nested_f_and_counts_skips():

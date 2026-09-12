@@ -736,6 +736,8 @@ def _nested_snp_product_design(
 @dataclass(frozen=True)
 class _SNPxSNPInputs:
     sample_count: int
+    W: np.ndarray
+    null_design: np.ndarray
     blocks: Mapping[tuple[str, str], np.ndarray]
     source_columns: Mapping[tuple[str, str], np.ndarray]
     bindings: tuple[Mapping[str, object], ...]
@@ -813,8 +815,19 @@ def _bind_snpxsnp_inputs(
         for key in sorted(required)
     )
     input_family_sha256 = _snpxsnp_input_family_hash(input_bindings)
+    W = np.array(np.asarray(scores.W, dtype=float), dtype=np.float64, order="C", copy=True)
+    W.setflags(write=False)
+    null_design = np.array(
+        np.asarray(scores.null_design, dtype=float),
+        dtype=np.float64,
+        order="C",
+        copy=True,
+    )
+    null_design.setflags(write=False)
     return _SNPxSNPInputs(
         sample_count=sample_count,
+        W=W,
+        null_design=null_design,
         blocks=MappingProxyType(checked_blocks),
         source_columns=MappingProxyType(checked_columns),
         bindings=input_bindings,
@@ -823,7 +836,6 @@ def _bind_snpxsnp_inputs(
 
 
 def _score_snpxsnp_bound_inputs(
-    scores: OmniBFamilyScores,
     family: MasterGroupFamily,
     expanded: ExpandedEdgeFamily,
     responses: np.ndarray,
@@ -880,8 +892,8 @@ def _score_snpxsnp_bound_inputs(
             f"{offered_pair_count} > {max_offered_pairs}"
         )
 
-    W = np.asarray(scores.W, dtype=float)
-    Cw = W @ np.asarray(scores.null_design, dtype=float)
+    W = inputs.W
+    Cw = W @ inputs.null_design
     target_w = _whiten_columns(W, target)
     target_w_blocks = _fixed_response_axis_blocks(target_w)
     group_p = np.full((len(family.group_ids), target.shape[1]), np.inf)
@@ -1008,7 +1020,6 @@ def score_snpxsnp_family(
         raise ValueError("max_offered_pairs must be a positive integer")
     inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
     return _score_snpxsnp_bound_inputs(
-        scores,
         family,
         expanded,
         responses,
