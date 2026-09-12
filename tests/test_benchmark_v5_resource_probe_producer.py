@@ -70,6 +70,17 @@ class _ArtifactAccessorAttack(dict):
         return super().__getitem__(key)
 
 
+class _ArtifactEvidenceAccessorAttack(dict):
+    def __init__(self, stored, score_evidence):
+        super().__init__(stored)
+        self._score_evidence = score_evidence
+
+    def __getitem__(self, key):
+        if key == "score_evidence":
+            return self._score_evidence
+        return super().__getitem__(key)
+
+
 class _SingleReadPrepared:
     def __init__(self, prepared, guarded_field):
         self._prepared = prepared
@@ -797,15 +808,14 @@ def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
     monkeypatch, invalid,
 ):
     _prepared, bank = _prepared_fixture()
-    pair_ceiling_calls = []
+    resource_limit_calls = []
 
-    def forbidden_pair_ceiling(*_args, **_kwargs):
-        pair_ceiling_calls.append("pair_ceiling")
-        raise AssertionError("invalid response input reached pair ceiling")
+    def forbidden_resource_limit(*_args, **_kwargs):
+        resource_limit_calls.append("resource_limit")
+        raise AssertionError("invalid response input reached resource limit")
 
     monkeypatch.setattr(
-        resource_probe, "_snpxsnp_pair_ceiling", forbidden_pair_ceiling,
-        raising=False,
+        resource_probe, "comparator_resource_limit", forbidden_resource_limit,
     )
     response_width = 2 if invalid == "response_width" else 1
     response_bank = bank if invalid == "response_width" else bank.astype(np.float32)
@@ -823,7 +833,7 @@ def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
             implementation_commit="1" * 40,
             matched_comparator_contract_sha256="2" * 64,
         )
-    assert pair_ceiling_calls == []
+    assert resource_limit_calls == []
 
 
 def test_producer_pins_context_identity_for_unmocked_fingerprint():
@@ -859,15 +869,8 @@ def test_producer_uses_local_resource_limit_not_context_pair_helper(monkeypatch)
         observed.append(kwargs["max_offered_pairs"])
         return original_score(*args, **kwargs)
 
-    def forbidden_context_pair_helper(*_args, **_kwargs):
-        raise AssertionError("producer read pair ceiling from context")
-
     monkeypatch.setattr(resource_probe, "comparator_resource_limit", one_pair_limit)
     monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
-    monkeypatch.setattr(
-        resource_probe, "_snpxsnp_pair_ceiling", forbidden_context_pair_helper,
-        raising=False,
-    )
     monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
     resource_probe.produce_snpxsnp_resource_probe(
         prepared, bank, witness["response_ids"], response_width=1,
@@ -937,10 +940,19 @@ def test_artifact_validator_rejects_accessor_split_view(monkeypatch):
         resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
 
 
+def test_artifact_validator_rejects_score_evidence_accessor_split_view(monkeypatch):
+    artifact = _produce(monkeypatch)
+    stored = copy.deepcopy(artifact)
+    stored["score_evidence"]["panel_id"] = "ATTACK"
+    attack = _ArtifactEvidenceAccessorAttack(stored, artifact["score_evidence"])
+    with pytest.raises(ValueError):
+        resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
+
+
 def test_artifact_validator_rejects_str_subclass_fields(monkeypatch):
     artifact = _produce(monkeypatch)
     attack = copy.deepcopy(artifact)
-    attack["record"]["panel_id"] = _AlwaysEqualStr("ATTACK")
+    attack["record"]["score_evidence_sha256"] = _AlwaysEqualStr("f" * 64)
     with pytest.raises(ValueError):
         resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
 

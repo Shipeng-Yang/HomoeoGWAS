@@ -533,8 +533,7 @@ def _validate_snpxsnp_resource_probe_artifact_snapshot(
 
     payload = _detached_artifact_snapshot(payload)
     if (
-        not isinstance(payload, Mapping)
-        or set(payload) != {"schema", "record", "score_evidence"}
+        set(payload) != {"schema", "record", "score_evidence"}
         or payload["schema"]
         != "homoeogwas-snpxsnp-resource-probe-artifact-v1"
         or not isinstance(payload["score_evidence"], Mapping)
