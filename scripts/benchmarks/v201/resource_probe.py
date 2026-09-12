@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping, Sequence
 from numbers import Integral
@@ -10,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from homoeogwas.omnib_family import _array_identity, _text_identity
+from homoeogwas.omnib_family import _array_identity
 
 from .comparators import (
     _SNPXSNP_INPUT_BLOCK_FIELDS,
@@ -235,6 +236,21 @@ def _gated_marker_counts_from_bindings(bindings: Any) -> dict[str, int]:
     return counts
 
 
+def _detached_identity_snapshot(identity: Any) -> tuple[dict[str, Any], str]:
+    """Serialize one caller identity once, then retain only plain JSON data."""
+
+    if not isinstance(identity, Mapping):
+        raise ValueError("resource probe score context identity is detached")
+    try:
+        encoded = canonical_json(identity).encode("utf-8")
+        snapshot = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("resource probe score context identity is detached") from error
+    if not isinstance(snapshot, dict):
+        raise ValueError("resource probe score context identity is detached")
+    return snapshot, hashlib.sha256(encoded).hexdigest()
+
+
 def _prepared_score_context_sha256(scores: Any, bound_inputs: Any) -> str:
     """Close retained prepared/null-fit identities over the bound score context."""
 
@@ -243,16 +259,20 @@ def _prepared_score_context_sha256(scores: Any, bound_inputs: Any) -> str:
     null_fit_identity = getattr(scores, "null_fit_identity", None)
     null_fit_sha256 = getattr(scores, "null_fit_sha256", None)
     try:
+        prepared_snapshot, prepared_snapshot_sha256 = _detached_identity_snapshot(
+            prepared_identity,
+        )
+        null_fit_snapshot, null_fit_snapshot_sha256 = _detached_identity_snapshot(
+            null_fit_identity,
+        )
         valid = (
-            isinstance(prepared_identity, Mapping)
-            and isinstance(null_fit_identity, Mapping)
-            and _lower_hex(prepared_sha256, 64)
+            _lower_hex(prepared_sha256, 64)
             and _lower_hex(null_fit_sha256, 64)
-            and _text_identity(prepared_identity) == prepared_sha256
-            and prepared_identity.get("null_fit_sha256") == null_fit_sha256
-            and _text_identity(null_fit_identity) == null_fit_sha256
-            and null_fit_identity.get("W") == _array_identity(bound_inputs.W)
-            and null_fit_identity.get("design")
+            and prepared_snapshot_sha256 == prepared_sha256
+            and prepared_snapshot.get("null_fit_sha256") == null_fit_sha256
+            and null_fit_snapshot_sha256 == null_fit_sha256
+            and null_fit_snapshot.get("W") == _array_identity(bound_inputs.W)
+            and null_fit_snapshot.get("design")
             == _array_identity(bound_inputs.null_design)
         )
     except (TypeError, ValueError):

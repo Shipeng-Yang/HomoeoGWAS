@@ -19,6 +19,17 @@ from scripts.benchmarks.v201 import resource_probe
 from scripts.benchmarks.v201.contracts import canonical_json, sha256_payload
 
 
+class _IdentityAccessorAttack(dict):
+    """Serialize stored identity values but return attacker values via ``get``."""
+
+    def __init__(self, stored, accessor_values):
+        super().__init__(stored)
+        self._accessor_values = dict(accessor_values)
+
+    def get(self, key, default=None):
+        return self._accessor_values.get(key, super().get(key, default))
+
+
 def _prepared_fixture():
     rng = np.random.default_rng(9271)
     sample_count = 40
@@ -454,6 +465,70 @@ def test_producer_rejects_detached_score_context_before_measurement(
             implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
         )
     assert events == [], f"detached context reached {events}"
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["prepared_null_fit_sha256", "null_fit_W", "null_fit_design"],
+)
+def test_producer_rejects_identity_accessor_attacks_before_measurement(
+    monkeypatch, attack,
+):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    if attack == "prepared_null_fit_sha256":
+        prepared.scores.W[:] = np.diag(np.linspace(0.4, 1.6, prepared.scores.W.shape[0]))
+        new_null_fit_identity = {
+            "W": _array_identity(prepared.scores.W),
+            "design": _array_identity(prepared.scores.null_design),
+        }
+        new_null_fit_sha256 = _text_identity(new_null_fit_identity)
+        prepared.scores.null_fit_identity = new_null_fit_identity
+        prepared.scores.null_fit_sha256 = new_null_fit_sha256
+        prepared.scores.prepared_design_identity = _IdentityAccessorAttack(
+            prepared.scores.prepared_design_identity,
+            {"null_fit_sha256": new_null_fit_sha256},
+        )
+    elif attack == "null_fit_W":
+        prepared.scores.W[:] = np.diag(np.linspace(0.4, 1.6, prepared.scores.W.shape[0]))
+        prepared.scores.null_fit_identity = _IdentityAccessorAttack(
+            prepared.scores.null_fit_identity,
+            {"W": _array_identity(prepared.scores.W)},
+        )
+    else:
+        prepared.scores.null_design[:, 0] = np.linspace(
+            -1.0, 1.0, prepared.scores.null_design.shape[0],
+        )
+        prepared.scores.null_fit_identity = _IdentityAccessorAttack(
+            prepared.scores.null_fit_identity,
+            {"design": _array_identity(prepared.scores.null_design)},
+        )
+    events = []
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    with pytest.raises(ValueError, match="score context identity is detached"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"identity accessor attack reached {events}"
 
 
 def test_producer_private_core_never_receives_live_scores(monkeypatch):
