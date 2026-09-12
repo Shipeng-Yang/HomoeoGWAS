@@ -836,6 +836,35 @@ def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
     assert resource_limit_calls == []
 
 
+def test_bool_response_width_fails_before_prepared_access_and_resource_limit(
+    monkeypatch,
+):
+    _prepared, bank = _prepared_fixture()
+    resource_limit_calls = []
+
+    def forbidden_resource_limit(*_args, **_kwargs):
+        resource_limit_calls.append("resource_limit")
+        raise AssertionError("boolean response width reached resource limit")
+
+    monkeypatch.setattr(
+        resource_probe, "comparator_resource_limit", forbidden_resource_limit,
+    )
+    with pytest.raises(ValueError, match="width"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            _PreparedAccessForbidden(),
+            bank,
+            [f"response-{index:02d}" for index in range(20)],
+            response_width=True,
+            design_hash="a" * 64,
+            context_fingerprint="b" * 64,
+            authorization_payload={},
+            authorization_sha256="0" * 64,
+            implementation_commit="1" * 40,
+            matched_comparator_contract_sha256="2" * 64,
+        )
+    assert resource_limit_calls == []
+
+
 def test_producer_pins_context_identity_for_unmocked_fingerprint():
     prepared, bank = _prepared_fixture()
     witness = _witness()
@@ -910,6 +939,32 @@ def test_validate_authorization_requires_exact_expected_identifiers(field):
     with pytest.raises(ValueError, match="authorization"):
         resource_probe._validate_authorization(
             witness["authorization_payload"], response_width=1, **values,
+        )
+
+
+def test_validate_authorization_rejects_boolean_width_alias():
+    prepared, _bank = _prepared_fixture()
+    witness = _witness()
+    authorization = witness["authorization_payload"]
+    authorization["response_widths"][0] = True
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe._validate_authorization(
+            authorization,
+            expected_sha256=sha256_payload(authorization),
+            panel_id="REALG.CGVD1245",
+            response_width=1,
+            implementation_commit="1" * 40,
+            matched_comparator_contract_sha256="2" * 64,
+            design_hash="a" * 64,
+            context_fingerprint="b" * 64,
+            prepared_design_sha256=prepared.scores.prepared_design_sha256,
+            input_family_sha256=_input_family_sha256(prepared),
+            response_bank_sha256=authorization["panel_context"][
+                "response_bank_sha256"
+            ],
+            response_ids_sha256=authorization["panel_context"][
+                "response_ids_sha256"
+            ],
         )
 
 

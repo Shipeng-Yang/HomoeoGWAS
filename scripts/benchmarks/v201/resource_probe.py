@@ -106,6 +106,7 @@ def _validate_authorization(
 ) -> str:
     if (
         type(panel_id) is not str
+        or type(response_width) is not int
         or not _lower_hex(expected_sha256, 64)
         or not _lower_hex(implementation_commit, 40)
         or not _lower_hex(matched_comparator_contract_sha256, 64)
@@ -157,6 +158,7 @@ def _validate_authorization(
         or panel_context != expected_panel_context
         or not _lower_hex(authorized_input_family_sha256, 64)
         or not isinstance(widths, list)
+        or any(type(width) is not int for width in widths)
         or tuple(widths) != COMPARATOR_PROBE_WIDTHS
         or response_width not in widths
         or authorization["formal_execution_authorized"] is not False
@@ -344,7 +346,7 @@ def produce_snpxsnp_resource_probe(
 ) -> dict[str, Any]:
     """Score one exact response prefix and emit a validated v2 artifact."""
 
-    if response_width not in COMPARATOR_PROBE_WIDTHS:
+    if type(response_width) is not int or response_width not in COMPARATOR_PROBE_WIDTHS:
         raise ValueError("resource probe width must be 1, 5 or 20")
     response_bank = _snapshot_response_bank(response_bank)
     context = prepared.context
