@@ -376,7 +376,24 @@ class ComparatorProbeRecordV2(ComparatorProbeRecord):
 def validate_comparator_probe_series(
     payloads: Sequence[Mapping[str, Any] | ComparatorProbeRecord],
 ) -> dict[str, Any]:
-    """Validate the width anchors and return a safety-adjusted projection."""
+    """Validate legacy v1 records; v2 requires the grounded artifact-series API."""
+    records = tuple(payloads)
+    if any(
+        isinstance(value, ComparatorProbeRecordV2)
+        or (
+            isinstance(value, Mapping)
+            and value.get("schema") == "homoeogwas-snpxsnp-resource-probe-v2"
+        )
+        for value in records
+    ):
+        raise ValueError("v2 resource probe series requires grounded artifacts and external witness")
+    return _validate_comparator_probe_series_structure(records)
+
+
+def _validate_comparator_probe_series_structure(
+    payloads: Sequence[Mapping[str, Any] | ComparatorProbeRecord],
+) -> dict[str, Any]:
+    """Project v1 records or v2 artifacts already grounded by the caller."""
 
     def parse_record(
         value: Mapping[str, Any] | ComparatorProbeRecord,

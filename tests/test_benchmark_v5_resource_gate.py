@@ -80,11 +80,32 @@ def _probe(
     }
 
 
+def _legacy_probe(width: int, **kwargs):
+    record = _probe(width, **kwargs)
+    record["schema"] = "homoeogwas-snpxsnp-resource-probe-v1"
+    return {
+        key: value for key, value in record.items()
+        if key in resource_contracts.ComparatorProbeRecord.__dataclass_fields__
+    }
+
+
 def test_probe_schema_rejects_a_missing_measurement_field():
     payload = _probe(1)
     payload.pop("peak_aggregate_pss_bytes")
     with pytest.raises(ValueError, match="schema fields"):
         resource_contracts.ComparatorProbeRecordV2.from_payload(payload)
+
+
+@pytest.mark.parametrize("as_objects", [False, True])
+def test_v2_record_only_series_requires_grounded_artifacts(as_objects):
+    records = [_probe(width) for width in (1, 5, 20)]
+    if as_objects:
+        records = [
+            resource_contracts.ComparatorProbeRecordV2.from_payload(record)
+            for record in records
+        ]
+    with pytest.raises(ValueError, match="grounded artifacts"):
+        resource_contracts.validate_comparator_probe_series(records)
 
 
 @pytest.mark.parametrize(
@@ -122,7 +143,7 @@ def test_unfrozen_comparator_contexts_are_rejected(panel_id, family_size, copies
 
 
 def test_probe_series_requires_widths_1_5_20_and_projects_with_safety_factor_two():
-    records = [_probe(width) for width in (1, 5, 20)]
+    records = [_legacy_probe(width) for width in (1, 5, 20)]
     projection = resource_contracts.validate_comparator_probe_series(records)
 
     assert projection["response_widths"] == [1, 5, 20]
@@ -143,13 +164,13 @@ def test_probe_series_requires_widths_1_5_20_and_projects_with_safety_factor_two
 
 
 def test_probe_series_rejects_time_nonlinearity_and_safety_adjusted_memory():
-    nonlinear = [_probe(width) for width in (1, 5, 20)]
+    nonlinear = [_legacy_probe(width) for width in (1, 5, 20)]
     nonlinear[-1]["scorer_wall_seconds"] = 25.0
     with pytest.raises(ValueError, match="time per response"):
         resource_contracts.validate_comparator_probe_series(nonlinear)
 
     memory = [
-        _probe(width, parent_rss_gib=20, aggregate_pss_gib=24)
+        _legacy_probe(width, parent_rss_gib=20, aggregate_pss_gib=24)
         for width in (1, 5, 20)
     ]
     with pytest.raises(ValueError, match="safety-adjusted parent RSS"):
@@ -157,7 +178,7 @@ def test_probe_series_rejects_time_nonlinearity_and_safety_adjusted_memory():
 
 
 def test_probe_series_allows_fixed_cost_amortization_across_response_widths():
-    records = [_probe(width) for width in (1, 5, 20)]
+    records = [_legacy_probe(width) for width in (1, 5, 20)]
     records[0]["scorer_wall_seconds"] = 6.0
     records[1]["scorer_wall_seconds"] = 10.0
     records[2]["scorer_wall_seconds"] = 20.0
@@ -169,7 +190,7 @@ def test_probe_series_allows_fixed_cost_amortization_across_response_widths():
 
 
 def test_probe_series_projects_width_varying_memory_with_upper_envelope():
-    records = [_probe(width) for width in (1, 5, 20)]
+    records = [_legacy_probe(width) for width in (1, 5, 20)]
     base_parent = 1 * GIB
     parent_slope = 1 * 1024 ** 2
     base_pss = 2 * GIB
@@ -204,7 +225,7 @@ def test_probe_series_projects_width_varying_memory_with_upper_envelope():
     ["peak_parent_rss_bytes", "peak_aggregate_pss_bytes"],
 )
 def test_probe_series_rejects_nonmonotone_memory_anchors(field):
-    records = [_probe(width) for width in (1, 5, 20)]
+    records = [_legacy_probe(width) for width in (1, 5, 20)]
     if field == "peak_aggregate_pss_bytes":
         for record in records:
             record["peak_parent_rss_bytes"] = 1 * GIB
@@ -216,7 +237,7 @@ def test_probe_series_rejects_nonmonotone_memory_anchors(field):
 
 
 def test_probe_series_rejects_a_detached_design_or_pair_family():
-    records = [_probe(width) for width in (1, 5, 20)]
+    records = [_legacy_probe(width) for width in (1, 5, 20)]
     records[-1] = copy.deepcopy(records[-1])
     records[-1]["member_family_sha256"] = "e" * 64
     with pytest.raises(ValueError, match="same frozen context"):
@@ -258,7 +279,7 @@ def test_probe_series_rejects_detached_authorization_or_response_bank(field):
     else:
         records[-1][field] = "6" * 64
     with pytest.raises(ValueError, match="same frozen context"):
-        resource_contracts.validate_comparator_probe_series(records)
+        resource_contracts._validate_comparator_probe_series_structure(records)
 
 
 def test_probe_series_rejects_reused_prefix_or_score_evidence():
@@ -266,7 +287,7 @@ def test_probe_series_rejects_reused_prefix_or_score_evidence():
         records = [_probe(width) for width in (1, 5, 20)]
         records[-1][field] = records[0][field]
         with pytest.raises(ValueError, match="distinct width-prefix evidence"):
-            resource_contracts.validate_comparator_probe_series(records)
+            resource_contracts._validate_comparator_probe_series_structure(records)
 
 
 @pytest.mark.parametrize(

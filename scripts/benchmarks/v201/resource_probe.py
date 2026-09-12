@@ -5,14 +5,20 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
+from numbers import Integral
 from typing import Any
 
 import numpy as np
 
-from .comparators import SNPxSNPScoreResult, score_snpxsnp_family
+from .comparators import (
+    _SNPXSNP_INPUT_BLOCK_FIELDS,
+    SNPxSNPScoreResult,
+    score_snpxsnp_family,
+)
 from .contracts import (
     COMPARATOR_PROBE_WIDTHS,
     ComparatorProbeRecordV2,
+    _validate_comparator_probe_series_structure,
     canonical_json,
     comparator_resource_limit,
     sha256_payload,
@@ -166,6 +172,45 @@ def _response_identities(
     return bank_identity, prefix_identity
 
 
+def _gated_marker_counts_from_bindings(bindings: Any) -> dict[str, int]:
+    if not isinstance(bindings, (list, tuple)) or not bindings:
+        raise ValueError("resource probe input-block bindings are invalid")
+    counts = {}
+    for binding in bindings:
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != _SNPXSNP_INPUT_BLOCK_FIELDS
+            or any(
+                not isinstance(binding[field], str) or not binding[field]
+                for field in ("subgenome", "gene_id")
+            )
+            or any(
+                isinstance(binding[field], bool)
+                or not isinstance(binding[field], Integral)
+                or binding[field] < 1
+                for field in ("sample_count", "variant_count")
+            )
+            or binding["source_column_indices_encoding"]
+            != "little_endian_int64_c_order"
+            or binding["dosage_encoding"] != "little_endian_float64_c_order"
+            or any(
+                not _lower_hex(binding[field], 64)
+                for field in (
+                    "source_column_indices_sha256", "dosage_sha256", "binding_sha256",
+                )
+            )
+            or binding["binding_sha256"] != sha256_payload({
+                key: value for key, value in binding.items() if key != "binding_sha256"
+            })
+        ):
+            raise ValueError("resource probe input-block bindings are invalid")
+        key = f"{binding['subgenome']}|{binding['gene_id']}"
+        if key in counts:
+            raise ValueError("resource probe input-block marker count key is duplicated")
+        counts[key] = int(binding["variant_count"])
+    return counts
+
+
 def produce_snpxsnp_resource_probe(
     prepared: Any,
     response_bank: np.ndarray,
@@ -317,13 +362,28 @@ def produce_snpxsnp_resource_probe(
         "record": record.to_payload(),
         "score_evidence": score_evidence,
     }
-    return validate_snpxsnp_resource_probe_artifact(artifact)
+    return validate_snpxsnp_resource_probe_artifact(
+        artifact,
+        authorization_payload=authorization_payload,
+        authorization_sha256=authorization_sha256,
+        response_bank=response_bank,
+        response_ids=response_ids_tuple,
+    )
 
 
 def validate_snpxsnp_resource_probe_artifact(
     payload: Mapping[str, Any],
+    *,
+    authorization_payload: Mapping[str, Any],
+    authorization_sha256: str,
+    response_bank: np.ndarray,
+    response_ids: Sequence[str],
 ) -> dict[str, Any]:
-    """Validate a v2 record against its separately serialized score evidence."""
+    """Ground a v2 artifact in independent caller-supplied authorization/inputs.
+
+    The witness must come from the trusted caller, never from the artifact.
+    Hashes alone cannot establish that a stored prefix was authorized.
+    """
 
     if (
         not isinstance(payload, Mapping)
@@ -335,6 +395,23 @@ def validate_snpxsnp_resource_probe_artifact(
     ):
         raise ValueError("resource probe artifact fields differ")
     record = ComparatorProbeRecordV2.from_payload(payload["record"])
+    expected_ids = _response_id_tuple(response_ids)
+    expected_bank, expected_prefix = _response_identities(
+        response_bank, expected_ids, record.response_width,
+    )
+    _validate_authorization(
+        authorization_payload,
+        expected_sha256=authorization_sha256,
+        panel_id=record.panel_id,
+        response_width=record.response_width,
+        implementation_commit=record.implementation_commit,
+        matched_comparator_contract_sha256=record.matched_comparator_contract_sha256,
+        design_hash=record.design_hash,
+        context_fingerprint=record.context_fingerprint,
+        prepared_design_sha256=record.prepared_design_sha256,
+        response_bank_sha256=sha256_payload(expected_bank),
+        response_ids_sha256=sha256_payload({"ordered_response_ids": list(expected_ids)}),
+    )
     evidence = dict(payload["score_evidence"])
     encoded = canonical_json(evidence).encode("utf-8")
     bank_identity = evidence["response_bank_identity"]
@@ -359,7 +436,11 @@ def validate_snpxsnp_resource_probe_artifact(
         else None
     )
     if (
-        evidence["schema"]
+        record.probe_authorization_sha256 != authorization_sha256
+        or record.response_ids != expected_ids
+        or bank_identity != expected_bank
+        or prefix_identity != expected_prefix
+        or evidence["schema"]
         != "homoeogwas-snpxsnp-resource-score-evidence-v1"
         or evidence["panel_id"] != record.panel_id
         or evidence["response_width"] != record.response_width
@@ -403,6 +484,10 @@ def validate_snpxsnp_resource_probe_artifact(
         or len(encoded) != record.output_bytes
     ):
         raise ValueError("resource probe score evidence is detached or invalid")
+    if _gated_marker_counts_from_bindings(raw.get("input_block_bindings")) != dict(
+        record.gated_marker_count_by_gene
+    ):
+        raise ValueError("resource probe gated marker counts differ from input-block bindings")
     return {
         "schema": payload["schema"],
         "record": record.to_payload(),
@@ -410,7 +495,32 @@ def validate_snpxsnp_resource_probe_artifact(
     }
 
 
+def validate_snpxsnp_resource_probe_artifact_series(
+    payloads: Sequence[Mapping[str, Any]],
+    *,
+    authorization_payload: Mapping[str, Any],
+    authorization_sha256: str,
+    response_bank: np.ndarray,
+    response_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Audit every width against one external witness, then project resources."""
+    from .audit import _audit_comparator_probe_artifact
+
+    records = [
+        _audit_comparator_probe_artifact(
+            payload,
+            authorization_payload=authorization_payload,
+            authorization_sha256=authorization_sha256,
+            response_bank=response_bank,
+            response_ids=response_ids,
+        )["record"]
+        for payload in payloads
+    ]
+    return _validate_comparator_probe_series_structure(records)
+
+
 __all__ = [
     "produce_snpxsnp_resource_probe",
     "validate_snpxsnp_resource_probe_artifact",
+    "validate_snpxsnp_resource_probe_artifact_series",
 ]

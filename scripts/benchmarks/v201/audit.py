@@ -187,24 +187,45 @@ def _audit_comparator_probe_series(
 
 def _audit_comparator_probe_artifact(
     payload: Mapping[str, Any],
+    *,
+    authorization_payload: Mapping[str, Any],
+    authorization_sha256: str,
+    response_bank: np.ndarray,
+    response_ids: Sequence[str],
 ) -> dict[str, Any]:
-    """Validate a resource record against its stored score evidence."""
+    """Ground the artifact in external inputs and reconstruct raw score evidence."""
 
     from .resource_probe import validate_snpxsnp_resource_probe_artifact
 
     try:
-        validated = validate_snpxsnp_resource_probe_artifact(payload)
+        validated = validate_snpxsnp_resource_probe_artifact(
+            payload,
+            authorization_payload=authorization_payload,
+            authorization_sha256=authorization_sha256,
+            response_bank=response_bank,
+            response_ids=response_ids,
+        )
     except (KeyError, TypeError, ValueError) as error:
         raise BenchmarkAuditError(
             "SNPxSNP resource probe artifact is invalid"
         ) from error
     record = validated["record"]
     evidence = validated["score_evidence"]
-    _snpxsnp_result_from_evidence(
+    result = _snpxsnp_result_from_evidence(
         evidence["raw_score_evidence"],
         response_count=record["response_width"],
         group_p=np.asarray(evidence["group_p"], dtype=float),
     )
+    # Rejoin the independently reconstructed raw result rather than trusting
+    # the producer validator's marker-count check.
+    marker_counts = {}
+    for binding in result.input_block_bindings:
+        key = f"{binding['subgenome']}|{binding['gene_id']}"
+        if key in marker_counts:
+            raise BenchmarkAuditError("resource probe artifact has duplicate marker count keys")
+        marker_counts[key] = int(binding["variant_count"])
+    if marker_counts != record["gated_marker_count_by_gene"]:
+        raise BenchmarkAuditError("resource probe artifact marker counts differ from raw inputs")
     return validated
 
 
