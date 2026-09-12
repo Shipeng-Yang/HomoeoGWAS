@@ -968,6 +968,31 @@ def test_validate_authorization_rejects_boolean_width_alias():
         )
 
 
+def test_validate_authorization_rejects_boolean_requested_width():
+    prepared, _bank = _prepared_fixture()
+    witness = _witness()
+    authorization = witness["authorization_payload"]
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe._validate_authorization(
+            authorization,
+            expected_sha256=witness["authorization_sha256"],
+            panel_id="REALG.CGVD1245",
+            response_width=True,
+            implementation_commit="1" * 40,
+            matched_comparator_contract_sha256="2" * 64,
+            design_hash="a" * 64,
+            context_fingerprint="b" * 64,
+            prepared_design_sha256=prepared.scores.prepared_design_sha256,
+            input_family_sha256=_input_family_sha256(prepared),
+            response_bank_sha256=authorization["panel_context"][
+                "response_bank_sha256"
+            ],
+            response_ids_sha256=authorization["panel_context"][
+                "response_ids_sha256"
+            ],
+        )
+
+
 def test_context_fingerprint_subclass_rejected_before_fingerprinting(monkeypatch):
     prepared, bank = _prepared_fixture()
     witness = _witness()
@@ -1010,6 +1035,14 @@ def test_artifact_validator_rejects_str_subclass_fields(monkeypatch):
     attack["record"]["score_evidence_sha256"] = _AlwaysEqualStr("f" * 64)
     with pytest.raises(ValueError):
         resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
+
+
+@pytest.mark.parametrize("payload", [[], {"schema": object()}])
+def test_artifact_validator_rejects_nonmapping_or_nonjson_payload(payload):
+    with pytest.raises(ValueError, match="artifact fields"):
+        resource_probe.validate_snpxsnp_resource_probe_artifact(
+            payload, **_witness(),
+        )
 
 
 def test_producer_private_core_never_receives_live_scores(monkeypatch):
