@@ -13,6 +13,7 @@ import numpy as np
 from .comparators import (
     _SNPXSNP_INPUT_BLOCK_FIELDS,
     SNPxSNPScoreResult,
+    _snpxsnp_input_family_hash,
     score_snpxsnp_family,
 )
 from .contracts import (
@@ -84,16 +85,20 @@ def _validate_authorization(
     prepared_design_sha256: str,
     response_bank_sha256: str,
     response_ids_sha256: str,
-) -> None:
+) -> str:
     if not isinstance(payload, Mapping) or set(payload) != _AUTHORIZATION_FIELDS:
         raise ValueError("resource probe authorization fields differ")
     panel_context = payload["panel_context"]
+    if not isinstance(panel_context, Mapping):
+        raise ValueError("resource probe authorization panel context is invalid")
+    authorized_input_family_sha256 = panel_context.get("input_family_sha256")
     widths = payload["response_widths"]
     expected_panel_context = {
         "panel_id": panel_id,
         "design_hash": design_hash,
         "context_fingerprint": context_fingerprint,
         "prepared_design_sha256": prepared_design_sha256,
+        "input_family_sha256": authorized_input_family_sha256,
         "response_bank_sha256": response_bank_sha256,
         "response_ids_sha256": response_ids_sha256,
     }
@@ -110,6 +115,7 @@ def _validate_authorization(
         or payload["matched_comparator_contract_sha256"]
         != matched_comparator_contract_sha256
         or panel_context != expected_panel_context
+        or not _lower_hex(authorized_input_family_sha256, 64)
         or not isinstance(widths, list)
         or tuple(widths) != COMPARATOR_PROBE_WIDTHS
         or response_width not in widths
@@ -118,6 +124,7 @@ def _validate_authorization(
         raise ValueError("resource probe authorization identity or scope is invalid")
     if payload["resource_probe_authorized"] is not True:
         raise ValueError("resource probe is not authorized")
+    return authorized_input_family_sha256
 
 
 def _response_id_tuple(response_ids: Sequence[str]) -> tuple[str, ...]:
@@ -133,11 +140,7 @@ def _response_id_tuple(response_ids: Sequence[str]) -> tuple[str, ...]:
     return values
 
 
-def _response_identities(
-    response_bank: np.ndarray,
-    response_ids: tuple[str, ...],
-    response_width: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+def _validate_response_bank(response_bank: np.ndarray) -> None:
     if (
         not isinstance(response_bank, np.ndarray)
         or response_bank.dtype != np.dtype("float64")
@@ -149,6 +152,23 @@ def _response_identities(
         raise ValueError(
             "response bank must be finite C-contiguous float64 with 20 columns"
         )
+
+
+def _snapshot_response_bank(response_bank: np.ndarray) -> np.ndarray:
+    # Validate the original object before copying: coercion must not admit an
+    # otherwise invalid caller array. Caller aliases cannot mutate this copy.
+    _validate_response_bank(response_bank)
+    snapshot = np.array(response_bank, dtype=np.float64, order="C", copy=True)
+    snapshot.setflags(write=False)
+    return snapshot
+
+
+def _response_identities(
+    response_bank: np.ndarray,
+    response_ids: tuple[str, ...],
+    response_width: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _validate_response_bank(response_bank)
     prefix = response_bank[:, :response_width]
     if not prefix.flags.c_contiguous:
         prefix = np.ascontiguousarray(prefix)
@@ -228,6 +248,7 @@ def produce_snpxsnp_resource_probe(
 
     if response_width not in COMPARATOR_PROBE_WIDTHS:
         raise ValueError("resource probe width must be 1, 5 or 20")
+    response_bank = _snapshot_response_bank(response_bank)
     context = prepared.context
     panel_id = context.panel_id
     response_ids_tuple = _response_id_tuple(response_ids)
@@ -253,7 +274,7 @@ def produce_snpxsnp_resource_probe(
     response_ids_sha256 = sha256_payload({
         "ordered_response_ids": list(response_ids_tuple),
     })
-    _validate_authorization(
+    authorized_input_family_sha256 = _validate_authorization(
         authorization_payload,
         expected_sha256=authorization_sha256,
         panel_id=panel_id,
@@ -290,6 +311,8 @@ def produce_snpxsnp_resource_probe(
     )
     if not isinstance(result, SNPxSNPScoreResult):
         raise RuntimeError("resource probe scorer returned an invalid result")
+    if result.input_family_sha256 != authorized_input_family_sha256:
+        raise ValueError("resource probe scorer input family differs from authorization")
     if (
         result.group_p.shape != (family_size, response_width)
         or result.failed_response_indices
@@ -362,7 +385,7 @@ def produce_snpxsnp_resource_probe(
         "record": record.to_payload(),
         "score_evidence": score_evidence,
     }
-    return validate_snpxsnp_resource_probe_artifact(
+    return _validate_snpxsnp_resource_probe_artifact_snapshot(
         artifact,
         authorization_payload=authorization_payload,
         authorization_sha256=authorization_sha256,
@@ -384,6 +407,24 @@ def validate_snpxsnp_resource_probe_artifact(
     The witness must come from the trusted caller, never from the artifact.
     Hashes alone cannot establish that a stored prefix was authorized.
     """
+    return _validate_snpxsnp_resource_probe_artifact_snapshot(
+        payload,
+        authorization_payload=authorization_payload,
+        authorization_sha256=authorization_sha256,
+        response_bank=_snapshot_response_bank(response_bank),
+        response_ids=response_ids,
+    )
+
+
+def _validate_snpxsnp_resource_probe_artifact_snapshot(
+    payload: Mapping[str, Any],
+    *,
+    authorization_payload: Mapping[str, Any],
+    authorization_sha256: str,
+    response_bank: np.ndarray,
+    response_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Validate using the private response snapshot owned by an entry point."""
 
     if (
         not isinstance(payload, Mapping)
@@ -399,7 +440,7 @@ def validate_snpxsnp_resource_probe_artifact(
     expected_bank, expected_prefix = _response_identities(
         response_bank, expected_ids, record.response_width,
     )
-    _validate_authorization(
+    authorized_input_family_sha256 = _validate_authorization(
         authorization_payload,
         expected_sha256=authorization_sha256,
         panel_id=record.panel_id,
@@ -437,6 +478,7 @@ def validate_snpxsnp_resource_probe_artifact(
     )
     if (
         record.probe_authorization_sha256 != authorization_sha256
+        or record.input_family_sha256 != authorized_input_family_sha256
         or record.response_ids != expected_ids
         or bank_identity != expected_bank
         or prefix_identity != expected_prefix
@@ -488,6 +530,10 @@ def validate_snpxsnp_resource_probe_artifact(
         record.gated_marker_count_by_gene
     ):
         raise ValueError("resource probe gated marker counts differ from input-block bindings")
+    if _snpxsnp_input_family_hash(tuple(raw["input_block_bindings"])) != (
+        authorized_input_family_sha256
+    ):
+        raise ValueError("resource probe raw input family differs from authorization")
     return {
         "schema": payload["schema"],
         "record": record.to_payload(),
@@ -504,10 +550,12 @@ def validate_snpxsnp_resource_probe_artifact_series(
     response_ids: Sequence[str],
 ) -> dict[str, Any]:
     """Audit every width against one external witness, then project resources."""
-    from .audit import _audit_comparator_probe_artifact
+    from .audit import _audit_comparator_probe_artifact_snapshot
 
+    response_bank = _snapshot_response_bank(response_bank)
+    response_ids = _response_id_tuple(response_ids)
     records = [
-        _audit_comparator_probe_artifact(
+        _audit_comparator_probe_artifact_snapshot(
             payload,
             authorization_payload=authorization_payload,
             authorization_sha256=authorization_sha256,

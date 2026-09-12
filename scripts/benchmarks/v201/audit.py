@@ -194,11 +194,34 @@ def _audit_comparator_probe_artifact(
     response_ids: Sequence[str],
 ) -> dict[str, Any]:
     """Ground the artifact in external inputs and reconstruct raw score evidence."""
-
-    from .resource_probe import validate_snpxsnp_resource_probe_artifact
+    from .resource_probe import _snapshot_response_bank
 
     try:
-        validated = validate_snpxsnp_resource_probe_artifact(
+        response_bank = _snapshot_response_bank(response_bank)
+    except (KeyError, TypeError, ValueError) as error:
+        raise BenchmarkAuditError("SNPxSNP resource probe artifact is invalid") from error
+    return _audit_comparator_probe_artifact_snapshot(
+        payload,
+        authorization_payload=authorization_payload,
+        authorization_sha256=authorization_sha256,
+        response_bank=response_bank,
+        response_ids=response_ids,
+    )
+
+
+def _audit_comparator_probe_artifact_snapshot(
+    payload: Mapping[str, Any],
+    *,
+    authorization_payload: Mapping[str, Any],
+    authorization_sha256: str,
+    response_bank: np.ndarray,
+    response_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Audit one artifact using its entry point's private response snapshot."""
+    from .resource_probe import _validate_snpxsnp_resource_probe_artifact_snapshot
+
+    try:
+        validated = _validate_snpxsnp_resource_probe_artifact_snapshot(
             payload,
             authorization_payload=authorization_payload,
             authorization_sha256=authorization_sha256,

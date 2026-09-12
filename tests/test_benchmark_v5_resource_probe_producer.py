@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -68,7 +69,30 @@ def _array_sha256(array):
     return hashlib.sha256(serialized).hexdigest()
 
 
+def _input_family_sha256(prepared):
+    bindings = []
+    for (subgenome, gene_id), values in sorted(prepared.gene_blocks.items()):
+        binding = {
+            "subgenome": subgenome,
+            "gene_id": gene_id,
+            "sample_count": values.shape[0],
+            "variant_count": values.shape[1],
+            "source_column_indices_encoding": "little_endian_int64_c_order",
+            "source_column_indices_sha256": hashlib.sha256(
+                prepared.scores.gated_snp[(subgenome, gene_id)].astype("<i8").tobytes()
+            ).hexdigest(),
+            "dosage_encoding": "little_endian_float64_c_order",
+            "dosage_sha256": hashlib.sha256(values.astype("<f8").tobytes()).hexdigest(),
+        }
+        binding["binding_sha256"] = sha256_payload(binding)
+        bindings.append(binding)
+    return sha256_payload({
+        "schema": "homoeogwas-snpxsnp-input-family-v1", "blocks": bindings,
+    })
+
+
 def _authorization(response_bank, response_ids, *, enabled: bool = True):
+    prepared, _responses = _prepared_fixture()
     bank_identity = {
         "schema": "homoeogwas-snpxsnp-response-bank-v1",
         "dtype": "float64",
@@ -86,6 +110,7 @@ def _authorization(response_bank, response_ids, *, enabled: bool = True):
             "design_hash": "a" * 64,
             "context_fingerprint": "b" * 64,
             "prepared_design_sha256": "c" * 64,
+            "input_family_sha256": _input_family_sha256(prepared),
             "response_bank_sha256": sha256_payload(bank_identity),
             "response_ids_sha256": sha256_payload({
                 "ordered_response_ids": list(response_ids),
@@ -149,6 +174,188 @@ def _refresh_artifact_hashes(artifact):
     record["output_bytes"] = len(encoded)
 
 
+def _alternate_input_result(width):
+    prepared, responses = _prepared_fixture()
+    prepared.gene_blocks[("A", "geneA")] = np.column_stack((
+        prepared.gene_blocks[("A", "geneA")],
+        np.random.default_rng(118).binomial(2, 0.4, size=40),
+    ))
+    prepared.scores = replace(prepared.scores, gated_snp={
+        ("A", "geneA"): np.array([7, 11]),
+        ("D", "geneD"): np.array([9]),
+    })
+    return resource_probe.score_snpxsnp_family(
+        prepared.scores, prepared.context.family, prepared.expanded,
+        prepared.gene_blocks, np.ascontiguousarray(responses[:, :width]),
+        max_offered_pairs=10000,
+    )
+
+
+def test_audit_rejects_whole_input_family_substitution_under_unchanged_authorization(
+    monkeypatch,
+):
+    from scripts.benchmarks.v201.audit import (
+        BenchmarkAuditError,
+        _audit_comparator_probe_artifact,
+    )
+
+    artifact = _produce(monkeypatch)
+    witness = _witness()
+    original_authorization = copy.deepcopy(witness["authorization_payload"])
+    result = _alternate_input_result(1)
+    raw = result.evidence_payload()
+    artifact["score_evidence"]["raw_score_evidence"] = raw
+    artifact["score_evidence"]["group_p"] = result.group_p.tolist()
+    for field in (
+        "input_family_sha256", "member_family_sha256", "offered_pair_count",
+        "design_nonestimable_pair_count", "tested_pair_count",
+        "nonfinite_pair_score_count", "failed_response_indices",
+    ):
+        artifact["record"][field] = raw[field]
+    artifact["record"]["gated_marker_count_by_gene"] = {"A|geneA": 2, "D|geneD": 1}
+    _refresh_artifact_hashes(artifact)
+    assert witness["authorization_payload"] == original_authorization
+    with pytest.raises(BenchmarkAuditError, match="resource probe artifact"):
+        _audit_comparator_probe_artifact(artifact, **witness)
+
+
+def test_artifact_validator_rehashes_raw_inputs_against_authorization(monkeypatch):
+    artifact = _produce(monkeypatch)
+    binding = artifact["score_evidence"]["raw_score_evidence"]["input_block_bindings"][0]
+    binding["dosage_sha256"] = "f" * 64
+    binding["binding_sha256"] = sha256_payload({
+        key: value for key, value in binding.items() if key != "binding_sha256"
+    })
+    # Keep the advertised family SHA equal to the authorized value, but detach
+    # its block contents. Rehash only the artifact envelope, not that family SHA.
+    _refresh_artifact_hashes(artifact)
+    with pytest.raises(ValueError, match="input.family|authorization"):
+        resource_probe.validate_snpxsnp_resource_probe_artifact(artifact, **_witness())
+
+
+def test_producer_rejects_scorer_input_family_not_in_authorization(monkeypatch):
+    # Change only dosage values, preserving the producer's prepared marker counts.
+    prepared, responses = _prepared_fixture()
+    prepared.gene_blocks[("A", "geneA")][0, 0] = (
+        prepared.gene_blocks[("A", "geneA")][0, 0] + 1.0
+    ) % 3.0
+    result = resource_probe.score_snpxsnp_family(
+        prepared.scores, prepared.context.family, prepared.expanded,
+        prepared.gene_blocks, np.ascontiguousarray(responses[:, :1]),
+        max_offered_pairs=10000,
+    )
+    assert result.input_family_sha256 != _input_family_sha256(_prepared_fixture()[0])
+    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", lambda *_a, **_k: result)
+    with pytest.raises(ValueError, match="input.family|authorization"):
+        _produce(monkeypatch)
+
+
+@pytest.mark.parametrize("invalid", ["missing", None, "F" * 64, 123])
+def test_producer_requires_authorized_input_family_before_scoring(monkeypatch, invalid):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    authorization = witness["authorization_payload"]
+    if invalid == "missing":
+        del authorization["panel_context"]["input_family_sha256"]
+    else:
+        authorization["panel_context"]["input_family_sha256"] = invalid
+    witness["authorization_sha256"] = sha256_payload(authorization)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("scoring started before authorization validation")
+
+    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=authorization,
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert called is False
+
+
+def test_producer_scores_private_bank_despite_caller_mutate_restore(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    original = bank.copy()
+    witness = _witness()
+    scorer = resource_probe.score_snpxsnp_family
+    expected = scorer(
+        prepared.scores, prepared.context.family, prepared.expanded,
+        prepared.gene_blocks, original, max_offered_pairs=10000,
+    )
+
+    def mutate_score_restore(*args, **kwargs):
+        try:
+            bank[:] = np.random.default_rng(552).normal(size=bank.shape)
+            return scorer(*args, **kwargs)
+        finally:
+            bank[:] = original
+
+    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", mutate_score_restore)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=20,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    np.testing.assert_array_equal(bank, original)
+    assert artifact["score_evidence"]["response_bank_identity"][
+        "array_sha256"
+    ] == _array_sha256(original)
+    np.testing.assert_array_equal(artifact["score_evidence"]["group_p"], expected.group_p)
+
+
+def test_artifact_validator_freezes_external_bank_before_identity_checks(monkeypatch):
+    artifact = _produce(monkeypatch, 20)
+    witness = _witness()
+    bank = witness["response_bank"]
+    original = bank.copy()
+    identify = resource_probe._response_identities
+
+    def mutate_identify_restore(*args, **kwargs):
+        try:
+            bank[:] += 1.0
+            return identify(*args, **kwargs)
+        finally:
+            bank[:] = original
+
+    monkeypatch.setattr(resource_probe, "_response_identities", mutate_identify_restore)
+    validated = resource_probe.validate_snpxsnp_resource_probe_artifact(artifact, **witness)
+    assert validated["record"] == artifact["record"]
+
+
+def test_artifact_series_freezes_one_bank_before_auditing_any_width(monkeypatch):
+    from scripts.benchmarks.v201 import audit
+
+    artifacts = _artifact_series(monkeypatch)
+    witness = _witness()
+    bank = witness["response_bank"]
+    original = bank.copy()
+    reconstruct = audit._snpxsnp_result_from_evidence
+
+    def reconstruct_then_mutate(*args, **kwargs):
+        result = reconstruct(*args, **kwargs)
+        bank[:] += 1.0
+        return result
+
+    monkeypatch.setattr(audit, "_snpxsnp_result_from_evidence", reconstruct_then_mutate)
+    try:
+        projection = resource_probe.validate_snpxsnp_resource_probe_artifact_series(
+            artifacts, **witness,
+        )
+    finally:
+        bank[:] = original
+    assert projection["accepted"] is True
+
+
 def test_artifact_validation_requires_external_witness(monkeypatch):
     artifact = _produce(monkeypatch)
     with pytest.raises((TypeError, ValueError)):
@@ -192,8 +399,14 @@ def test_artifact_validator_rejects_malformed_raw_input_bindings(monkeypatch, mu
     })
     artifact["record"]["input_family_sha256"] = raw["input_family_sha256"]
     _refresh_artifact_hashes(artifact)
+    witness = _witness()
+    witness["authorization_payload"]["panel_context"]["input_family_sha256"] = raw[
+        "input_family_sha256"
+    ]
+    witness["authorization_sha256"] = sha256_payload(witness["authorization_payload"])
+    artifact["record"]["probe_authorization_sha256"] = witness["authorization_sha256"]
     with pytest.raises(ValueError, match="input.block|marker count"):
-        resource_probe.validate_snpxsnp_resource_probe_artifact(artifact, **_witness())
+        resource_probe.validate_snpxsnp_resource_probe_artifact(artifact, **witness)
 
 
 @pytest.mark.parametrize("field", ["prefix", "bank", "authorization"])
@@ -242,7 +455,7 @@ def test_standalone_audit_rejects_marker_counts_detached_from_raw_inputs(
         # Exercise the audit's own result-to-record join even if the producer
         # validator regresses to accepting detached counts.
         monkeypatch.setattr(
-            resource_probe, "validate_snpxsnp_resource_probe_artifact",
+            resource_probe, "_validate_snpxsnp_resource_probe_artifact_snapshot",
             lambda payload, **_kwargs: payload,
         )
     else:
@@ -339,7 +552,7 @@ def test_audit_independently_reconstructs_the_raw_member_family(monkeypatch):
     [
         "implementation_commit", "matched_comparator_contract_sha256",
         "panel_id", "design_hash", "context_fingerprint", "prepared_design_sha256",
-        "response_bank_sha256", "response_ids_sha256", "response_widths",
+        "input_family_sha256", "response_bank_sha256", "response_ids_sha256", "response_widths",
         "resource_probe_authorized", "formal_execution_authorized",
     ],
 )
@@ -456,6 +669,8 @@ def test_grounded_series_rejects_any_replaced_artifact(monkeypatch, index, mutat
 
 @pytest.mark.parametrize("mutation", ["missing_width", "slow", "memory", "input_family"])
 def test_grounded_series_retains_structural_and_projection_gates(monkeypatch, mutation):
+    from scripts.benchmarks.v201.audit import BenchmarkAuditError
+
     artifacts = _artifact_series(monkeypatch)
     if mutation == "missing_width":
         artifacts.pop()
@@ -479,7 +694,8 @@ def test_grounded_series_retains_structural_and_projection_gates(monkeypatch, mu
         })
         artifact["record"]["input_family_sha256"] = raw["input_family_sha256"]
         _refresh_artifact_hashes(artifact)
-    with pytest.raises(ValueError):
+    expected_error = BenchmarkAuditError if mutation == "input_family" else ValueError
+    with pytest.raises(expected_error):
         resource_probe.validate_snpxsnp_resource_probe_artifact_series(
             artifacts, **_witness(),
         )
