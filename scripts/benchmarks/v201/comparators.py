@@ -786,7 +786,12 @@ def _bind_snpxsnp_inputs(
             raise ValueError(
                 f"genotype block {key!r} must contain finite dosages in [0, 2]"
             )
-        checked_blocks[key] = values
+        # Bind the caller's validated values to a private, canonical snapshot.
+        # The scorer may run after authorization/measurement setup, so retaining
+        # caller-owned aliases here would make its input-family binding mutable.
+        snapshot = np.array(values, dtype=np.float64, order="C", copy=True)
+        snapshot.setflags(write=False)
+        checked_blocks[key] = snapshot
 
     checked_columns: dict[tuple[str, str], np.ndarray] = {}
     for key in sorted(required):
@@ -798,7 +803,9 @@ def _bind_snpxsnp_inputs(
             or np.unique(columns).size != columns.size
         ):
             raise ValueError("gated SNP indices do not match genotype blocks")
-        checked_columns[key] = columns
+        snapshot = np.array(columns, dtype=np.int64, order="C", copy=True)
+        snapshot.setflags(write=False)
+        checked_columns[key] = snapshot
     input_bindings = tuple(
         _snpxsnp_input_block_binding(
             key, checked_columns[key], checked_blocks[key]
@@ -808,39 +815,34 @@ def _bind_snpxsnp_inputs(
     input_family_sha256 = _snpxsnp_input_family_hash(input_bindings)
     return _SNPxSNPInputs(
         sample_count=sample_count,
-        blocks=checked_blocks,
-        source_columns=checked_columns,
+        blocks=MappingProxyType(checked_blocks),
+        source_columns=MappingProxyType(checked_columns),
         bindings=input_bindings,
         family_sha256=input_family_sha256,
     )
 
 
-def score_snpxsnp_family(
+def _score_snpxsnp_bound_inputs(
     scores: OmniBFamilyScores,
     family: MasterGroupFamily,
     expanded: ExpandedEdgeFamily,
-    gene_blocks: Mapping[tuple[str, str], np.ndarray],
     responses: np.ndarray,
     *,
+    inputs: _SNPxSNPInputs,
     max_offered_pairs: int,
 ) -> SNPxSNPScoreResult:
-    """Stream raw nested-F pair scores into group minima.
+    """Score an internally bound SNPxSNP input snapshot.
 
-    ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
-    exactly the genes in ``expanded``. Pair designs and scores are enumerated
-    once; no pair-by-response score matrix is retained.
+    This private core intentionally accepts only the result of
+    :func:`_bind_snpxsnp_inputs`; public callers use
+    :func:`score_snpxsnp_family`, while the resource producer reuses its
+    authorization-preflight snapshot without rebinding caller-owned arrays.
     """
     from homoeogwas.interact import _batch_nested_f
 
-    inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
+    if not isinstance(inputs, _SNPxSNPInputs):
+        raise TypeError("SNPxSNP scoring requires internally bound inputs")
     target = _response_matrix(responses, inputs.sample_count, name="responses")
-    if (
-        isinstance(max_offered_pairs, bool)
-        or not isinstance(max_offered_pairs, Integral)
-        or int(max_offered_pairs) < 1
-    ):
-        raise ValueError("max_offered_pairs must be a positive integer")
-    max_offered_pairs = int(max_offered_pairs)
     checked_blocks = inputs.blocks
     checked_columns = inputs.source_columns
 
@@ -977,6 +979,41 @@ def score_snpxsnp_family(
         nonfinite_pair_score_count=nonfinite_pair_score_count,
         nonfinite_pair_score_count_by_group=tuple(nonfinite_by_group),
         failed_response_indices=failed_indices,
+    )
+
+
+def score_snpxsnp_family(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    gene_blocks: Mapping[tuple[str, str], np.ndarray],
+    responses: np.ndarray,
+    *,
+    max_offered_pairs: int,
+) -> SNPxSNPScoreResult:
+    """Stream raw nested-F pair scores into group minima.
+
+    ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
+    exactly the genes in ``expanded``. The public validation order is frozen:
+    family/context, responses, pair limit, input binding, then pair scoring.
+    """
+    _validate_frozen_family(family, expanded)
+    sample_count = _validate_score_context(scores)
+    _response_matrix(responses, sample_count, name="responses")
+    if (
+        isinstance(max_offered_pairs, bool)
+        or not isinstance(max_offered_pairs, Integral)
+        or int(max_offered_pairs) < 1
+    ):
+        raise ValueError("max_offered_pairs must be a positive integer")
+    inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
+    return _score_snpxsnp_bound_inputs(
+        scores,
+        family,
+        expanded,
+        responses,
+        inputs=inputs,
+        max_offered_pairs=int(max_offered_pairs),
     )
 
 

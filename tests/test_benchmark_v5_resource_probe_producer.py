@@ -10,6 +10,7 @@ import pytest
 
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from homoeogwas.omnib_family import OmniBFamilyScores
+from scripts.benchmarks.v201 import comparators as comparator_module
 from scripts.benchmarks.v201 import resource_probe
 from scripts.benchmarks.v201.contracts import canonical_json, sha256_payload
 
@@ -184,7 +185,7 @@ def _alternate_input_result(width):
         ("A", "geneA"): np.array([7, 11]),
         ("D", "geneD"): np.array([9]),
     })
-    return resource_probe.score_snpxsnp_family(
+    return comparator_module.score_snpxsnp_family(
         prepared.scores, prepared.context.family, prepared.expanded,
         prepared.gene_blocks, np.ascontiguousarray(responses[:, :width]),
         max_offered_pairs=10000,
@@ -239,13 +240,15 @@ def test_producer_rejects_scorer_input_family_not_in_authorization(monkeypatch):
     prepared.gene_blocks[("A", "geneA")][0, 0] = (
         prepared.gene_blocks[("A", "geneA")][0, 0] + 1.0
     ) % 3.0
-    result = resource_probe.score_snpxsnp_family(
+    result = comparator_module.score_snpxsnp_family(
         prepared.scores, prepared.context.family, prepared.expanded,
         prepared.gene_blocks, np.ascontiguousarray(responses[:, :1]),
         max_offered_pairs=10000,
     )
     assert result.input_family_sha256 != _input_family_sha256(_prepared_fixture()[0])
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", lambda *_a, **_k: result)
+    monkeypatch.setattr(
+        resource_probe, "_score_snpxsnp_bound_inputs", lambda *_a, **_k: result,
+    )
     with pytest.raises(ValueError, match="input.family|authorization"):
         _produce(monkeypatch)
 
@@ -269,7 +272,7 @@ def test_producer_checks_live_input_family_before_measurement(monkeypatch, mutat
     ]["input_family_sha256"]
     monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
     events = []
-    scorer = resource_probe.score_snpxsnp_family
+    scorer = resource_probe._score_snpxsnp_bound_inputs
     measure = cli._measure_comparator_operation
 
     def record_score(*args, **kwargs):
@@ -280,7 +283,7 @@ def test_producer_checks_live_input_family_before_measurement(monkeypatch, mutat
         events.append("measurement")
         return measure(*args, **kwargs)
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", record_score)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
     monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
     with pytest.raises(ValueError, match="input.family|authorization"):
         resource_probe.produce_snpxsnp_resource_probe(
@@ -291,6 +294,53 @@ def test_producer_checks_live_input_family_before_measurement(monkeypatch, mutat
             implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
         )
     assert events == [], f"unauthorized live input reached {events}"
+
+
+@pytest.mark.parametrize("mutation", ["dosage", "source_columns", "replace_mappings"])
+@pytest.mark.parametrize("width", [1, 20])
+def test_producer_scores_authorized_genotype_despite_mutate_restore(
+    monkeypatch, mutation, width,
+):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    expected = comparator_module.score_snpxsnp_family(
+        prepared.scores, prepared.context.family, prepared.expanded,
+        prepared.gene_blocks, np.ascontiguousarray(bank[:, :width]),
+        max_offered_pairs=10000,
+    )
+    blocks = prepared.gene_blocks
+    old_block = blocks[("A", "geneA")].copy()
+    columns = prepared.scores.gated_snp[("A", "geneA")]
+    old_columns = columns.copy()
+    measure = cli._measure_comparator_operation
+
+    def mutate_measure_restore(*args, **kwargs):
+        try:
+            if mutation == "dosage":
+                blocks[("A", "geneA")][0, 0] = (old_block[0, 0] + 1.0) % 3.0
+            elif mutation == "source_columns":
+                columns[:] = 11
+            else:
+                prepared.gene_blocks = {}
+            return measure(*args, **kwargs)
+        finally:
+            blocks[("A", "geneA")][:] = old_block
+            columns[:] = old_columns
+            prepared.gene_blocks = blocks
+
+    monkeypatch.setattr(cli, "_measure_comparator_operation", mutate_measure_restore)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=width,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    np.testing.assert_array_equal(artifact["score_evidence"]["group_p"], expected.group_p)
+    assert artifact["score_evidence"]["raw_score_evidence"] == expected.evidence_payload()
 
 
 def test_authorization_v1_is_rejected_before_scoring(monkeypatch):
@@ -308,7 +358,7 @@ def test_authorization_v1_is_rejected_before_scoring(monkeypatch):
         called = True
         raise AssertionError("authorization-v1 reached the scorer")
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", forbidden)
     with pytest.raises(ValueError, match="authorization"):
         resource_probe.produce_snpxsnp_resource_probe(
             prepared, bank, witness["response_ids"], response_width=1,
@@ -356,7 +406,7 @@ def test_producer_requires_authorized_input_family_before_scoring(monkeypatch, i
         called = True
         raise AssertionError("scoring started before authorization validation")
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", forbidden)
     with pytest.raises(ValueError, match="authorization"):
         resource_probe.produce_snpxsnp_resource_probe(
             prepared, bank, witness["response_ids"], response_width=1,
@@ -372,8 +422,8 @@ def test_producer_scores_private_bank_despite_caller_mutate_restore(monkeypatch)
     prepared, bank = _prepared_fixture()
     original = bank.copy()
     witness = _witness()
-    scorer = resource_probe.score_snpxsnp_family
-    expected = scorer(
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    expected = comparator_module.score_snpxsnp_family(
         prepared.scores, prepared.context.family, prepared.expanded,
         prepared.gene_blocks, original, max_offered_pairs=10000,
     )
@@ -385,7 +435,7 @@ def test_producer_scores_private_bank_despite_caller_mutate_restore(monkeypatch)
         finally:
             bank[:] = original
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", mutate_score_restore)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", mutate_score_restore)
     monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
     artifact = resource_probe.produce_snpxsnp_resource_probe(
         prepared, bank, witness["response_ids"], response_width=20,
@@ -807,7 +857,7 @@ def test_producer_rejects_missing_authorization_before_calling_the_scorer(
         called = True
         raise AssertionError("scorer must not be called")
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", forbidden)
     with pytest.raises(ValueError, match="not authorized"):
         resource_probe.produce_snpxsnp_resource_probe(
             prepared,
@@ -840,7 +890,7 @@ def test_authorization_cannot_be_reused_after_response_bank_changes(monkeypatch)
         called = True
         raise AssertionError("scorer must not be called")
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", forbidden)
     with pytest.raises(ValueError, match="authorization identity or scope"):
         resource_probe.produce_snpxsnp_resource_probe(
             prepared,
@@ -869,7 +919,7 @@ def test_producer_recomputes_the_context_fingerprint_before_scoring(monkeypatch)
         called = True
         raise AssertionError("scorer must not be called")
 
-    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", forbidden)
     with pytest.raises(ValueError, match="context fingerprint is detached"):
         resource_probe.produce_snpxsnp_resource_probe(
             prepared,

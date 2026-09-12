@@ -34,6 +34,22 @@ def _family():
     return family, expand_pair_edges(family)
 
 
+def _two_copy_shared_edge_fixture():
+    rng = np.random.default_rng(9211)
+    n = 48
+    family = MasterGroupFamily(
+        ("A", "B"), ("g0", "g1"), (("gA", "gB"), ("gA", "gB")),
+    )
+    expanded = expand_pair_edges(family)
+    scores = _scores(n, left_ids=(5, 1), right_ids=(8, 4))
+    blocks = {
+        ("A", "gA"): rng.binomial(2, (0.29, 0.41), size=(n, 2)).astype(float),
+        ("B", "gB"): rng.binomial(2, (0.37, 0.23), size=(n, 2)).astype(float),
+    }
+    responses = rng.normal(size=(n, 31))
+    return scores, family, expanded, blocks, responses
+
+
 def _three_copy_shared_edge_fixture():
     rng = np.random.default_rng(9210)
     n = 56
@@ -134,6 +150,52 @@ def test_shared_input_binding_and_scorer_reject_the_same_invalid_inputs(mutation
             scores, family, expanded, blocks, responses, max_offered_pairs=12,
         )
     assert str(helper_error.value) == str(scorer_error.value)
+
+
+@pytest.mark.parametrize("response_error", ["shape", "nonfinite"])
+def test_response_errors_precede_invalid_genotype_blocks(response_error):
+    scores, family, expanded, _blocks, responses = _three_copy_shared_edge_fixture()
+    if response_error == "shape":
+        responses = responses[:-1]
+        expected = "responses must be sample-by-response and aligned to scores.W"
+    else:
+        responses[0, 0] = np.nan
+        expected = "responses must contain only finite values"
+    with pytest.raises(ValueError) as error:
+        comparator_module.score_snpxsnp_family(
+            scores, family, expanded, {}, responses, max_offered_pairs=0,
+        )
+    assert str(error.value) == expected
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_invalid_pair_limit_precedes_input_binding_and_hashing(monkeypatch, limit):
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    events = []
+    bind = comparator_module._bind_snpxsnp_inputs
+
+    def record_binding(*args, **kwargs):
+        events.append("binding")
+        return bind(*args, **kwargs)
+
+    monkeypatch.setattr(comparator_module, "_bind_snpxsnp_inputs", record_binding)
+    with pytest.raises(ValueError) as error:
+        comparator_module.score_snpxsnp_family(
+            scores, family, expanded, blocks, responses, max_offered_pairs=limit,
+        )
+    assert str(error.value) == "max_offered_pairs must be a positive integer"
+    assert events == [], f"invalid pair limit reached {events}"
+
+
+def test_bound_genotype_arrays_are_private_readonly_copies():
+    scores, family, expanded, blocks, _responses = _three_copy_shared_edge_fixture()
+    inputs = comparator_module._bind_snpxsnp_inputs(scores, family, expanded, blocks)
+    for key, block in inputs.blocks.items():
+        assert not np.shares_memory(block, blocks[key])
+        assert block.flags.c_contiguous and not block.flags.writeable
+        columns = inputs.source_columns[key]
+        assert not np.shares_memory(columns, scores.gated_snp[key])
+        assert columns.flags.c_contiguous and not columns.flags.writeable
 
 
 def test_streamed_raw_score_matches_direct_nested_f_and_counts_skips():
@@ -554,6 +616,34 @@ def test_width_one_response_is_bitwise_identical_inside_wide_raw_bank():
     np.testing.assert_array_equal(
         alone.argmin_member_index[:, 0], embedded.argmin_member_index[:, 0]
     )
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [_two_copy_shared_edge_fixture, _three_copy_shared_edge_fixture],
+    ids=["two-copy-shared-edge", "three-copy-shared-edge"],
+)
+def test_shared_edge_prefix_widths_preserve_pvalues_and_argmins(fixture):
+    scores, family, expanded, blocks, responses = fixture()
+    full = comparator_module.score_snpxsnp_family(
+        scores, family, expanded, blocks, responses, max_offered_pairs=12,
+    )
+    for width in (1, 5, 20, 31):
+        prefix = comparator_module.score_snpxsnp_family(
+            scores,
+            family,
+            expanded,
+            blocks,
+            np.ascontiguousarray(responses[:, :width]),
+            max_offered_pairs=12,
+        )
+        assert prefix.member_ids == full.member_ids
+        assert prefix.group_memberships == full.group_memberships
+        assert prefix.member_family_sha256 == full.member_family_sha256
+        np.testing.assert_array_equal(prefix.group_p, full.group_p[:, :width])
+        np.testing.assert_array_equal(
+            prefix.argmin_member_index, full.argmin_member_index[:, :width],
+        )
 
 
 def test_snpxsnp_production_explicitly_requests_stable_response_axis(monkeypatch):

@@ -14,8 +14,8 @@ from .comparators import (
     _SNPXSNP_INPUT_BLOCK_FIELDS,
     SNPxSNPScoreResult,
     _bind_snpxsnp_inputs,
+    _score_snpxsnp_bound_inputs,
     _snpxsnp_input_family_hash,
-    score_snpxsnp_family,
 )
 from .contracts import (
     COMPARATOR_PROBE_WIDTHS,
@@ -276,9 +276,10 @@ def produce_snpxsnp_resource_probe(
     response_ids_sha256 = sha256_payload({
         "ordered_response_ids": list(response_ids_tuple),
     })
-    input_family_sha256 = _bind_snpxsnp_inputs(
+    bound_inputs = _bind_snpxsnp_inputs(
         prepared.scores, context.family, prepared.expanded, prepared.gene_blocks,
-    ).family_sha256
+    )
+    input_family_sha256 = bound_inputs.family_sha256
     authorized_input_family_sha256 = _validate_authorization(
         authorization_payload,
         expected_sha256=authorization_sha256,
@@ -298,12 +299,12 @@ def produce_snpxsnp_resource_probe(
         prefix = np.ascontiguousarray(prefix)
 
     def score() -> SNPxSNPScoreResult:
-        return score_snpxsnp_family(
+        return _score_snpxsnp_bound_inputs(
             prepared.scores,
             context.family,
             prepared.expanded,
-            prepared.gene_blocks,
             prefix,
+            inputs=bound_inputs,
             max_offered_pairs=_snpxsnp_pair_ceiling(context),
         )
 
@@ -337,10 +338,7 @@ def produce_snpxsnp_resource_probe(
         "group_p": result.group_p.tolist(),
     }
     encoded_score_evidence = canonical_json(score_evidence).encode("utf-8")
-    gated_marker_counts = {
-        f"{subgenome}|{gene_id}": int(np.asarray(block).shape[1])
-        for (subgenome, gene_id), block in sorted(prepared.gene_blocks.items())
-    }
+    gated_marker_counts = _gated_marker_counts_from_bindings(bound_inputs.bindings)
     record = ComparatorProbeRecordV2(
         schema="homoeogwas-snpxsnp-resource-probe-v2",
         panel_id=panel_id,
