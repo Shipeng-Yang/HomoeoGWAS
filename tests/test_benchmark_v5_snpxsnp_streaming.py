@@ -7,6 +7,7 @@ import homoeogwas.interact as interact_module
 import homoeogwas.omnib_family as omnib_module
 from homoeogwas.group_family import MasterGroupFamily, expand_pair_edges
 from scripts.benchmarks.v201 import comparators as comparator_module
+from scripts.benchmarks.v201.contracts import sha256_payload
 from scripts.benchmarks.v201.track_omnib import apply_threshold, empirical_threshold
 
 
@@ -77,6 +78,62 @@ def _three_copy_shared_edge_fixture():
     ) + rng.normal(scale=0.01, size=(n, 3))
     responses = np.column_stack((signal_responses, rng.normal(size=(n, 28))))
     return scores, family, expanded, blocks, responses
+
+
+def test_shared_input_binding_is_readonly_and_preserves_scorer_evidence(monkeypatch):
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    before_blocks = {key: value.copy() for key, value in blocks.items()}
+    before_columns = {key: value.copy() for key, value in scores.gated_snp.items()}
+    bind_inputs = getattr(comparator_module, "_bind_snpxsnp_inputs", None)
+    assert callable(bind_inputs), "producer and scorer need one shared input binding helper"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("input binding must not construct pairs or score responses")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(comparator_module, "_nested_snp_product_design", forbidden)
+        guard.setattr(comparator_module, "_whiten_columns", forbidden)
+        guard.setattr(interact_module, "_batch_nested_f", forbidden)
+        inputs = bind_inputs(scores, family, expanded, blocks)
+    assert inputs.family_sha256 == (
+        "27d541aa9ba8e686b2d67d5a7cbd03a13391b1c42f07e23774548dd15e5dad2a"
+    )
+    for key, value in before_blocks.items():
+        np.testing.assert_array_equal(blocks[key], value)
+        np.testing.assert_array_equal(inputs.blocks[key], value)
+        np.testing.assert_array_equal(scores.gated_snp[key], before_columns[key])
+        np.testing.assert_array_equal(inputs.source_columns[key], before_columns[key])
+
+    result = comparator_module.score_snpxsnp_family(
+        scores, family, expanded, blocks, responses, max_offered_pairs=12,
+    )
+    assert result.input_family_sha256 == inputs.family_sha256
+    assert tuple(dict(value) for value in result.input_block_bindings) == inputs.bindings
+    # Recorded from the unchanged scorer before factoring its input validation.
+    # This binds the full raw evidence, including memberships, argmins and counts.
+    assert sha256_payload(result.evidence_payload()) == (
+        "f3c04503624c4b97aa1735932fad2e110afa4a095557d23b031c178900cd2c4b"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing_block", "extra_block", "nan", "columns"])
+def test_shared_input_binding_and_scorer_reject_the_same_invalid_inputs(mutation):
+    scores, family, expanded, blocks, responses = _three_copy_shared_edge_fixture()
+    if mutation == "missing_block":
+        del blocks[("A", "a0")]
+    elif mutation == "extra_block":
+        blocks[("A", "extra")] = np.zeros((56, 1))
+    elif mutation == "nan":
+        blocks[("A", "a0")][0, 0] = np.nan
+    else:
+        blocks[("A", "a0")] = blocks[("A", "a0")][:, :1]
+    with pytest.raises(ValueError) as helper_error:
+        comparator_module._bind_snpxsnp_inputs(scores, family, expanded, blocks)
+    with pytest.raises(ValueError) as scorer_error:
+        comparator_module.score_snpxsnp_family(
+            scores, family, expanded, blocks, responses, max_offered_pairs=12,
+        )
+    assert str(helper_error.value) == str(scorer_error.value)
 
 
 def test_streamed_raw_score_matches_direct_nested_f_and_counts_skips():

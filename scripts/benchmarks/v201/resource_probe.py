@@ -13,6 +13,7 @@ import numpy as np
 from .comparators import (
     _SNPXSNP_INPUT_BLOCK_FIELDS,
     SNPxSNPScoreResult,
+    _bind_snpxsnp_inputs,
     _snpxsnp_input_family_hash,
     score_snpxsnp_family,
 )
@@ -83,6 +84,7 @@ def _validate_authorization(
     design_hash: str,
     context_fingerprint: str,
     prepared_design_sha256: str,
+    input_family_sha256: str,
     response_bank_sha256: str,
     response_ids_sha256: str,
 ) -> str:
@@ -98,7 +100,7 @@ def _validate_authorization(
         "design_hash": design_hash,
         "context_fingerprint": context_fingerprint,
         "prepared_design_sha256": prepared_design_sha256,
-        "input_family_sha256": authorized_input_family_sha256,
+        "input_family_sha256": input_family_sha256,
         "response_bank_sha256": response_bank_sha256,
         "response_ids_sha256": response_ids_sha256,
     }
@@ -106,7 +108,7 @@ def _validate_authorization(
         not _lower_hex(expected_sha256, 64)
         or sha256_payload(payload) != expected_sha256
         or payload["schema"]
-        != "homoeogwas-snpxsnp-resource-probe-authorization-v1"
+        != "homoeogwas-snpxsnp-resource-probe-authorization-v2"
         or not isinstance(payload["authorization_id"], str)
         or not payload["authorization_id"]
         or not _lower_hex(implementation_commit, 40)
@@ -274,6 +276,9 @@ def produce_snpxsnp_resource_probe(
     response_ids_sha256 = sha256_payload({
         "ordered_response_ids": list(response_ids_tuple),
     })
+    input_family_sha256 = _bind_snpxsnp_inputs(
+        prepared.scores, context.family, prepared.expanded, prepared.gene_blocks,
+    ).family_sha256
     authorized_input_family_sha256 = _validate_authorization(
         authorization_payload,
         expected_sha256=authorization_sha256,
@@ -284,6 +289,7 @@ def produce_snpxsnp_resource_probe(
         design_hash=design_hash,
         context_fingerprint=context_fingerprint,
         prepared_design_sha256=prepared_design_sha256,
+        input_family_sha256=input_family_sha256,
         response_bank_sha256=response_bank_sha256,
         response_ids_sha256=response_ids_sha256,
     )
@@ -450,6 +456,7 @@ def _validate_snpxsnp_resource_probe_artifact_snapshot(
         design_hash=record.design_hash,
         context_fingerprint=record.context_fingerprint,
         prepared_design_sha256=record.prepared_design_sha256,
+        input_family_sha256=record.input_family_sha256,
         response_bank_sha256=sha256_payload(expected_bank),
         response_ids_sha256=sha256_payload({"ordered_response_ids": list(expected_ids)}),
     )

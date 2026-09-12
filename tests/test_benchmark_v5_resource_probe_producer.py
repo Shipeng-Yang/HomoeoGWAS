@@ -101,7 +101,7 @@ def _authorization(response_bank, response_ids, *, enabled: bool = True):
         "array_sha256": _array_sha256(response_bank),
     }
     payload = {
-        "schema": "homoeogwas-snpxsnp-resource-probe-authorization-v1",
+        "schema": "homoeogwas-snpxsnp-resource-probe-authorization-v2",
         "authorization_id": "unit-test-only",
         "implementation_commit": "1" * 40,
         "matched_comparator_contract_sha256": "2" * 64,
@@ -248,6 +248,94 @@ def test_producer_rejects_scorer_input_family_not_in_authorization(monkeypatch):
     monkeypatch.setattr(resource_probe, "score_snpxsnp_family", lambda *_a, **_k: result)
     with pytest.raises(ValueError, match="input.family|authorization"):
         _produce(monkeypatch)
+
+
+@pytest.mark.parametrize("mutation", ["dosage", "source_columns", "both"])
+def test_producer_checks_live_input_family_before_measurement(monkeypatch, mutation):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    if mutation in {"dosage", "both"}:
+        values = prepared.gene_blocks[("A", "geneA")]
+        values[0, 0] = (values[0, 0] + 1.0) % 3.0
+    if mutation in {"source_columns", "both"}:
+        prepared.scores = replace(prepared.scores, gated_snp={
+            ("A", "geneA"): np.array([11]),
+            ("D", "geneD"): np.array([9]),
+        })
+    assert _input_family_sha256(prepared) != witness["authorization_payload"][
+        "panel_context"
+    ]["input_family_sha256"]
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    events = []
+    scorer = resource_probe.score_snpxsnp_family
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    with pytest.raises(ValueError, match="input.family|authorization"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"unauthorized live input reached {events}"
+
+
+def test_authorization_v1_is_rejected_before_scoring(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    witness["authorization_payload"]["schema"] = (
+        "homoeogwas-snpxsnp-resource-probe-authorization-v1"
+    )
+    witness["authorization_sha256"] = sha256_payload(witness["authorization_payload"])
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("authorization-v1 reached the scorer")
+
+    monkeypatch.setattr(resource_probe, "score_snpxsnp_family", forbidden)
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert called is False
+
+
+def test_authorization_v2_admits_the_exact_live_input_family(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    witness["authorization_payload"]["schema"] = (
+        "homoeogwas-snpxsnp-resource-probe-authorization-v2"
+    )
+    witness["authorization_sha256"] = sha256_payload(witness["authorization_payload"])
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=1,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    assert artifact["record"]["input_family_sha256"] == _input_family_sha256(prepared)
 
 
 @pytest.mark.parametrize("invalid", ["missing", None, "F" * 64, 123])

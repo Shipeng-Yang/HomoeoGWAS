@@ -733,33 +733,24 @@ def _nested_snp_product_design(
     return reduced, added
 
 
-def score_snpxsnp_family(
+@dataclass(frozen=True)
+class _SNPxSNPInputs:
+    sample_count: int
+    blocks: Mapping[tuple[str, str], np.ndarray]
+    source_columns: Mapping[tuple[str, str], np.ndarray]
+    bindings: tuple[Mapping[str, object], ...]
+    family_sha256: str
+
+
+def _bind_snpxsnp_inputs(
     scores: OmniBFamilyScores,
     family: MasterGroupFamily,
     expanded: ExpandedEdgeFamily,
     gene_blocks: Mapping[tuple[str, str], np.ndarray],
-    responses: np.ndarray,
-    *,
-    max_offered_pairs: int,
-) -> SNPxSNPScoreResult:
-    """Stream raw nested-F pair scores into group minima.
-
-    ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
-    exactly the genes in ``expanded``. Pair designs and scores are enumerated
-    once; no pair-by-response score matrix is retained.
-    """
-    from homoeogwas.interact import _batch_nested_f
-
+) -> _SNPxSNPInputs:
+    """Validate and bind live inputs without constructing or scoring SNP products."""
     _validate_frozen_family(family, expanded)
     sample_count = _validate_score_context(scores)
-    target = _response_matrix(responses, sample_count, name="responses")
-    if (
-        isinstance(max_offered_pairs, bool)
-        or not isinstance(max_offered_pairs, Integral)
-        or int(max_offered_pairs) < 1
-    ):
-        raise ValueError("max_offered_pairs must be a positive integer")
-    max_offered_pairs = int(max_offered_pairs)
     if not isinstance(gene_blocks, Mapping):
         raise ValueError("gene_blocks must map (subgenome, gene) to ndarrays")
     required = {
@@ -815,6 +806,43 @@ def score_snpxsnp_family(
         for key in sorted(required)
     )
     input_family_sha256 = _snpxsnp_input_family_hash(input_bindings)
+    return _SNPxSNPInputs(
+        sample_count=sample_count,
+        blocks=checked_blocks,
+        source_columns=checked_columns,
+        bindings=input_bindings,
+        family_sha256=input_family_sha256,
+    )
+
+
+def score_snpxsnp_family(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    gene_blocks: Mapping[tuple[str, str], np.ndarray],
+    responses: np.ndarray,
+    *,
+    max_offered_pairs: int,
+) -> SNPxSNPScoreResult:
+    """Stream raw nested-F pair scores into group minima.
+
+    ``gene_blocks`` contains sample-aligned, already gated dosage matrices for
+    exactly the genes in ``expanded``. Pair designs and scores are enumerated
+    once; no pair-by-response score matrix is retained.
+    """
+    from homoeogwas.interact import _batch_nested_f
+
+    inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
+    target = _response_matrix(responses, inputs.sample_count, name="responses")
+    if (
+        isinstance(max_offered_pairs, bool)
+        or not isinstance(max_offered_pairs, Integral)
+        or int(max_offered_pairs) < 1
+    ):
+        raise ValueError("max_offered_pairs must be a positive integer")
+    max_offered_pairs = int(max_offered_pairs)
+    checked_blocks = inputs.blocks
+    checked_columns = inputs.source_columns
 
     groups_by_edge = [
         tuple(
@@ -938,8 +966,8 @@ def score_snpxsnp_family(
         member_ids=tuple(member_ids),
         group_memberships=tuple(group_memberships),
         member_family_sha256=member_digest.hexdigest(),
-        input_block_bindings=input_bindings,
-        input_family_sha256=input_family_sha256,
+        input_block_bindings=inputs.bindings,
+        input_family_sha256=inputs.family_sha256,
         offered_pair_count=offered_pair_count,
         design_nonestimable_pair_count=design_nonestimable_pair_count,
         tested_pair_count=tested_pair_count,
