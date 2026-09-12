@@ -61,7 +61,7 @@ _RESPONSE_PREFIX_IDENTITY_FIELDS = {
 
 def _lower_hex(value: Any, length: int) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) == length
         and all(character in "0123456789abcdef" for character in value)
     )
@@ -91,13 +91,20 @@ def _validate_authorization(
     response_bank_sha256: str,
     response_ids_sha256: str,
 ) -> str:
-    if not isinstance(payload, Mapping) or set(payload) != _AUTHORIZATION_FIELDS:
+    if not isinstance(payload, Mapping):
         raise ValueError("resource probe authorization fields differ")
-    panel_context = payload["panel_context"]
-    if not isinstance(panel_context, Mapping):
+    try:
+        encoded = canonical_json(payload).encode("utf-8")
+        authorization = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("resource probe authorization fields differ") from error
+    if not isinstance(authorization, dict) or set(authorization) != _AUTHORIZATION_FIELDS:
+        raise ValueError("resource probe authorization fields differ")
+    panel_context = authorization["panel_context"]
+    if not isinstance(panel_context, dict):
         raise ValueError("resource probe authorization panel context is invalid")
     authorized_input_family_sha256 = panel_context.get("input_family_sha256")
-    widths = payload["response_widths"]
+    widths = authorization["response_widths"]
     expected_panel_context = {
         "panel_id": panel_id,
         "design_hash": design_hash,
@@ -109,25 +116,25 @@ def _validate_authorization(
     }
     if (
         not _lower_hex(expected_sha256, 64)
-        or sha256_payload(payload) != expected_sha256
-        or payload["schema"]
+        or hashlib.sha256(encoded).hexdigest() != expected_sha256
+        or authorization["schema"]
         != "homoeogwas-snpxsnp-resource-probe-authorization-v2"
-        or not isinstance(payload["authorization_id"], str)
-        or not payload["authorization_id"]
+        or type(authorization["authorization_id"]) is not str
+        or not authorization["authorization_id"]
         or not _lower_hex(implementation_commit, 40)
-        or payload["implementation_commit"] != implementation_commit
+        or authorization["implementation_commit"] != implementation_commit
         or not _lower_hex(matched_comparator_contract_sha256, 64)
-        or payload["matched_comparator_contract_sha256"]
+        or authorization["matched_comparator_contract_sha256"]
         != matched_comparator_contract_sha256
         or panel_context != expected_panel_context
         or not _lower_hex(authorized_input_family_sha256, 64)
         or not isinstance(widths, list)
         or tuple(widths) != COMPARATOR_PROBE_WIDTHS
         or response_width not in widths
-        or payload["formal_execution_authorized"] is not False
+        or authorization["formal_execution_authorized"] is not False
     ):
         raise ValueError("resource probe authorization identity or scope is invalid")
-    if payload["resource_probe_authorized"] is not True:
+    if authorization["resource_probe_authorized"] is not True:
         raise ValueError("resource probe is not authorized")
     return authorized_input_family_sha256
 
@@ -138,7 +145,7 @@ def _response_id_tuple(response_ids: Sequence[str]) -> tuple[str, ...]:
     values = tuple(response_ids)
     if (
         len(values) != max(COMPARATOR_PROBE_WIDTHS)
-        or any(not isinstance(value, str) or not value for value in values)
+        or any(type(value) is not str or not value for value in values)
         or len(set(values)) != len(values)
     ):
         raise ValueError("resource probe requires 20 unique ordered response IDs")
@@ -301,13 +308,19 @@ def produce_snpxsnp_resource_probe(
         raise ValueError("resource probe width must be 1, 5 or 20")
     response_bank = _snapshot_response_bank(response_bank)
     context = prepared.context
+    scores = prepared.scores
+    expanded = prepared.expanded
+    gene_blocks = prepared.gene_blocks
+    family = context.family
     panel_id = context.panel_id
+    if type(panel_id) is not str:
+        raise ValueError("resource probe design identity is invalid")
     response_ids_tuple = _response_id_tuple(response_ids)
     bank_identity, prefix_identity = _response_identities(
         response_bank, response_ids_tuple, response_width
     )
-    family_size = len(context.family.group_ids)
-    copies = len(context.family.subgenomes)
+    family_size = len(family.group_ids)
+    copies = len(family.subgenomes)
     comparator_resource_limit(
         panel_id, family_size=family_size, copies=copies
     )
@@ -319,12 +332,8 @@ def produce_snpxsnp_resource_probe(
     response_ids_sha256 = sha256_payload({
         "ordered_response_ids": list(response_ids_tuple),
     })
-    bound_inputs = _bind_snpxsnp_inputs(
-        prepared.scores, context.family, prepared.expanded, prepared.gene_blocks,
-    )
-    prepared_design_sha256 = _prepared_score_context_sha256(
-        prepared.scores, bound_inputs,
-    )
+    bound_inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
+    prepared_design_sha256 = _prepared_score_context_sha256(scores, bound_inputs)
     if not all(
         _lower_hex(value, 64)
         for value in (design_hash, context_fingerprint, prepared_design_sha256)
@@ -345,17 +354,18 @@ def produce_snpxsnp_resource_probe(
         response_bank_sha256=response_bank_sha256,
         response_ids_sha256=response_ids_sha256,
     )
+    pair_ceiling = _snpxsnp_pair_ceiling(context)
     prefix = response_bank[:, :response_width]
     if not prefix.flags.c_contiguous:
         prefix = np.ascontiguousarray(prefix)
 
     def score() -> SNPxSNPScoreResult:
         return _score_snpxsnp_bound_inputs(
-            context.family,
-            prepared.expanded,
+            family,
+            expanded,
             prefix,
             inputs=bound_inputs,
-            max_offered_pairs=_snpxsnp_pair_ceiling(context),
+            max_offered_pairs=pair_ceiling,
         )
 
     # Imported here to keep audit/resource validation independent of CLI import

@@ -30,6 +30,69 @@ class _IdentityAccessorAttack(dict):
         return self._accessor_values.get(key, super().get(key, default))
 
 
+class _AlwaysEqualStr(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, _other):
+        return True
+
+    def __ne__(self, _other):
+        return False
+
+
+class _AlwaysEqualMapping(dict):
+    def __eq__(self, _other):
+        return True
+
+    def __ne__(self, _other):
+        return False
+
+
+class _AuthorizationPanelAccessorAttack(dict):
+    def __init__(self, stored, panel_context):
+        super().__init__(stored)
+        self._panel_context = panel_context
+
+    def __getitem__(self, key):
+        if key == "panel_context":
+            return self._panel_context
+        return super().__getitem__(key)
+
+
+class _SingleReadPrepared:
+    def __init__(self, prepared, guarded_field):
+        self._prepared = prepared
+        self._guarded_field = guarded_field
+        self.reads = {"scores": 0, "expanded": 0}
+
+    @property
+    def context(self):
+        return self._prepared.context
+
+    @property
+    def scores(self):
+        return self._read("scores")
+
+    @property
+    def expanded(self):
+        return self._read("expanded")
+
+    @property
+    def gene_blocks(self):
+        return self._prepared.gene_blocks
+
+    def _read(self, field):
+        self.reads[field] += 1
+        if field == self._guarded_field and self.reads[field] > 1:
+            raise AssertionError(f"prepared.{field} was read more than once")
+        return getattr(self._prepared, field)
+
+
+class _PreparedAccessForbidden:
+    def __getattr__(self, field):
+        raise AssertionError(f"invalid producer input accessed prepared.{field}")
+
+
 def _prepared_fixture():
     rng = np.random.default_rng(9271)
     sample_count = 40
@@ -529,6 +592,182 @@ def test_producer_rejects_identity_accessor_attacks_before_measurement(
             implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
         )
     assert events == [], f"identity accessor attack reached {events}"
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "prepared_design_sha256",
+        "authorization_panel_id",
+        "authorization_sha256",
+        "implementation_commit",
+    ],
+)
+def test_producer_rejects_scalar_subclass_attacks_before_measurement(
+    monkeypatch, attack,
+):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    authorization = witness["authorization_payload"]
+    authorization_sha256 = witness["authorization_sha256"]
+    implementation_commit = "1" * 40
+    if attack == "prepared_design_sha256":
+        prepared.scores.prepared_design_sha256 = _AlwaysEqualStr("f" * 64)
+    elif attack == "authorization_panel_id":
+        authorization["panel_context"]["panel_id"] = _AlwaysEqualStr("ATTACK")
+        authorization_sha256 = sha256_payload(authorization)
+    elif attack == "authorization_sha256":
+        authorization_sha256 = _AlwaysEqualStr("f" * 64)
+    else:
+        implementation_commit = _AlwaysEqualStr("f" * 40)
+    events = []
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    with pytest.raises(ValueError, match="authorization|score context"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=authorization,
+            authorization_sha256=authorization_sha256,
+            implementation_commit=implementation_commit,
+            matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"scalar subclass attack reached {events}"
+
+
+def test_producer_rejects_authorization_accessor_attack_before_measurement(
+    monkeypatch,
+):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    stored = copy.deepcopy(witness["authorization_payload"])
+    stored["panel_context"]["panel_id"] = "ATTACK"
+    authorization = _AuthorizationPanelAccessorAttack(
+        stored,
+        _AlwaysEqualMapping(witness["authorization_payload"]["panel_context"]),
+    )
+    events = []
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=authorization,
+            authorization_sha256=sha256_payload(authorization),
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"authorization accessor attack reached {events}"
+
+
+def test_producer_rejects_response_id_subclass_before_measurement(monkeypatch):
+    from scripts.benchmarks.v201 import cli
+
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    response_ids = [_AlwaysEqualStr(value) for value in witness["response_ids"]]
+    events = []
+    scorer = resource_probe._score_snpxsnp_bound_inputs
+    measure = cli._measure_comparator_operation
+
+    def record_score(*args, **kwargs):
+        events.append("scorer")
+        return scorer(*args, **kwargs)
+
+    def record_measurement(*args, **kwargs):
+        events.append("measurement")
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(cli, "_measure_comparator_operation", record_measurement)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    with pytest.raises(ValueError, match="response IDs"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, response_ids, response_width=1,
+            design_hash="a" * 64, context_fingerprint="b" * 64,
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+    assert events == [], f"response ID subclass reached {events}"
+
+
+@pytest.mark.parametrize("guarded_field", ["scores", "expanded"])
+def test_producer_reads_prepared_scoring_fields_once(monkeypatch, guarded_field):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    proxy = _SingleReadPrepared(prepared, guarded_field)
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        proxy, bank, witness["response_ids"], response_width=1,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    assert artifact["record"]["response_width"] == 1
+    assert proxy.reads[guarded_field] == 1
+
+
+@pytest.mark.parametrize("invalid", ["response_width", "response_bank"])
+def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
+    monkeypatch, invalid,
+):
+    _prepared, bank = _prepared_fixture()
+    pair_ceiling_calls = []
+
+    def forbidden_pair_ceiling(*_args, **_kwargs):
+        pair_ceiling_calls.append("pair_ceiling")
+        raise AssertionError("invalid response input reached pair ceiling")
+
+    monkeypatch.setattr(
+        resource_probe, "_snpxsnp_pair_ceiling", forbidden_pair_ceiling,
+    )
+    response_width = 2 if invalid == "response_width" else 1
+    response_bank = bank if invalid == "response_width" else bank.astype(np.float32)
+    expected = "width" if invalid == "response_width" else "response bank"
+    with pytest.raises(ValueError, match=expected):
+        resource_probe.produce_snpxsnp_resource_probe(
+            _PreparedAccessForbidden(),
+            response_bank,
+            [f"response-{index:02d}" for index in range(20)],
+            response_width=response_width,
+            design_hash="a" * 64,
+            context_fingerprint="b" * 64,
+            authorization_payload={},
+            authorization_sha256="0" * 64,
+            implementation_commit="1" * 40,
+            matched_comparator_contract_sha256="2" * 64,
+        )
+    assert pair_ceiling_calls == []
 
 
 def test_producer_private_core_never_receives_live_scores(monkeypatch):
