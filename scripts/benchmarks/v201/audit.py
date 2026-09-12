@@ -185,6 +185,29 @@ def _audit_comparator_probe_series(
         ) from error
 
 
+def _audit_comparator_probe_artifact(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a resource record against its stored score evidence."""
+
+    from .resource_probe import validate_snpxsnp_resource_probe_artifact
+
+    try:
+        validated = validate_snpxsnp_resource_probe_artifact(payload)
+    except (KeyError, TypeError, ValueError) as error:
+        raise BenchmarkAuditError(
+            "SNPxSNP resource probe artifact is invalid"
+        ) from error
+    record = validated["record"]
+    evidence = validated["score_evidence"]
+    _snpxsnp_result_from_evidence(
+        evidence["raw_score_evidence"],
+        response_count=record["response_width"],
+        group_p=np.asarray(evidence["group_p"], dtype=float),
+    )
+    return validated
+
+
 def core_fwer_gate(
     scenario_id: str,
     rejections: int,

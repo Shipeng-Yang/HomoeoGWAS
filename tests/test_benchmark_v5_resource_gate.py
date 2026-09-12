@@ -26,8 +26,9 @@ def _probe(
     parent_rss_gib: int = 8,
     aggregate_pss_gib: int = 16,
 ) -> dict[str, object]:
+    response_ids = [f"response-{index:02d}" for index in range(20)]
     return {
-        "schema": "homoeogwas-snpxsnp-resource-probe-v1",
+        "schema": "homoeogwas-snpxsnp-resource-probe-v2",
         "panel_id": panel_id,
         "sample_context": "full",
         "family_size": 80,
@@ -37,6 +38,21 @@ def _probe(
         "context_fingerprint": "b" * 64,
         "prepared_design_sha256": "c" * 64,
         "member_family_sha256": "d" * 64,
+        "probe_authorization_sha256": "0" * 64,
+        "implementation_commit": "1" * 40,
+        "matched_comparator_contract_sha256": "2" * 64,
+        "input_family_sha256": "7" * 64,
+        "response_bank_sha256": "3" * 64,
+        "response_ids": response_ids,
+        "response_ids_sha256": resource_contracts.sha256_payload({
+            "ordered_response_ids": response_ids,
+        }),
+        "response_prefix_sha256": resource_contracts.sha256_payload({
+            "response_width": width,
+        }),
+        "score_evidence_sha256": resource_contracts.sha256_payload({
+            "score_width": width,
+        }),
         "scorer_wall_seconds": float(width),
         "scorer_cpu_seconds": float(2 * width),
         "peak_parent_rss_bytes": parent_rss_gib * GIB,
@@ -52,8 +68,15 @@ def _probe(
         "effective_jobs": 1,
         "parallel_backend": "serial",
         "worker_pids": [12345],
+        "root_pid": 12345,
+        "sampled_pids": [12345],
+        "process_set_reconciled": True,
+        "aggregate_pss_missed_spike_strategy": (
+            "serial_singleton_parent_rss_upper_bound"
+        ),
         "inference_status": "noninferential_resource_probe",
         "execution_authorized": False,
+        "formal_execution_authorized": False,
     }
 
 
@@ -61,7 +84,7 @@ def test_probe_schema_rejects_a_missing_measurement_field():
     payload = _probe(1)
     payload.pop("peak_aggregate_pss_bytes")
     with pytest.raises(ValueError, match="schema fields"):
-        resource_contracts.ComparatorProbeRecord.from_payload(payload)
+        resource_contracts.ComparatorProbeRecordV2.from_payload(payload)
 
 
 @pytest.mark.parametrize(
@@ -80,7 +103,7 @@ def test_probe_rejects_raw_resource_ceiling_exceedance(field, value, message):
             "design_nonestimable_pair_count"
         ]
     with pytest.raises(ValueError, match=message):
-        resource_contracts.ComparatorProbeRecord.from_payload(payload)
+        resource_contracts.ComparatorProbeRecordV2.from_payload(payload)
 
 
 @pytest.mark.parametrize(
@@ -125,7 +148,10 @@ def test_probe_series_rejects_time_nonlinearity_and_safety_adjusted_memory():
     with pytest.raises(ValueError, match="time per response"):
         resource_contracts.validate_comparator_probe_series(nonlinear)
 
-    memory = [_probe(width, parent_rss_gib=20) for width in (1, 5, 20)]
+    memory = [
+        _probe(width, parent_rss_gib=20, aggregate_pss_gib=24)
+        for width in (1, 5, 20)
+    ]
     with pytest.raises(ValueError, match="safety-adjusted parent RSS"):
         resource_contracts.validate_comparator_probe_series(memory)
 
@@ -179,6 +205,9 @@ def test_probe_series_projects_width_varying_memory_with_upper_envelope():
 )
 def test_probe_series_rejects_nonmonotone_memory_anchors(field):
     records = [_probe(width) for width in (1, 5, 20)]
+    if field == "peak_aggregate_pss_bytes":
+        for record in records:
+            record["peak_parent_rss_bytes"] = 1 * GIB
     records[0][field] = 4 * GIB
     records[1][field] = 3 * GIB
     records[2][field] = 5 * GIB
@@ -192,6 +221,52 @@ def test_probe_series_rejects_a_detached_design_or_pair_family():
     records[-1]["member_family_sha256"] = "e" * 64
     with pytest.raises(ValueError, match="same frozen context"):
         resource_contracts.validate_comparator_probe_series(records)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("root_pid", 54321),
+        ("sampled_pids", [12345, 54321]),
+        ("worker_pids", [54321]),
+        ("process_set_reconciled", False),
+        ("aggregate_pss_missed_spike_strategy", "sampled_only"),
+        ("formal_execution_authorized", True),
+    ],
+)
+def test_probe_schema_rejects_unreconciled_process_or_role_evidence(field, value):
+    payload = _probe(1)
+    payload[field] = value
+    with pytest.raises(ValueError, match="execution provenance|identity or role"):
+        resource_contracts.ComparatorProbeRecordV2.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "probe_authorization_sha256", "input_family_sha256",
+        "response_bank_sha256", "response_ids",
+    ],
+)
+def test_probe_series_rejects_detached_authorization_or_response_bank(field):
+    records = [_probe(width) for width in (1, 5, 20)]
+    if field == "response_ids":
+        records[-1][field] = [*records[-1][field][:-1], "changed-response"]
+        records[-1]["response_ids_sha256"] = resource_contracts.sha256_payload({
+            "ordered_response_ids": records[-1][field],
+        })
+    else:
+        records[-1][field] = "6" * 64
+    with pytest.raises(ValueError, match="same frozen context"):
+        resource_contracts.validate_comparator_probe_series(records)
+
+
+def test_probe_series_rejects_reused_prefix_or_score_evidence():
+    for field in ("response_prefix_sha256", "score_evidence_sha256"):
+        records = [_probe(width) for width in (1, 5, 20)]
+        records[-1][field] = records[0][field]
+        with pytest.raises(ValueError, match="distinct width-prefix evidence"):
+            resource_contracts.validate_comparator_probe_series(records)
 
 
 @pytest.mark.parametrize(
@@ -247,14 +322,68 @@ def test_comparator_measurement_gates_high_water_to_operation_window(
 ):
     from scripts.benchmarks.v201 import cli
 
-    monkeypatch.setattr(cli, "_comparator_memory_snapshot", lambda _pid: (100, 200))
+    root_pid = os.getpid()
+    monkeypatch.setattr(
+        cli,
+        "_comparator_memory_snapshot",
+        lambda _pid: (100, 200, (root_pid,)),
+    )
     high_water = iter(value * GIB for value in high_water_gib)
     monkeypatch.setattr(cli, "_self_peak_rss_bytes", lambda: next(high_water))
     _result, measurement = cli._measure_comparator_operation(
         lambda: "done", sample_interval_seconds=0.001
     )
     assert measurement["peak_parent_rss_bytes"] == expected_parent_rss
-    assert measurement["peak_aggregate_pss_bytes"] == 200
+    assert measurement["peak_aggregate_pss_bytes"] == max(
+        200, expected_parent_rss,
+    )
+    assert measurement["root_pid"] == root_pid
+    assert measurement["sampled_pids"] == [root_pid]
+    assert measurement["process_set_reconciled"] is True
+    assert measurement["aggregate_pss_missed_spike_strategy"] == (
+        "serial_singleton_parent_rss_upper_bound"
+    )
+
+
+def test_comparator_measurement_rejects_a_sampled_descendant_before_scoring(
+    monkeypatch,
+):
+    from scripts.benchmarks.v201 import cli
+
+    root_pid = os.getpid()
+    monkeypatch.setattr(
+        cli,
+        "_comparator_memory_snapshot",
+        lambda _pid: (100, 200, (root_pid, root_pid + 1)),
+    )
+    called = False
+
+    def operation():
+        nonlocal called
+        called = True
+
+    with pytest.raises(RuntimeError, match="descendant"):
+        cli._measure_comparator_operation(operation)
+    assert called is False
+
+
+@pytest.mark.parametrize("declared", [(True,), (12345, 12345), ("12345",)])
+def test_comparator_measurement_rejects_invalid_declared_workers_before_scoring(
+    declared,
+):
+    from scripts.benchmarks.v201 import cli
+
+    called = False
+
+    def operation():
+        nonlocal called
+        called = True
+
+    with pytest.raises(ValueError, match="worker PID|serial comparator"):
+        cli._measure_comparator_operation(
+            operation, declared_worker_pids=declared,
+        )
+    assert called is False
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")

@@ -144,7 +144,7 @@ class ComparatorProbeRecord:
     inference_status: str
     execution_authorized: bool
 
-    def __post_init__(self) -> None:
+    def _validate_fields(self, *, expected_schema: str) -> None:
         limit = comparator_resource_limit(
             self.panel_id, family_size=self.family_size, copies=self.copies,
         )
@@ -172,7 +172,7 @@ class ComparatorProbeRecord:
         ):
             raise ValueError("comparator probe integer fields are invalid")
         if (
-            self.schema != "homoeogwas-snpxsnp-resource-probe-v1"
+            self.schema != expected_schema
             or self.sample_context != "full"
             or self.response_width not in COMPARATOR_PROBE_WIDTHS
             or self.inference_status != "noninferential_resource_probe"
@@ -259,6 +259,11 @@ class ComparatorProbeRecord:
         )
         object.__setattr__(self, "worker_pids", tuple(int(pid) for pid in pids))
 
+    def __post_init__(self) -> None:
+        self._validate_fields(
+            expected_schema="homoeogwas-snpxsnp-resource-probe-v1"
+        )
+
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "ComparatorProbeRecord":
         if not isinstance(payload, Mapping):
@@ -266,20 +271,22 @@ class ComparatorProbeRecord:
         fields = set(cls.__dataclass_fields__)
         if set(payload) != fields:
             raise ValueError("comparator probe schema fields differ")
-        return cls(
-            **{
-                **dict(payload),
-                "failed_response_indices": tuple(payload["failed_response_indices"]),
-                "worker_pids": tuple(payload["worker_pids"]),
-            }
-        )
+        values = dict(payload)
+        for field_name in (
+            "failed_response_indices", "worker_pids", "response_ids",
+            "sampled_pids",
+        ):
+            if field_name in values:
+                values[field_name] = tuple(values[field_name])
+        return cls(**values)
 
     def to_payload(self) -> dict[str, Any]:
         return {
             field_name: (
                 dict(value) if field_name == "gated_marker_count_by_gene"
                 else list(value) if field_name in {
-                    "failed_response_indices", "worker_pids",
+                    "failed_response_indices", "worker_pids", "response_ids",
+                    "sampled_pids",
                 }
                 else value
             )
@@ -288,16 +295,104 @@ class ComparatorProbeRecord:
         }
 
 
+@dataclass(frozen=True)
+class ComparatorProbeRecordV2(ComparatorProbeRecord):
+    """One authorization-, response- and process-bound resource probe."""
+
+    probe_authorization_sha256: str
+    implementation_commit: str
+    matched_comparator_contract_sha256: str
+    input_family_sha256: str
+    response_bank_sha256: str
+    response_ids: tuple[str, ...]
+    response_ids_sha256: str
+    response_prefix_sha256: str
+    score_evidence_sha256: str
+    root_pid: int
+    sampled_pids: tuple[int, ...]
+    process_set_reconciled: bool
+    aggregate_pss_missed_spike_strategy: str
+    formal_execution_authorized: bool
+
+    def __post_init__(self) -> None:
+        self._validate_fields(
+            expected_schema="homoeogwas-snpxsnp-resource-probe-v2"
+        )
+        hashes = (
+            self.probe_authorization_sha256,
+            self.matched_comparator_contract_sha256,
+            self.input_family_sha256,
+            self.response_bank_sha256,
+            self.response_ids_sha256,
+            self.response_prefix_sha256,
+            self.score_evidence_sha256,
+        )
+        response_ids = tuple(self.response_ids)
+        sampled_pids = tuple(self.sampled_pids)
+        if (
+            not all(_sha256_string(value) for value in hashes)
+            or not isinstance(self.implementation_commit, str)
+            or len(self.implementation_commit) != 40
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.implementation_commit
+            )
+            or len(response_ids) != max(COMPARATOR_PROBE_WIDTHS)
+            or len(set(response_ids)) != len(response_ids)
+            or any(
+                not isinstance(response_id, str) or not response_id
+                for response_id in response_ids
+            )
+            or self.response_ids_sha256 != sha256_payload({
+                "ordered_response_ids": list(response_ids),
+            })
+            or isinstance(self.root_pid, bool)
+            or not isinstance(self.root_pid, Integral)
+            or int(self.root_pid) < 1
+            or any(
+                isinstance(pid, bool)
+                or not isinstance(pid, Integral)
+                or int(pid) < 1
+                for pid in sampled_pids
+            )
+            or tuple(sorted(int(pid) for pid in sampled_pids))
+            != tuple(int(pid) for pid in sampled_pids)
+            or len(set(sampled_pids)) != len(sampled_pids)
+            or tuple(int(pid) for pid in sampled_pids) != (int(self.root_pid),)
+            or self.worker_pids != (int(self.root_pid),)
+            or self.process_set_reconciled is not True
+            or self.aggregate_pss_missed_spike_strategy
+            != "serial_singleton_parent_rss_upper_bound"
+            or self.peak_aggregate_pss_bytes < self.peak_parent_rss_bytes
+            or self.formal_execution_authorized is not False
+        ):
+            raise ValueError("comparator probe execution provenance or role is invalid")
+        object.__setattr__(self, "response_ids", response_ids)
+        object.__setattr__(
+            self, "sampled_pids", tuple(int(pid) for pid in sampled_pids)
+        )
+
+
 def validate_comparator_probe_series(
     payloads: Sequence[Mapping[str, Any] | ComparatorProbeRecord],
 ) -> dict[str, Any]:
     """Validate the width anchors and return a safety-adjusted projection."""
 
-    records = tuple(
-        value if isinstance(value, ComparatorProbeRecord)
-        else ComparatorProbeRecord.from_payload(value)
-        for value in payloads
-    )
+    def parse_record(
+        value: Mapping[str, Any] | ComparatorProbeRecord,
+    ) -> ComparatorProbeRecord:
+        if isinstance(value, ComparatorProbeRecord):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("comparator probe must be a mapping")
+        record_type = (
+            ComparatorProbeRecordV2
+            if value.get("schema") == "homoeogwas-snpxsnp-resource-probe-v2"
+            else ComparatorProbeRecord
+        )
+        return record_type.from_payload(value)
+
+    records = tuple(parse_record(value) for value in payloads)
     by_width = {record.response_width: record for record in records}
     if len(records) != 3 or tuple(sorted(by_width)) != COMPARATOR_PROBE_WIDTHS:
         raise ValueError("comparator probes require widths 1, 5 and 20")
@@ -308,6 +403,21 @@ def validate_comparator_probe_series(
         "tested_pair_count", "gated_marker_count_by_gene",
     )
     anchor = records[0]
+    if any(type(record) is not type(anchor) for record in records[1:]):
+        raise ValueError("comparator probes mix incompatible schema versions")
+    if isinstance(anchor, ComparatorProbeRecordV2):
+        identity_fields += (
+            "probe_authorization_sha256", "implementation_commit",
+            "matched_comparator_contract_sha256", "input_family_sha256",
+            "response_bank_sha256", "response_ids", "response_ids_sha256",
+        )
+        if (
+            len({record.response_prefix_sha256 for record in records}) != 3
+            or len({record.score_evidence_sha256 for record in records}) != 3
+        ):
+            raise ValueError(
+                "comparator probes do not bind distinct width-prefix evidence"
+            )
     if any(
         any(getattr(record, field_name) != getattr(anchor, field_name)
             for field_name in identity_fields)

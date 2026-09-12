@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
@@ -178,44 +179,70 @@ def _process_memory(pid: int) -> tuple[int, int] | None:
     return rss, pss
 
 
-def _comparator_memory_snapshot(root_pid: int) -> tuple[int, int]:
-    """Return parent RSS and aggregate process-tree PSS in bytes."""
+def _comparator_memory_snapshot(root_pid: int) -> tuple[int, int, tuple[int, ...]]:
+    """Return parent RSS, aggregate process-tree PSS and sampled PIDs."""
 
     parent = _process_memory(root_pid)
     if parent is None:
         raise RuntimeError("cannot read parent RSS/PSS from Linux /proc")
+    process_tree = tuple(sorted(_process_tree(root_pid)))
+    if root_pid not in process_tree:
+        raise RuntimeError("comparator process tree omitted its live root PID")
     aggregate_pss = 0
-    for pid in _process_tree(root_pid):
+    for pid in process_tree:
         measured = _process_memory(pid)
         if measured is not None:
             aggregate_pss += measured[1]
     if aggregate_pss < 1:
         raise RuntimeError("cannot read aggregate process-tree PSS from Linux /proc")
-    return parent[0], aggregate_pss
+    return parent[0], aggregate_pss, process_tree
 
 
 def _measure_comparator_operation(
     operation: Callable[[], Any],
     *,
     sample_interval_seconds: float = 0.01,
+    declared_worker_pids: Sequence[int] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Measure scorer CPU/wall plus peak parent RSS and process-tree PSS."""
+    """Measure one serial scorer and reject every process descendant."""
 
     if sample_interval_seconds <= 0:
         raise ValueError("memory sample interval must be positive")
     root_pid = os.getpid()
+    declared_values = (
+        (root_pid,)
+        if declared_worker_pids is None
+        else tuple(declared_worker_pids)
+    )
+    if any(
+        isinstance(pid, bool) or not isinstance(pid, Integral) or int(pid) < 1
+        for pid in declared_values
+    ):
+        raise ValueError("comparator worker PIDs must be positive integers")
+    declared = tuple(int(pid) for pid in declared_values)
+    if declared != (root_pid,):
+        raise ValueError("serial comparator must declare only its root worker PID")
     peak_parent_rss = 0
     peak_aggregate_pss = 0
+    sampled_pids: set[int] = set()
     sample_error: list[Exception] = []
     finished = threading.Event()
     lock = threading.Lock()
 
     def sample_once() -> None:
         nonlocal peak_parent_rss, peak_aggregate_pss
-        parent_rss, aggregate_pss = _comparator_memory_snapshot(root_pid)
+        parent_rss, aggregate_pss, process_tree = _comparator_memory_snapshot(
+            root_pid
+        )
+        descendants = set(process_tree) - {root_pid}
+        if descendants:
+            raise RuntimeError(
+                "serial comparator launched an unauthorized descendant process"
+            )
         with lock:
             peak_parent_rss = max(peak_parent_rss, parent_rss)
             peak_aggregate_pss = max(peak_aggregate_pss, aggregate_pss)
+            sampled_pids.update(process_tree)
 
     def monitor() -> None:
         while not finished.wait(sample_interval_seconds):
@@ -245,11 +272,23 @@ def _measure_comparator_operation(
     high_water_after = _self_peak_rss_bytes()
     if high_water_after > high_water_before:
         peak_parent_rss = max(peak_parent_rss, high_water_after)
+    if sampled_pids != set(declared):
+        raise RuntimeError("sampled comparator PIDs differ from declared workers")
+    # The admitted scorer is a reconciled singleton. For one process PSS cannot
+    # exceed RSS, so its operation-window RSS peak is a conservative backstop
+    # for an aggregate-PSS spike that falls between /proc samples.
+    peak_aggregate_pss = max(peak_aggregate_pss, peak_parent_rss)
     return result, {
         "scorer_cpu_seconds": max(0.0, cpu_after - cpu_before),
         "scorer_wall_seconds": max(0.0, wall_seconds),
         "peak_parent_rss_bytes": peak_parent_rss,
         "peak_aggregate_pss_bytes": peak_aggregate_pss,
+        "root_pid": root_pid,
+        "sampled_pids": sorted(sampled_pids),
+        "process_set_reconciled": True,
+        "aggregate_pss_missed_spike_strategy": (
+            "serial_singleton_parent_rss_upper_bound"
+        ),
     }
 
 
