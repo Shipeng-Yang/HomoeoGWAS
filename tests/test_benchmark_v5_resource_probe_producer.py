@@ -59,6 +59,17 @@ class _AuthorizationPanelAccessorAttack(dict):
         return super().__getitem__(key)
 
 
+class _ArtifactAccessorAttack(dict):
+    def __init__(self, stored, record):
+        super().__init__(stored)
+        self._record = record
+
+    def __getitem__(self, key):
+        if key == "record":
+            return self._record
+        return super().__getitem__(key)
+
+
 class _SingleReadPrepared:
     def __init__(self, prepared, guarded_field):
         self._prepared = prepared
@@ -91,6 +102,33 @@ class _SingleReadPrepared:
 class _PreparedAccessForbidden:
     def __getattr__(self, field):
         raise AssertionError(f"invalid producer input accessed prepared.{field}")
+
+
+class _ContextReadOnce:
+    def __init__(self, context):
+        self._context = context
+        self.reads = {"family": 0, "panel_id": 0, "sample_context": 0}
+
+    def _read(self, field):
+        self.reads[field] += 1
+        if self.reads[field] > 1:
+            raise AssertionError(f"context.{field} was read more than once")
+        return getattr(self._context, field)
+
+    @property
+    def family(self):
+        return self._read("family")
+
+    @property
+    def panel_id(self):
+        return self._read("panel_id")
+
+    @property
+    def sample_context(self):
+        return self._read("sample_context")
+
+    def __getattr__(self, field):
+        return getattr(self._context, field)
 
 
 def _prepared_fixture():
@@ -138,6 +176,23 @@ def _prepared_fixture():
         panel_id="REALG.CGVD1245",
         sample_context="full",
         family=family,
+        subdata={
+            "A": SimpleNamespace(
+                X=np.zeros((sample_count, 1)),
+                samples=np.asarray([f"s{index}" for index in range(sample_count)]),
+                gene_snp={"geneA": np.asarray([0])},
+            ),
+            "D": SimpleNamespace(
+                X=np.zeros((sample_count, 1)),
+                samples=np.asarray([f"s{index}" for index in range(sample_count)]),
+                gene_snp={"geneD": np.asarray([0])},
+            ),
+        },
+        feature_seed=1,
+        marker_mask_identity={"A": {}, "D": {}},
+        marker_mask_sha256="d" * 64,
+        sample_idx=np.arange(sample_count),
+        phenotype=np.zeros(sample_count),
     )
     return (
         SimpleNamespace(
@@ -750,6 +805,7 @@ def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
 
     monkeypatch.setattr(
         resource_probe, "_snpxsnp_pair_ceiling", forbidden_pair_ceiling,
+        raising=False,
     )
     response_width = 2 if invalid == "response_width" else 1
     response_bank = bank if invalid == "response_width" else bank.astype(np.float32)
@@ -768,6 +824,125 @@ def test_invalid_response_inputs_precede_prepared_access_and_pair_ceiling(
             matched_comparator_contract_sha256="2" * 64,
         )
     assert pair_ceiling_calls == []
+
+
+def test_producer_pins_context_identity_for_unmocked_fingerprint():
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    fingerprint = resource_probe._context_fingerprint(prepared.context)
+    witness["authorization_payload"]["panel_context"]["context_fingerprint"] = fingerprint
+    witness["authorization_sha256"] = sha256_payload(witness["authorization_payload"])
+    proxy = _ContextReadOnce(prepared.context)
+    prepared.context = proxy
+    artifact = resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=1,
+        design_hash="a" * 64, context_fingerprint=fingerprint,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    assert artifact["record"]["context_fingerprint"] == fingerprint
+    assert proxy.reads == {"family": 1, "panel_id": 1, "sample_context": 1}
+
+
+def test_producer_uses_local_resource_limit_not_context_pair_helper(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    original_limit = resource_probe.comparator_resource_limit
+    original_score = resource_probe._score_snpxsnp_bound_inputs
+    observed = []
+
+    def one_pair_limit(*args, **kwargs):
+        return replace(original_limit(*args, **kwargs), max_offered_pairs=1)
+
+    def record_score(*args, **kwargs):
+        observed.append(kwargs["max_offered_pairs"])
+        return original_score(*args, **kwargs)
+
+    def forbidden_context_pair_helper(*_args, **_kwargs):
+        raise AssertionError("producer read pair ceiling from context")
+
+    monkeypatch.setattr(resource_probe, "comparator_resource_limit", one_pair_limit)
+    monkeypatch.setattr(resource_probe, "_score_snpxsnp_bound_inputs", record_score)
+    monkeypatch.setattr(
+        resource_probe, "_snpxsnp_pair_ceiling", forbidden_context_pair_helper,
+        raising=False,
+    )
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", lambda _c: "b" * 64)
+    resource_probe.produce_snpxsnp_resource_probe(
+        prepared, bank, witness["response_ids"], response_width=1,
+        design_hash="a" * 64, context_fingerprint="b" * 64,
+        authorization_payload=witness["authorization_payload"],
+        authorization_sha256=witness["authorization_sha256"],
+        implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+    )
+    assert observed == [1]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "panel_id", "expected_sha256", "implementation_commit",
+        "matched_comparator_contract_sha256", "design_hash", "context_fingerprint",
+        "prepared_design_sha256", "input_family_sha256", "response_bank_sha256",
+        "response_ids_sha256",
+    ],
+)
+def test_validate_authorization_requires_exact_expected_identifiers(field):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+    values = {
+        "expected_sha256": witness["authorization_sha256"],
+        "panel_id": "REALG.CGVD1245",
+        "implementation_commit": "1" * 40,
+        "matched_comparator_contract_sha256": "2" * 64,
+        "design_hash": "a" * 64,
+        "context_fingerprint": "b" * 64,
+        "prepared_design_sha256": prepared.scores.prepared_design_sha256,
+        "input_family_sha256": _input_family_sha256(prepared),
+        "response_bank_sha256": witness["authorization_payload"]["panel_context"]["response_bank_sha256"],
+        "response_ids_sha256": witness["authorization_payload"]["panel_context"]["response_ids_sha256"],
+    }
+    values[field] = _AlwaysEqualStr("f" * len(values[field]))
+    with pytest.raises(ValueError, match="authorization"):
+        resource_probe._validate_authorization(
+            witness["authorization_payload"], response_width=1, **values,
+        )
+
+
+def test_context_fingerprint_subclass_rejected_before_fingerprinting(monkeypatch):
+    prepared, bank = _prepared_fixture()
+    witness = _witness()
+
+    def forbidden_fingerprint(*_args, **_kwargs):
+        raise AssertionError("subclass context fingerprint reached fingerprinting")
+
+    monkeypatch.setattr(resource_probe, "_context_fingerprint", forbidden_fingerprint)
+    with pytest.raises(ValueError, match="design identity"):
+        resource_probe.produce_snpxsnp_resource_probe(
+            prepared, bank, witness["response_ids"], response_width=1,
+            design_hash="a" * 64, context_fingerprint=_AlwaysEqualStr("b" * 64),
+            authorization_payload=witness["authorization_payload"],
+            authorization_sha256=witness["authorization_sha256"],
+            implementation_commit="1" * 40, matched_comparator_contract_sha256="2" * 64,
+        )
+
+
+def test_artifact_validator_rejects_accessor_split_view(monkeypatch):
+    artifact = _produce(monkeypatch)
+    stored = copy.deepcopy(artifact)
+    stored["record"]["panel_id"] = "ATTACK"
+    attack = _ArtifactAccessorAttack(stored, artifact["record"])
+    with pytest.raises(ValueError):
+        resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
+
+
+def test_artifact_validator_rejects_str_subclass_fields(monkeypatch):
+    artifact = _produce(monkeypatch)
+    attack = copy.deepcopy(artifact)
+    attack["record"]["panel_id"] = _AlwaysEqualStr("ATTACK")
+    with pytest.raises(ValueError):
+        resource_probe.validate_snpxsnp_resource_probe_artifact(attack, **_witness())
 
 
 def test_producer_private_core_never_receives_live_scores(monkeypatch):

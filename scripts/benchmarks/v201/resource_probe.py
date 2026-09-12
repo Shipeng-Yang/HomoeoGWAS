@@ -28,7 +28,7 @@ from .contracts import (
     comparator_resource_limit,
     sha256_payload,
 )
-from .track_omnib import _context_fingerprint, _snpxsnp_pair_ceiling
+from .track_omnib import _context_fingerprint
 
 _AUTHORIZATION_FIELDS = {
     "schema",
@@ -76,6 +76,19 @@ def _numeric_array_sha256(values: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+class _PinnedContextView:
+    """Manifest view pinned to producer-local context identity fields."""
+
+    def __init__(self, base: Any, family: Any, panel_id: str, sample_context: str):
+        self._base = base
+        self.family = family
+        self.panel_id = panel_id
+        self.sample_context = sample_context
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+
 def _validate_authorization(
     payload: Mapping[str, Any],
     *,
@@ -91,6 +104,24 @@ def _validate_authorization(
     response_bank_sha256: str,
     response_ids_sha256: str,
 ) -> str:
+    if (
+        type(panel_id) is not str
+        or not _lower_hex(expected_sha256, 64)
+        or not _lower_hex(implementation_commit, 40)
+        or not _lower_hex(matched_comparator_contract_sha256, 64)
+        or any(
+            not _lower_hex(value, 64)
+            for value in (
+                design_hash,
+                context_fingerprint,
+                prepared_design_sha256,
+                input_family_sha256,
+                response_bank_sha256,
+                response_ids_sha256,
+            )
+        )
+    ):
+        raise ValueError("resource probe authorization identity or scope is invalid")
     if not isinstance(payload, Mapping):
         raise ValueError("resource probe authorization fields differ")
     try:
@@ -115,15 +146,12 @@ def _validate_authorization(
         "response_ids_sha256": response_ids_sha256,
     }
     if (
-        not _lower_hex(expected_sha256, 64)
-        or hashlib.sha256(encoded).hexdigest() != expected_sha256
+        hashlib.sha256(encoded).hexdigest() != expected_sha256
         or authorization["schema"]
         != "homoeogwas-snpxsnp-resource-probe-authorization-v2"
         or type(authorization["authorization_id"]) is not str
         or not authorization["authorization_id"]
-        or not _lower_hex(implementation_commit, 40)
         or authorization["implementation_commit"] != implementation_commit
-        or not _lower_hex(matched_comparator_contract_sha256, 64)
         or authorization["matched_comparator_contract_sha256"]
         != matched_comparator_contract_sha256
         or panel_context != expected_panel_context
@@ -258,6 +286,18 @@ def _detached_identity_snapshot(identity: Any) -> tuple[dict[str, Any], str]:
     return snapshot, hashlib.sha256(encoded).hexdigest()
 
 
+def _detached_artifact_snapshot(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("resource probe artifact fields differ")
+    try:
+        snapshot = json.loads(canonical_json(payload))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("resource probe artifact fields differ") from error
+    if not isinstance(snapshot, dict):
+        raise ValueError("resource probe artifact fields differ")
+    return snapshot
+
+
 def _prepared_score_context_sha256(scores: Any, bound_inputs: Any) -> str:
     """Close retained prepared/null-fit identities over the bound score context."""
 
@@ -313,7 +353,10 @@ def produce_snpxsnp_resource_probe(
     gene_blocks = prepared.gene_blocks
     family = context.family
     panel_id = context.panel_id
-    if type(panel_id) is not str:
+    sample_context = context.sample_context
+    if type(panel_id) is not str or type(sample_context) is not str:
+        raise ValueError("resource probe design identity is invalid")
+    if not _lower_hex(design_hash, 64) or not _lower_hex(context_fingerprint, 64):
         raise ValueError("resource probe design identity is invalid")
     response_ids_tuple = _response_id_tuple(response_ids)
     bank_identity, prefix_identity = _response_identities(
@@ -321,12 +364,13 @@ def produce_snpxsnp_resource_probe(
     )
     family_size = len(family.group_ids)
     copies = len(family.subgenomes)
-    comparator_resource_limit(
+    resource_limit = comparator_resource_limit(
         panel_id, family_size=family_size, copies=copies
     )
-    if getattr(context, "sample_context", None) != "full":
+    if sample_context != "full":
         raise ValueError("resource probe requires the frozen full sample context")
-    if _context_fingerprint(context) != context_fingerprint:
+    pinned_context = _PinnedContextView(context, family, panel_id, sample_context)
+    if _context_fingerprint(pinned_context) != context_fingerprint:
         raise ValueError("resource probe context fingerprint is detached")
     response_bank_sha256 = sha256_payload(bank_identity)
     response_ids_sha256 = sha256_payload({
@@ -334,10 +378,7 @@ def produce_snpxsnp_resource_probe(
     })
     bound_inputs = _bind_snpxsnp_inputs(scores, family, expanded, gene_blocks)
     prepared_design_sha256 = _prepared_score_context_sha256(scores, bound_inputs)
-    if not all(
-        _lower_hex(value, 64)
-        for value in (design_hash, context_fingerprint, prepared_design_sha256)
-    ):
+    if not _lower_hex(prepared_design_sha256, 64):
         raise ValueError("resource probe design identity is invalid")
     input_family_sha256 = bound_inputs.family_sha256
     authorized_input_family_sha256 = _validate_authorization(
@@ -354,7 +395,7 @@ def produce_snpxsnp_resource_probe(
         response_bank_sha256=response_bank_sha256,
         response_ids_sha256=response_ids_sha256,
     )
-    pair_ceiling = _snpxsnp_pair_ceiling(context)
+    pair_ceiling = resource_limit.max_offered_pairs
     prefix = response_bank[:, :response_width]
     if not prefix.flags.c_contiguous:
         prefix = np.ascontiguousarray(prefix)
@@ -490,6 +531,7 @@ def _validate_snpxsnp_resource_probe_artifact_snapshot(
 ) -> dict[str, Any]:
     """Validate using the private response snapshot owned by an entry point."""
 
+    payload = _detached_artifact_snapshot(payload)
     if (
         not isinstance(payload, Mapping)
         or set(payload) != {"schema", "record", "score_evidence"}
