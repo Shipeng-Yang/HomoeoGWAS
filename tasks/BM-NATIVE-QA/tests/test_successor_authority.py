@@ -79,7 +79,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     inventory.write_text(
         json.dumps(
             {
-                "schema": "homoeogwas-bm-native-qa-prospective-inventory-v3",
+                "schema": "homoeogwas-bm-native-qa-prospective-inventory-v4",
                 "response_materialization_authorized": False,
                 "execution_authorized": False,
                 "qa_design_hash": qa_design_hash,
@@ -109,7 +109,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "schema": "homoeogwas-bm-native-qa-materialization-authority-v2",
                 "response_materialization_authorized": True,
                 "execution_authorized": False,
-                "run_namespace": "qa_real80_njobs128_v3",
+                "run_namespace": "qa_real80_njobs128_v4",
                 "successor_design_sha256": _sha256(bound_files["successor.yaml"]),
                 "decision_sha256": _sha256(bound_files["decision.md"]),
                 "qa_design_hash": qa_design_hash,
@@ -151,8 +151,8 @@ def test_authority_verifies_all_bindings_before_returning(tmp_path: Path) -> Non
     assert verified.qa_design_hash == authority._mapping_sha256(
         verified.inventory["design_payload"]
     )
-    assert verified.run_namespace == "qa_real80_njobs128_v3"
-    assert verified.inventory["schema"].endswith("v3")
+    assert verified.run_namespace == "qa_real80_njobs128_v4"
+    assert verified.inventory["schema"].endswith("v4")
     assert verified.artifact_root == tmp_path / "materialized"
     assert verified.binding_hashes["materialization_authority_sha256"] == _sha256(
         authority_path
@@ -214,10 +214,10 @@ def test_authority_requires_review_to_bind_runner_mapping(tmp_path: Path) -> Non
 
 
 def test_materialization_launch_contract_is_exact(tmp_path: Path) -> None:
-    task_root = tmp_path / "runtime-task-v3"
+    task_root = tmp_path / "runtime-task-v4"
     helper_root = tmp_path / "r3-source"
     authority_path = tmp_path / "authority.yaml"
-    artifact_root = tmp_path / "materialized" / "njobs128-v3"
+    artifact_root = tmp_path / "materialized" / "njobs128-v4"
     runtime = {
         "harness_task_root": str(task_root),
         "accepted_helper_source_root": str(helper_root),
@@ -235,7 +235,7 @@ def test_materialization_launch_contract_is_exact(tmp_path: Path) -> None:
         },
     }
     verified = authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
         qa_design_hash="1" * 64,
         inventory={},
         artifact_root=artifact_root,
@@ -576,6 +576,14 @@ def test_authority_rejects_rejected_v2_runner_mapping(
             "prospective_inventory_sha256",
             "9470941e68661f32a583fb04c72dd6aacdb5c6f35dc5f0aa6f1a5ca677150662",
         ),
+        (
+            "qa_design_hash",
+            "ff8e917324aa5227b6fd4d1501ed3c08966b9f45cb5d10ec45f369d66c9d9215",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "e6d8a3ed2f2ab75bddafdcd4628526f15fe70d68d9e17a1f6f53e833c78b81ca",
+        ),
     ],
 )
 def test_authority_rejects_rejected_v3_flat_identity(
@@ -604,6 +612,7 @@ def test_authority_rejects_rejected_v3_flat_identity(
         "prospective-inventory.njobs128-v3.pre-code-review-changes-required-20260913.json",
         "prospective-inventory.njobs128-v3.pre-real-context-preflight-failure-20260913.json",
         "prospective-inventory.njobs128-v3.pre-rejected-v3-identity-gate-20260913.json",
+        "prospective-inventory.njobs128-v3.json",
     ],
 )
 def test_authority_rejects_rejected_v3_runner_mapping(
@@ -781,6 +790,12 @@ def test_rejected_v2_literals_match_preserved_inventories(
             "1408fe7e9d5846cc7d785bda6d66be981b4f48346ca7de8903bb4fe3415a675b",
             "0b668c77c6792d566a18bc068564ec7736b177ad50105199e3f9490aed5b77fa",
             "13261cc62cdd3e9396f9a6cf236a3291fcec0f4735b82ab6f96401fb9c588482",
+        ),
+        (
+            "prospective-inventory.njobs128-v3.json",
+            "e6d8a3ed2f2ab75bddafdcd4628526f15fe70d68d9e17a1f6f53e833c78b81ca",
+            "ff8e917324aa5227b6fd4d1501ed3c08966b9f45cb5d10ec45f369d66c9d9215",
+            "6253c131a42ca6402b17736ac0076a367a41232a5e96b3b954f30fcaa87de6f6",
         ),
     ],
 )

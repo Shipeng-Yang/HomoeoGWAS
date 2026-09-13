@@ -71,6 +71,7 @@ REJECTED_V3_QA_DESIGN_HASHES = frozenset(
         "a78e2eca7ee9beab05d83167ac2b051b8db02d10b428cf08251d7852e56f1968",
         "f741abbd968bb76bd56340cf715a0cc7031119388cb0de6d95d7b44cae5eaf7e",
         "0b668c77c6792d566a18bc068564ec7736b177ad50105199e3f9490aed5b77fa",
+        "ff8e917324aa5227b6fd4d1501ed3c08966b9f45cb5d10ec45f369d66c9d9215",
     }
 )
 REJECTED_V3_INVENTORY_SHA256S = frozenset(
@@ -78,6 +79,7 @@ REJECTED_V3_INVENTORY_SHA256S = frozenset(
         "9470941e68661f32a583fb04c72dd6aacdb5c6f35dc5f0aa6f1a5ca677150662",
         "ed97d365a0b5f0cde7d4997ced0753ab44a14bb1cda4da758316569cc0c976db",
         "1408fe7e9d5846cc7d785bda6d66be981b4f48346ca7de8903bb4fe3415a675b",
+        "e6d8a3ed2f2ab75bddafdcd4628526f15fe70d68d9e17a1f6f53e833c78b81ca",
     }
 )
 REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S = frozenset(
@@ -85,6 +87,7 @@ REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S = frozenset(
         "af2328831e45d5903700381fd5960e883074d1f6da4e67f7ea0e1c1299e27800",
         "d0bd1cc0a9c12dfd0b4b8aa0acadc0470a18b304a0fe891baa748de1d4e661fd",
         "13261cc62cdd3e9396f9a6cf236a3291fcec0f4735b82ab6f96401fb9c588482",
+        "6253c131a42ca6402b17736ac0076a367a41232a5e96b3b954f30fcaa87de6f6",
     }
 )
 ACCEPTED_PRODUCT_COMMIT = "9d7faee655c020d84bdd6a6fba33b42a8428aea6"
@@ -759,7 +762,7 @@ def verify_materialization_authority(
             raise AuthorityBlocked(f"bound file hash mismatch: {path_key}")
 
     inventory = _mapping(paths["prospective_inventory"], json_format=True)
-    if inventory.get("schema") != "homoeogwas-bm-native-qa-prospective-inventory-v3":
+    if inventory.get("schema") != "homoeogwas-bm-native-qa-prospective-inventory-v4":
         raise AuthorityBlocked("prospective inventory is not the active successor")
     if inventory.get("response_materialization_authorized") is not False or (
         inventory.get("execution_authorized") is not False

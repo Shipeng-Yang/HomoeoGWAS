@@ -10,7 +10,7 @@ from bm_native_qa_harness import cli, identity, plan
 MANAGEMENT_ROOT = Path("/mnt/7302share/fast_ysp/U7_GWAS")
 SUCCESSOR_PATH = (
     MANAGEMENT_ROOT
-    / "tasks/BM-NATIVE-QA/QA-NJOBS128-SUCCESSOR-DESIGN-v3-20260913.yaml"
+    / "tasks/BM-NATIVE-QA/QA-NJOBS128-SUCCESSOR-DESIGN-v4-20260913.yaml"
 )
 AMENDMENT_PATH = (
     MANAGEMENT_ROOT
@@ -24,7 +24,7 @@ FIXTURE_MANIFEST_PATH = (
     MANAGEMENT_ROOT / "tasks/BM-FIXTURE-V3/manifest.20260910-v5-r3.json"
 )
 FROZEN_INVENTORY_PATH = (
-    MANAGEMENT_ROOT / "tasks/BM-NATIVE-QA/prospective-inventory.njobs128-v3.json"
+    MANAGEMENT_ROOT / "tasks/BM-NATIVE-QA/prospective-inventory.njobs128-v4.json"
 )
 
 
@@ -43,7 +43,7 @@ def test_successor_inventory_has_six_twelve_sixteen_and_only_128_workers(
     assert {row.jobs for row in inventory.invocations} == {128}
     assert len({row.invocation_id for row in inventory.invocations}) == 16
     assert all(
-        row.response_id.startswith("qa_real80_njobs128_v3.")
+        row.response_id.startswith("qa_real80_njobs128_v4.")
         for row in inventory.responses
     )
 
@@ -78,7 +78,7 @@ def test_successor_identity_binds_design_decision_and_absolute_artifact_root(
 ) -> None:
     artifact_root = Path(
         "/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/materialized/"
-        "njobs128-v3"
+        "njobs128-v4"
     )
     frozen = identity.freeze_successor_identity(
         plan.build_successor_inventory(amendment, _successor()),
@@ -88,7 +88,7 @@ def test_successor_identity_binds_design_decision_and_absolute_artifact_root(
         worker_decision_sha256="c" * 64,
         runner_test_sha256s={"runner.py": "d" * 64},
         artifact_root=artifact_root,
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
 
     assert frozen.design_payload["successor_design_sha256"] == "b" * 64
@@ -102,7 +102,7 @@ def test_successor_identity_binds_design_decision_and_absolute_artifact_root(
     )
 
 
-def test_successor_plan_cli_freezes_v3_namespace_and_workers128(tmp_path: Path) -> None:
+def test_successor_plan_cli_freezes_v4_namespace_and_workers128(tmp_path: Path) -> None:
     out = tmp_path / "successor.json"
 
     assert cli.main(
@@ -122,21 +122,21 @@ def test_successor_plan_cli_freezes_v3_namespace_and_workers128(tmp_path: Path) 
     ) == 0
 
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["schema"] == "homoeogwas-bm-native-qa-prospective-inventory-v3"
+    assert payload["schema"] == "homoeogwas-bm-native-qa-prospective-inventory-v4"
     assert payload["source_bindings"]["successor_design_sha256"] == (
-        "4e0e2a25f748fbc7ecf660679058d2db9a4b9fc66bc6289558f5d3d40ba9a6ee"
+        "b349dc8d7cbdbf6e7008fb60ddb78fd7d32fa2f31269aa103ae56c76b79f0a30"
     )
     assert payload["source_bindings"]["worker_decision_sha256"] == (
         "ade451d2eaef49530011d1558d042bbce3fc2c2d3f6e9cea78c2bcb244c4e0e0"
     )
     assert {row["jobs"] for row in payload["semantic_invocations"]} == {128}
     assert all(
-        row["scenario_id"].startswith("qa_real80_njobs128_v3.")
+        row["scenario_id"].startswith("qa_real80_njobs128_v4.")
         for row in payload["seed_derivations"]
     )
     assert payload["design_payload"]["future_artifacts"]["root"] == (
         "/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/materialized/"
-        "njobs128-v3"
+        "njobs128-v4"
     )
     assert out.read_bytes() == FROZEN_INVENTORY_PATH.read_bytes()
 

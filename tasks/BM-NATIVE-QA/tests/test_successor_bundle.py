@@ -81,7 +81,7 @@ def _inventory(tmp_path: Path) -> plan.ProspectiveInventory:
     responses = tuple(
         plan.ResponseSpec(
             response_id=(
-                f"qa_real80_njobs128_v3.{context.panel_id}."
+                f"qa_real80_njobs128_v4.{context.panel_id}."
                 f"{context.sample_context}.{truth}"
             ),
             context_key=context.key,
@@ -123,14 +123,14 @@ def _verified(
     tmp_path: Path,
     inventory: plan.ProspectiveInventory,
 ) -> authority.VerifiedMaterializationAuthority:
-    artifact_root = tmp_path / "materialized" / "njobs128-v3"
+    artifact_root = tmp_path / "materialized" / "njobs128-v4"
     layout = identity._future_artifact_layout(
         inventory,
         root=str(artifact_root),
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
     return authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
         qa_design_hash="1" * 64,
         inventory={"design_payload": {"future_artifacts": layout}},
         artifact_root=artifact_root,
@@ -158,6 +158,40 @@ def _synthetic_loader(context: plan.ContextSpec):
     return built, tuple(f"sample_{index}" for index in range(24))
 
 
+def test_prepared_all_edges_mask_requires_every_declared_copy_and_edge() -> None:
+    family = SimpleNamespace(
+        subgenomes=("A", "B", "D"),
+        group_ids=("g1", "g2"),
+        genes=(("a1", "b1", "d1"), ("a2", "b2", "d2")),
+    )
+    scores = SimpleNamespace(
+        gated_snp={
+            ("A", "a1"): np.arange(3),
+            ("B", "b1"): np.arange(4),
+            ("D", "d1"): np.arange(5),
+            ("A", "a2"): np.arange(6),
+            ("B", "b2"): np.arange(7),
+            ("D", "d2"): np.arange(2),
+        },
+        edge_estimable=np.asarray([True, True, True, True, True, True]),
+    )
+    prepared = SimpleNamespace(
+        context=SimpleNamespace(family=family),
+        scores=scores,
+        expanded=SimpleNamespace(group_edge_indices=((0, 1, 2), (3, 4, 5))),
+    )
+
+    assert bundle._prepared_all_edges_estimable_mask(
+        prepared, min_snp=3
+    ).tolist() == [True, False]
+
+    scores.gated_snp[("D", "d2")] = np.arange(3)
+    scores.edge_estimable[4] = False
+    assert bundle._prepared_all_edges_estimable_mask(
+        prepared, min_snp=3
+    ).tolist() == [True, False]
+
+
 def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     tmp_path: Path,
 ) -> None:
@@ -166,7 +200,7 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
 
     manifest = bundle.materialize_bundle(
@@ -187,13 +221,13 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     physical = json.loads((root / "materialization-manifest.json").read_text())
     assert physical == manifest
     assert physical["execution_authorized"] is False
-    assert physical["run_namespace"] == "qa_real80_njobs128_v3"
+    assert physical["run_namespace"] == "qa_real80_njobs128_v4"
     assert all(
-        row["response_id"].startswith("qa_real80_njobs128_v3.")
+        row["response_id"].startswith("qa_real80_njobs128_v4.")
         for row in physical["responses"]
     )
     assert all(
-        row["invocation_id"].startswith("qa_real80_njobs128_v3.")
+        row["invocation_id"].startswith("qa_real80_njobs128_v4.")
         for row in physical["configs"]
     )
     assert physical["authority_bindings"]["materialization_authority_sha256"] == (
@@ -243,13 +277,13 @@ def test_replica_identity_guard_rejects_any_scientific_difference() -> None:
         bundle.require_replica_identity(rows)
 
 
-def test_marker_count_failure_precedes_v3_lock_and_attempt(tmp_path: Path) -> None:
+def test_marker_count_failure_precedes_v4_lock_and_attempt(tmp_path: Path) -> None:
     inventory = _inventory(tmp_path)
     verified = _verified(tmp_path, inventory)
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
     calls = 0
 
@@ -273,10 +307,51 @@ def test_marker_count_failure_precedes_v3_lock_and_attempt(tmp_path: Path) -> No
     assert calls == 2
     assert not verified.artifact_root.exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v3.materialization-lock"
+        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
     ).exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v3.materialization-attempt"
+        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+    ).exists()
+
+
+def test_anchor_preparation_failure_precedes_v4_lock_and_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _inventory(tmp_path)
+    verified = _verified(tmp_path, inventory)
+    seeds = identity.build_seed_ledger(
+        verified.qa_design_hash,
+        inventory,
+        run_namespace="qa_real80_njobs128_v4",
+    )
+    original_prepare_anchor = bundle.prepare_anchor
+    prepare_calls = 0
+
+    def failing_prepare_anchor(*args, **kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 2:
+            raise ValueError("prelock anchor fixture failure")
+        return original_prepare_anchor(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "prepare_anchor", failing_prepare_anchor)
+
+    with pytest.raises(ValueError, match="prelock anchor fixture failure"):
+        bundle.materialize_bundle(
+            verified,
+            inventory=inventory,
+            seeds=seeds,
+            context_loader=_synthetic_loader,
+        )
+
+    assert prepare_calls == 2
+    assert not verified.artifact_root.exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    ).exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
     ).exists()
 
 
@@ -289,19 +364,19 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
-    original_prepare_anchor = bundle.prepare_anchor
-    prepare_calls = 0
+    original_write_response = bundle.write_roundtrip_response
+    response_writes = 0
 
-    def failing_prepare_anchor(*args, **kwargs):
-        nonlocal prepare_calls
-        prepare_calls += 1
-        if prepare_calls == 2:
+    def failing_write_response(*args, **kwargs):
+        nonlocal response_writes
+        response_writes += 1
+        if response_writes == 2:
             raise ValueError("fixture failure")
-        return original_prepare_anchor(*args, **kwargs)
+        return original_write_response(*args, **kwargs)
 
-    monkeypatch.setattr(bundle, "prepare_anchor", failing_prepare_anchor)
+    monkeypatch.setattr(bundle, "write_roundtrip_response", failing_write_response)
 
     with pytest.raises(ValueError, match="fixture failure"):
         bundle.materialize_bundle(
@@ -311,7 +386,7 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
             context_loader=_synthetic_loader,
         )
 
-    attempt = verified.artifact_root.parent / ".njobs128-v3.materialization-attempt"
+    attempt = verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
     assert not verified.artifact_root.exists()
     abort = json.loads((attempt / "materialization-abort.json").read_text())
     assert abort["qa_design_hash"] == verified.qa_design_hash
@@ -334,9 +409,9 @@ def test_bundle_refuses_preexisting_exclusive_lock(tmp_path: Path) -> None:
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v3",
+        run_namespace="qa_real80_njobs128_v4",
     )
-    lock = verified.artifact_root.parent / ".njobs128-v3.materialization-lock"
+    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("occupied\n", encoding="utf-8")
 

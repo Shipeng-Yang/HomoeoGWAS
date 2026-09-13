@@ -24,6 +24,7 @@ from .materialize import (
     write_roundtrip_response,
 )
 from .plan import ContextSpec, ProspectiveInventory
+from .policy import canonical_interact
 
 ContextLoader = Callable[[ContextSpec], tuple[Any, Sequence[str]]]
 
@@ -454,6 +455,100 @@ def _preflight_contexts(
     return loaded
 
 
+def _prepared_all_edges_estimable_mask(
+    prepared: Any,
+    *,
+    min_snp: int,
+) -> np.ndarray:
+    """Match the frozen all-copy/all-edge QA estimability definition."""
+
+    family = prepared.context.family
+    scores = prepared.scores
+    edge_estimable = np.asarray(scores.edge_estimable, dtype=bool)
+    mask = np.zeros(len(family.group_ids), dtype=bool)
+    if len(prepared.expanded.group_edge_indices) != len(family.group_ids):
+        raise ValueError("prepared family edge membership is incomplete")
+    for group_index, genes in enumerate(family.genes):
+        copies_callable = all(
+            (subgenome, gene) in scores.gated_snp
+            and np.asarray(scores.gated_snp[(subgenome, gene)]).size >= min_snp
+            for subgenome, gene in zip(family.subgenomes, genes, strict=True)
+        )
+        edge_indices = np.asarray(
+            prepared.expanded.group_edge_indices[group_index],
+            dtype=np.int64,
+        )
+        if (
+            edge_indices.ndim != 1
+            or edge_indices.size == 0
+            or np.any(edge_indices < 0)
+            or np.any(edge_indices >= edge_estimable.size)
+        ):
+            raise ValueError("prepared family edge membership is invalid")
+        mask[group_index] = copies_callable and bool(
+            edge_estimable[edge_indices].all()
+        )
+    return mask
+
+
+def _preflight_anchors(
+    contexts: Sequence[ContextSpec],
+    loaded_contexts: Mapping[str, tuple[Any, tuple[str, ...]]],
+    seed_by_role: Mapping[tuple[str, str, str | None], SeedRecord],
+    *,
+    qa_design_hash: str,
+    context_evidence: Mapping[str, Any] | None,
+) -> tuple[
+    dict[str, Any],
+    dict[str, tuple[str, ...]],
+    dict[str, np.ndarray],
+]:
+    """Prepare and validate every expensive anchor before claiming the lock."""
+
+    min_snp = int(canonical_interact()["burden"]["min_snp"])
+    prepared_by_context: dict[str, Any] = {}
+    samples_by_context: dict[str, tuple[str, ...]] = {}
+    estimable_by_context: dict[str, np.ndarray] = {}
+    for context_spec in contexts:
+        context, sample_ids = loaded_contexts[context_spec.key]
+        anchor_seed = seed_by_role[("anchor", context_spec.key, None)]
+        prepared = prepare_anchor(
+            context,
+            design_hash=qa_design_hash,
+            scenario_id=anchor_seed.scenario_id,
+            anchor_seed=anchor_seed.value,
+        )
+        estimable_mask = _prepared_all_edges_estimable_mask(
+            prepared,
+            min_snp=min_snp,
+        )
+        if int(estimable_mask.sum()) != context_spec.expected_calibrated_groups:
+            raise ValueError(
+                f"prepared all-edge group count differs from inventory: "
+                f"{context_spec.key}"
+            )
+        if context_evidence is not None:
+            evidence = context_evidence["contexts"][context_spec.key]
+            failed = tuple(
+                group_id
+                for group_id, passed in zip(
+                    prepared.context.family.group_ids,
+                    estimable_mask,
+                    strict=True,
+                )
+                if not passed
+            )
+            if failed != tuple(evidence["failed_group_ids"]):
+                raise ValueError(
+                    f"prepared all-edge failed-group identity differs: "
+                    f"{context_spec.key}"
+                )
+        prepared_by_context[context_spec.key] = prepared
+        samples_by_context[context_spec.key] = sample_ids
+        estimable_by_context[context_spec.key] = estimable_mask
+    return prepared_by_context, samples_by_context, estimable_by_context
+
+
 def materialize_bundle(
     verified: VerifiedMaterializationAuthority,
     *,
@@ -475,6 +570,17 @@ def materialize_bundle(
     if lock.exists():
         raise FileExistsError(f"materialization lock already exists: {lock}")
     loaded_contexts = _preflight_contexts(inventory.contexts, context_loader)
+    (
+        prepared_by_context,
+        samples_by_context,
+        estimable_by_context,
+    ) = _preflight_anchors(
+        inventory.contexts,
+        loaded_contexts,
+        seed_by_role,
+        qa_design_hash=verified.qa_design_hash,
+        context_evidence=context_evidence,
+    )
     root.parent.mkdir(parents=True, exist_ok=True)
     try:
         _write_json(
@@ -511,39 +617,13 @@ def materialize_bundle(
     anchor_records: list[dict[str, Any]] = []
     response_records: list[dict[str, Any]] = []
     config_records: list[dict[str, Any]] = []
-    prepared_by_context: dict[str, Any] = {}
-    samples_by_context: dict[str, tuple[str, ...]] = {}
 
     try:
         for context_spec in inventory.contexts:
-            context, sample_ids = loaded_contexts[context_spec.key]
+            prepared = prepared_by_context[context_spec.key]
+            sample_ids = samples_by_context[context_spec.key]
             anchor_seed = seed_by_role[("anchor", context_spec.key, None)]
-            prepared = prepare_anchor(
-                context,
-                design_hash=verified.qa_design_hash,
-                scenario_id=anchor_seed.scenario_id,
-                anchor_seed=anchor_seed.value,
-            )
-            estimable = int(np.asarray(prepared.scores.group_estimable, bool).sum())
-            if estimable != context_spec.expected_calibrated_groups:
-                raise ValueError(
-                    f"prepared group count differs from inventory: {context_spec.key}"
-                )
-            if context_evidence is not None:
-                evidence = context_evidence["contexts"][context_spec.key]
-                failed = tuple(
-                    group_id
-                    for group_id, passed in zip(
-                        prepared.context.family.group_ids,
-                        np.asarray(prepared.scores.group_estimable, bool),
-                        strict=True,
-                    )
-                    if not passed
-                )
-                if failed != tuple(evidence["failed_group_ids"]):
-                    raise ValueError(
-                        f"prepared failed-group identity differs: {context_spec.key}"
-                    )
+            estimable = int(estimable_by_context[context_spec.key].sum())
             row = anchor_layout[context_spec.key]
             arrays = {}
             for label, final_path, values in (
@@ -566,10 +646,16 @@ def materialize_bundle(
                 "anchor_seed_id": anchor_seed.seed_id,
                 "sample_ids": list(sample_ids),
                 "sample_count": len(sample_ids),
-                "marker_mask_sha256": context.marker_mask_sha256,
-                "marker_mask_identity": context.marker_mask_identity,
+                "marker_mask_sha256": prepared.context.marker_mask_sha256,
+                "marker_mask_identity": prepared.context.marker_mask_identity,
                 "expected_calibrated_groups": context_spec.expected_calibrated_groups,
                 "prepared_estimable_groups": estimable,
+                "prepared_any_edge_estimable_groups": int(
+                    np.asarray(prepared.scores.group_estimable, dtype=bool).sum()
+                ),
+                "prepared_partial_groups": int(
+                    np.asarray(prepared.scores.group_partial, dtype=bool).sum()
+                ),
                 "arrays": arrays,
                 "fit_identity": {
                     "feature_cache_sha256": prepared.scores.feature_cache_sha256,
@@ -595,9 +681,6 @@ def materialize_bundle(
                     "manifest_sha256": manifest_sha,
                 }
             )
-            prepared_by_context[context_spec.key] = prepared
-            samples_by_context[context_spec.key] = sample_ids
-
         for response_spec in inventory.responses:
             prepared = prepared_by_context[response_spec.context_key]
             response_seed = seed_by_role[
