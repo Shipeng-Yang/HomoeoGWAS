@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from . import SUCCESSOR_RUN_NAMESPACE
 from .authority import VerifiedMaterializationAuthority
 from .config import (
     build_interact_config,
@@ -274,6 +275,22 @@ def _validate_bundle_inputs(
         or {row.jobs for row in inventory.invocations} != {128}
     ):
         raise ValueError("materialization requires the exact 6/12/16 workers128 inventory")
+    namespace = verified.run_namespace
+    prefix = f"{namespace}."
+    if namespace != SUCCESSOR_RUN_NAMESPACE:
+        raise ValueError("verified materialization namespace is not v2")
+    if any(not row.response_id.startswith(prefix) for row in inventory.responses):
+        raise ValueError("response identity differs from verified v2 namespace")
+    if any(
+        not row.invocation_id.startswith(prefix) for row in inventory.invocations
+    ):
+        raise ValueError("invocation identity differs from verified v2 namespace")
+    if any(
+        not row.scenario_id.startswith(prefix)
+        or f":{row.scenario_id}:" not in row.seed_id
+        for row in seeds
+    ):
+        raise ValueError("seed identity differs from verified v2 namespace")
     layout = verified.inventory.get("design_payload", {}).get("future_artifacts")
     if not isinstance(layout, dict) or layout.get("root") != str(
         verified.artifact_root
@@ -564,7 +581,7 @@ def materialize_bundle(
             "schema": "homoeogwas-bm-native-qa-materialization-manifest-v2",
             "status": "MATERIALIZED_AWAITING_INDEPENDENT_PHYSICAL_REVIEW",
             "qa_design_hash": verified.qa_design_hash,
-            "run_namespace": "qa_real80_njobs128_v1",
+            "run_namespace": verified.run_namespace,
             "response_materialization_authorized": True,
             "execution_authorized": False,
             "authority_bindings": verified.binding_hashes,

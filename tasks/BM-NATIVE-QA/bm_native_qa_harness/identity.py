@@ -9,6 +9,7 @@ from typing import Any
 
 from scripts.benchmarks.v201.contracts import derive_seed, sha256_payload
 
+from . import SUCCESSOR_RUN_NAMESPACE
 from .plan import ProspectiveInventory
 from .policy import NATIVE_CAPS, canonical_interact
 
@@ -194,6 +195,7 @@ def freeze_successor_identity(
     worker_decision_sha256: str,
     runner_test_sha256s: Mapping[str, str],
     artifact_root: Path,
+    run_namespace: str,
 ) -> FrozenIdentity:
     """Freeze the reviewed workers128 successor without altering v1 behavior."""
 
@@ -201,13 +203,15 @@ def freeze_successor_identity(
     _require_sha256(worker_decision_sha256, "worker decision")
     if not artifact_root.is_absolute():
         raise IdentityError("successor artifact root must be absolute")
+    if run_namespace != SUCCESSOR_RUN_NAMESPACE:
+        raise IdentityError("successor run namespace is not the reviewed v2 identity")
     return freeze_identity(
         inventory,
         fixture_manifest_sha256=fixture_manifest_sha256,
         amendment_sha256=amendment_sha256,
         runner_test_sha256s=runner_test_sha256s,
         artifact_root=artifact_root,
-        run_namespace="qa_real80_njobs128_v1",
+        run_namespace=run_namespace,
         extra_bindings={
             "successor_design_sha256": successor_design_sha256,
             "worker_decision_sha256": worker_decision_sha256,

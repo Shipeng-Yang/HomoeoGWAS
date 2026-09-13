@@ -54,7 +54,7 @@ def _inventory(tmp_path: Path) -> plan.ProspectiveInventory:
     responses = tuple(
         plan.ResponseSpec(
             response_id=(
-                f"qa_real80_njobs128_v1.{context.panel_id}."
+                f"qa_real80_njobs128_v2.{context.panel_id}."
                 f"{context.sample_context}.{truth}"
             ),
             context_key=context.key,
@@ -96,13 +96,14 @@ def _verified(
     tmp_path: Path,
     inventory: plan.ProspectiveInventory,
 ) -> authority.VerifiedMaterializationAuthority:
-    artifact_root = tmp_path / "materialized" / "njobs128-v1"
+    artifact_root = tmp_path / "materialized" / "njobs128-v2"
     layout = identity._future_artifact_layout(
         inventory,
         root=str(artifact_root),
-        run_namespace="qa_real80_njobs128_v1",
+        run_namespace="qa_real80_njobs128_v2",
     )
     return authority.VerifiedMaterializationAuthority(
+        run_namespace="qa_real80_njobs128_v2",
         qa_design_hash="1" * 64,
         inventory={"design_payload": {"future_artifacts": layout}},
         artifact_root=artifact_root,
@@ -138,7 +139,7 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v1",
+        run_namespace="qa_real80_njobs128_v2",
     )
 
     manifest = bundle.materialize_bundle(
@@ -159,6 +160,15 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     physical = json.loads((root / "materialization-manifest.json").read_text())
     assert physical == manifest
     assert physical["execution_authorized"] is False
+    assert physical["run_namespace"] == "qa_real80_njobs128_v2"
+    assert all(
+        row["response_id"].startswith("qa_real80_njobs128_v2.")
+        for row in physical["responses"]
+    )
+    assert all(
+        row["invocation_id"].startswith("qa_real80_njobs128_v2.")
+        for row in physical["configs"]
+    )
     assert physical["authority_bindings"]["materialization_authority_sha256"] == (
         "2" * 64
     )
@@ -212,7 +222,7 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(tmp_path: Path) ->
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v1",
+        run_namespace="qa_real80_njobs128_v2",
     )
     calls = 0
 
@@ -231,7 +241,7 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(tmp_path: Path) ->
             context_loader=failing_loader,
         )
 
-    attempt = verified.artifact_root.parent / ".njobs128-v1.materialization-attempt"
+    attempt = verified.artifact_root.parent / ".njobs128-v2.materialization-attempt"
     assert not verified.artifact_root.exists()
     abort = json.loads((attempt / "materialization-abort.json").read_text())
     assert abort["qa_design_hash"] == verified.qa_design_hash
@@ -254,9 +264,9 @@ def test_bundle_refuses_preexisting_exclusive_lock(tmp_path: Path) -> None:
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v1",
+        run_namespace="qa_real80_njobs128_v2",
     )
-    lock = verified.artifact_root.parent / ".njobs128-v1.materialization-lock"
+    lock = verified.artifact_root.parent / ".njobs128-v2.materialization-lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("occupied\n", encoding="utf-8")
 

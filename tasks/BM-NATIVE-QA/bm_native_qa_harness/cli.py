@@ -6,20 +6,24 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import THREAD_ENV_NAMES, enforce_single_native_thread_before_imports
+
+__all__ = ["THREAD_ENV_NAMES", "enforce_single_native_thread_before_imports"]
+
 
 class CLIError(RuntimeError):
     """The requested orchestration stage is not prospectively authorized."""
 
 
 SUCCESSOR_DESIGN_SHA256 = (
-    "f2dfacc5181c504b420fa09835e32cea4c4229e28188a8d87533d4c778dda586"
+    "bf859b72f93818fda323239f0aef6b17e959e1c37760429b09fc9dfa65055e30"
 )
 WORKER_DECISION_SHA256 = (
     "ade451d2eaef49530011d1558d042bbce3fc2c2d3f6e9cea78c2bcb244c4e0e0"
 )
 MATERIALIZATION_AUTHORITY_PATH = Path(
     "/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/"
-    "QA-NJOBS128-RESPONSE-MATERIALIZATION-AUTHORIZATION-v1-20260913.yaml"
+    "QA-NJOBS128-RESPONSE-MATERIALIZATION-AUTHORIZATION-v2-20260913.yaml"
 )
 
 
@@ -302,6 +306,7 @@ def _write_plan(args: argparse.Namespace) -> None:
             worker_decision_sha256=str(decision_hash),
             runner_test_sha256s=runner_test_sha256s,
             artifact_root=artifact_root,
+            run_namespace=run_namespace,
         )
         schema = str(successor["successor_identity"]["prospective_inventory_schema"])
     design_payload = dict(frozen.design_payload)
@@ -406,7 +411,13 @@ def _require_rehydrated_identity(
 def _activate_materialization(args: argparse.Namespace, verified) -> None:
     """Import numerical code only after the complete authority rehash passes."""
 
-    from .authority import verify_loaded_numerical_origins
+    from .authority import (
+        verify_loaded_numerical_origins,
+        verify_runtime_dependencies,
+    )
+
+    verify_runtime_dependencies(verified)
+
     from .bundle import make_real_context_loader, materialize_bundle
     from .identity import freeze_successor_identity, sha256_file
     from .plan import bind_context_inputs, build_successor_inventory
@@ -446,6 +457,7 @@ def _activate_materialization(args: argparse.Namespace, verified) -> None:
         worker_decision_sha256=WORKER_DECISION_SHA256,
         runner_test_sha256s=verified.inventory["runner_test_sha256s"],
         artifact_root=verified.artifact_root,
+        run_namespace=verified.run_namespace,
     )
     _require_rehydrated_identity(
         frozen,
@@ -482,7 +494,17 @@ def main(argv: list[str] | None = None) -> int:
             _write_plan(args)
         elif args.command == "materialize" and args.authority is not None:
             verified = _verify_materialization_cli(args)
-            from .authority import verify_runtime_import_isolation
+            from .authority import (
+                verify_materialization_launch_contract,
+                verify_runtime_import_isolation,
+            )
+
+            verify_materialization_launch_contract(
+                verified,
+                task_root=Path(__file__).resolve().parents[1],
+                authority_path=args.authority,
+                out_path=args.out,
+            )
 
             verify_runtime_import_isolation(
                 verified,
@@ -491,7 +513,14 @@ def main(argv: list[str] | None = None) -> int:
             _activate_materialization(args, verified)
         else:
             _reject_closed_stage(args)
-    except (CLIError, FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
+    except (
+        CLIError,
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
         print(f"ERROR: bm-native-qa: {exc}", file=sys.stderr)
         return 2
     return 0

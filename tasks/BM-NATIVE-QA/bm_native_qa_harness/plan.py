@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import SUCCESSOR_RUN_NAMESPACE
+
 
 class PlanError(RuntimeError):
     """The prospective plan violates its accepted execution boundary."""
@@ -222,7 +224,7 @@ def build_successor_inventory(
 
     base = build_inventory(amendment)
     if successor.get("schema") != (
-        "homoeogwas-bm-native-qa-njobs128-successor-design-v1"
+        "homoeogwas-bm-native-qa-njobs128-successor-design-v2"
     ):
         raise PlanError("successor design schema is invalid")
     if successor.get("execution_authorized") is not False:
@@ -249,7 +251,7 @@ def build_successor_inventory(
     if rows != expected_rows:
         raise PlanError("successor context/replica rows differ from the reviewed design")
     namespace = identity.get("run_namespace")
-    if namespace != "qa_real80_njobs128_v1":
+    if namespace != SUCCESSOR_RUN_NAMESPACE:
         raise PlanError("successor run namespace differs from the reviewed design")
 
     contexts_by_identity = {

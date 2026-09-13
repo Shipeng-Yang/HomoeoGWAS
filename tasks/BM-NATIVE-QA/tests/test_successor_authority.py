@@ -41,8 +41,15 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     reverify.write_text(
         yaml.safe_dump(
             {
-                "schema": "homoeogwas-bm-native-qa-source-input-reverification-v2",
+                "schema": "homoeogwas-bm-native-qa-source-input-reverification-v3",
                 "status": "VERIFIED",
+                "runtime_dependencies": {
+                    "include_system_site_packages": False,
+                    "python_no_user_site": True,
+                    "required": [],
+                    "thread_environment": {},
+                    "threadpool_info": [],
+                },
                 "files": [
                     {
                         "path": str(bound_files["input.bin"]),
@@ -58,6 +65,12 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         "bm_native_qa_harness/runner.py": _sha256(runner),
         "tests/test_runner.py": _sha256(test),
     }
+    bound_files["review.md"].write_text(
+        "FINAL_CODE_REVIEW_VERDICT: ACCEPT\n"
+        "REVIEWED_RUNNER_TEST_MAPPING_SHA256: "
+        f"{authority._mapping_sha256(runner_hashes)}\n",
+        encoding="utf-8",
+    )
     design_payload = {
         "future_artifacts": {"root": str(tmp_path / "materialized")}
     }
@@ -66,7 +79,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     inventory.write_text(
         json.dumps(
             {
-                "schema": "homoeogwas-bm-native-qa-prospective-inventory-v2",
+                "schema": "homoeogwas-bm-native-qa-prospective-inventory-v3",
                 "response_materialization_authorized": False,
                 "execution_authorized": False,
                 "qa_design_hash": qa_design_hash,
@@ -93,10 +106,10 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     authority_path.write_text(
         yaml.safe_dump(
             {
-                "schema": "homoeogwas-bm-native-qa-materialization-authority-v1",
+                "schema": "homoeogwas-bm-native-qa-materialization-authority-v2",
                 "response_materialization_authorized": True,
                 "execution_authorized": False,
-                "run_namespace": "qa_real80_njobs128_v1",
+                "run_namespace": "qa_real80_njobs128_v2",
                 "successor_design_sha256": _sha256(bound_files["successor.yaml"]),
                 "decision_sha256": _sha256(bound_files["decision.md"]),
                 "qa_design_hash": qa_design_hash,
@@ -138,7 +151,8 @@ def test_authority_verifies_all_bindings_before_returning(tmp_path: Path) -> Non
     assert verified.qa_design_hash == authority._mapping_sha256(
         verified.inventory["design_payload"]
     )
-    assert verified.inventory["schema"].endswith("v2")
+    assert verified.run_namespace == "qa_real80_njobs128_v2"
+    assert verified.inventory["schema"].endswith("v3")
     assert verified.artifact_root == tmp_path / "materialized"
     assert verified.binding_hashes["materialization_authority_sha256"] == _sha256(
         authority_path
@@ -150,6 +164,156 @@ def test_authority_rehashes_reverified_files_and_fails_closed(tmp_path: Path) ->
     (tmp_path / "input.bin").write_text("changed\n", encoding="utf-8")
 
     with pytest.raises(authority.AuthorityBlocked, match="reverified file hash"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+def test_authority_distinguishes_reverification_schema_from_status(
+    tmp_path: Path,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    reverify_path = Path(record["paths"]["source_input_reverification"])
+    reverify = yaml.safe_load(reverify_path.read_text(encoding="utf-8"))
+    reverify["schema"] = "homoeogwas-bm-native-qa-source-input-reverification-v2"
+    reverify_path.write_text(yaml.safe_dump(reverify), encoding="utf-8")
+    record["source_input_reverification_sha256"] = _sha256(reverify_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="reverification schema"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+def test_authority_requires_review_to_bind_runner_mapping(tmp_path: Path) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    review_path = Path(record["paths"]["runner_review"])
+    review_path.write_text("FINAL_CODE_REVIEW_VERDICT: ACCEPT\n", encoding="utf-8")
+    record["runner_review_sha256"] = _sha256(review_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="runner/test mapping"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+def test_materialization_launch_contract_is_exact(tmp_path: Path) -> None:
+    task_root = tmp_path / "runtime-task-v2"
+    helper_root = tmp_path / "r3-source"
+    authority_path = tmp_path / "authority.yaml"
+    artifact_root = tmp_path / "materialized" / "njobs128-v2"
+    runtime = {
+        "harness_task_root": str(task_root),
+        "accepted_helper_source_root": str(helper_root),
+        "materialization_launch": {
+            "cwd": str(task_root),
+            "pythonpath": str(helper_root),
+            "python_no_user_site": True,
+            "argv": [
+                "materialize",
+                "--authority",
+                str(authority_path),
+                "--out",
+                str(artifact_root),
+            ],
+        },
+    }
+    verified = authority.VerifiedMaterializationAuthority(
+        run_namespace="qa_real80_njobs128_v2",
+        qa_design_hash="1" * 64,
+        inventory={},
+        artifact_root=artifact_root,
+        paths={},
+        binding_hashes={},
+        source_reverification={"runtime": runtime},
+    )
+
+    authority.verify_materialization_launch_contract(
+        verified,
+        task_root=task_root,
+        authority_path=authority_path,
+        out_path=artifact_root,
+        observed_cwd=task_root,
+        observed_pythonpath=str(helper_root),
+        observed_python_no_user_site="1",
+    )
+
+    runtime["materialization_launch"]["pythonpath"] = str(tmp_path / "wrong")
+    with pytest.raises(authority.AuthorityBlocked, match="launch contract"):
+        authority.verify_materialization_launch_contract(
+            verified,
+            task_root=task_root,
+            authority_path=authority_path,
+            out_path=artifact_root,
+            observed_cwd=task_root,
+            observed_pythonpath=str(helper_root),
+            observed_python_no_user_site="1",
+        )
+
+    runtime["materialization_launch"]["pythonpath"] = str(helper_root)
+    effective_mismatches = (
+        {
+            "observed_cwd": tmp_path / "wrong-cwd",
+            "observed_pythonpath": str(helper_root),
+            "observed_python_no_user_site": "1",
+        },
+        {
+            "observed_cwd": task_root,
+            "observed_pythonpath": str(helper_root) + ":" + str(tmp_path / "extra"),
+            "observed_python_no_user_site": "1",
+        },
+        {
+            "observed_cwd": task_root,
+            "observed_pythonpath": str(helper_root),
+            "observed_python_no_user_site": "0",
+        },
+    )
+    for mismatch in effective_mismatches:
+        with pytest.raises(authority.AuthorityBlocked, match="effective.*contract"):
+            authority.verify_materialization_launch_contract(
+                verified,
+                task_root=task_root,
+                authority_path=authority_path,
+                out_path=artifact_root,
+                **mismatch,
+            )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra"])
+def test_authority_rejects_inexact_runtime_dependency_key_set(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    reverify_path = Path(record["paths"]["source_input_reverification"])
+    reverify = yaml.safe_load(reverify_path.read_text(encoding="utf-8"))
+    dependencies = reverify["runtime_dependencies"]
+    if mutation == "missing":
+        dependencies.pop("threadpool_info")
+    else:
+        dependencies["unexpected"] = True
+    reverify_path.write_text(yaml.safe_dump(reverify), encoding="utf-8")
+    record["source_input_reverification_sha256"] = _sha256(reverify_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="record is incomplete"):
         authority.verify_materialization_authority(
             authority_path,
             expected_authority_path=authority_path,
@@ -274,6 +438,152 @@ def test_authority_rejects_any_v1_design_identity(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "forbidden"),
+    [
+        ("qa_design_hash", authority.FAILED_NJOBS128_V1_QA_DESIGN_HASH),
+        (
+            "prospective_inventory_sha256",
+            authority.FAILED_NJOBS128_V1_INVENTORY_SHA256,
+        ),
+    ],
+)
+def test_authority_rejects_failed_njobs128_v1_flat_identity(
+    tmp_path: Path,
+    field: str,
+    forbidden: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    payload = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    payload[field] = forbidden
+    authority_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="v1 identity"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "forbidden"),
+    [
+        (
+            "qa_design_hash",
+            "523194f359e8fc0f07c30d345d5cef9eb3968456c8890277fd6c2bbc3ea3eca2",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "584358ded7e8c7f3e028af5afac5834ee06fc4c85a1284bc6f966b039629dbb3",
+        ),
+        (
+            "qa_design_hash",
+            "383e6322c3cd6e7deccc8542f22f8a31d3e6638d92a0e03a62f1017542ff0c09",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "16b67d9030ce32cc8a67f3551640a7d7470063494b3155eb7ac1b8ef2c204d96",
+        ),
+        (
+            "qa_design_hash",
+            "8a527004528387f4872f31030a33d6b0129b81f2d891565e88974713fc41562e",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "c0361c4baab8b7b5ffe9781abb14c9305ed357c66625bdf595313e0c0ffa8e85",
+        ),
+    ],
+)
+def test_authority_rejects_rejected_v2_flat_identity(
+    tmp_path: Path,
+    field: str,
+    forbidden: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    payload = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    payload[field] = forbidden
+    authority_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="rejected v2 identity"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "prospective-inventory.njobs128-v2.pre-code-review-changes-required-20260913.json",
+        "prospective-inventory.njobs128-v2.design-delta-changes-required-20260913.json",
+        "prospective-inventory.njobs128-v2.second-design-delta-changes-required-20260913.json",
+    ],
+)
+def test_authority_rejects_rejected_v2_runner_mapping(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    inventory_path = Path(record["paths"]["prospective_inventory"])
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    rejected = json.loads(
+        (
+            Path("/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA")
+            / filename
+        ).read_text(encoding="utf-8")
+    )
+    rejected_mapping = rejected["runner_test_sha256s"]
+    inventory["runner_test_sha256s"] = rejected_mapping
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    record["runner_test_sha256s"] = rejected_mapping
+    record["prospective_inventory_sha256"] = _sha256(inventory_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="rejected v2 runner/test"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+def test_authority_rejects_failed_njobs128_v1_runner_mapping(tmp_path: Path) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    inventory_path = Path(record["paths"]["prospective_inventory"])
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    failed_inventory = json.loads(
+        (
+            Path("/mnt/7302share/fast_ysp/U7_GWAS")
+            / "tasks/BM-NATIVE-QA/prospective-inventory.njobs128-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    failed_mapping = failed_inventory["runner_test_sha256s"]
+    inventory["runner_test_sha256s"] = failed_mapping
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    record["runner_test_sha256s"] = failed_mapping
+    record["prospective_inventory_sha256"] = _sha256(inventory_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="v1 runner/test"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
 def test_authority_rejects_v1_runner_mapping_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -298,13 +608,9 @@ def test_authority_rejects_v1_runner_mapping_identity(
 
 def test_v1_runner_mapping_literal_matches_accepted_commit() -> None:
     raw = subprocess.check_output(
-        [
-            "git",
-            "show",
-            "3aa5e07f0c87575fae90463943b17ae141662cc1:"
-            "tasks/BM-NATIVE-QA/prospective-inventory.v1.json",
-        ],
-        cwd="/tmp/U7_GWAS-bm-native-qa-materialize-v1",
+        ["git", "show", "3aa5e07f0c87575fae90463943b17ae141662cc1:"
+         "tasks/BM-NATIVE-QA/prospective-inventory.v1.json"],
+        cwd=Path(__file__).resolve().parents[3],
         text=True,
     )
     mapping = json.loads(raw)["runner_test_sha256s"]
@@ -312,3 +618,57 @@ def test_v1_runner_mapping_literal_matches_accepted_commit() -> None:
     assert authority._mapping_sha256(mapping) == (
         authority.V1_RUNNER_TEST_MAPPING_SHA256
     )
+
+
+def test_failed_njobs128_v1_literals_match_preserved_inventory() -> None:
+    path = (
+        Path("/mnt/7302share/fast_ysp/U7_GWAS")
+        / "tasks/BM-NATIVE-QA/prospective-inventory.njobs128-v1.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert _sha256(path) == authority.FAILED_NJOBS128_V1_INVENTORY_SHA256
+    assert payload["qa_design_hash"] == authority.FAILED_NJOBS128_V1_QA_DESIGN_HASH
+    assert authority._mapping_sha256(payload["runner_test_sha256s"]) == (
+        authority.FAILED_NJOBS128_V1_RUNNER_TEST_MAPPING_SHA256
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "inventory_sha256", "qa_design_hash", "mapping_sha256"),
+    [
+        (
+            "prospective-inventory.njobs128-v2.pre-code-review-changes-required-20260913.json",
+            "584358ded7e8c7f3e028af5afac5834ee06fc4c85a1284bc6f966b039629dbb3",
+            "523194f359e8fc0f07c30d345d5cef9eb3968456c8890277fd6c2bbc3ea3eca2",
+            "41c01cce14bfb214cfb654af1e9ec14f48bfd9e7dd2317984a8373ec42e0efd3",
+        ),
+        (
+            "prospective-inventory.njobs128-v2.design-delta-changes-required-20260913.json",
+            "16b67d9030ce32cc8a67f3551640a7d7470063494b3155eb7ac1b8ef2c204d96",
+            "383e6322c3cd6e7deccc8542f22f8a31d3e6638d92a0e03a62f1017542ff0c09",
+            "6a59398b21e32228fb9456e11a8a71a9ea1bf41e2493b18a5ec201d260b94931",
+        ),
+        (
+            "prospective-inventory.njobs128-v2.second-design-delta-changes-required-20260913.json",
+            "c0361c4baab8b7b5ffe9781abb14c9305ed357c66625bdf595313e0c0ffa8e85",
+            "8a527004528387f4872f31030a33d6b0129b81f2d891565e88974713fc41562e",
+            "931c4b5cd88b960e971f7ebf37d3fe3231c73db68c28f9d4531acf3d5ba1fbca",
+        ),
+    ],
+)
+def test_rejected_v2_literals_match_preserved_inventories(
+    filename: str,
+    inventory_sha256: str,
+    qa_design_hash: str,
+    mapping_sha256: str,
+) -> None:
+    path = Path("/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA") / filename
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert _sha256(path) == inventory_sha256
+    assert payload["qa_design_hash"] == qa_design_hash
+    assert authority._mapping_sha256(payload["runner_test_sha256s"]) == mapping_sha256
+    assert qa_design_hash in authority.REJECTED_V2_QA_DESIGN_HASHES
+    assert inventory_sha256 in authority.REJECTED_V2_INVENTORY_SHA256S
+    assert mapping_sha256 in authority.REJECTED_V2_RUNNER_TEST_MAPPING_SHA256S
