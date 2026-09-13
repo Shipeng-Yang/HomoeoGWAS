@@ -58,8 +58,22 @@ def test_plan_cli_writes_stable_prospective_inventory_only(tmp_path: Path) -> No
     contexts = first_payload["design_payload"]["contexts"]
     cotton_hashes = dict(contexts[0]["input_file_sha256s"])
     wheat_hashes = dict(contexts[3]["input_file_sha256s"])
-    assert len(cotton_hashes) == 10
-    assert len(wheat_hashes) == 14
+    assert len(cotton_hashes) == 11
+    assert len(wheat_hashes) == 15
+    assert (
+        cotton_hashes[
+            "tasks/BM-INPUTS/staging/real-core-v1-candidate/"
+            "cotton_samples_1245.tsv"
+        ]
+        == "1e0e881e18a0ae978e928bf1da12f40cccf386bd1fb1a08f947a98bb0c6a41b4"
+    )
+    assert (
+        wheat_hashes[
+            "tasks/BM-INPUTS/staging/real-core-v1-candidate/"
+            "wheat_samples_827.tsv"
+        ]
+        == "31084f84fafd2f9205c5e027d1f1d39bb1e7288c30d598c90c5edb86a104dbf2"
+    )
     assert cotton_hashes[
         "/mnt/7302share/fast_ysp/U7_GWAS/results/viz_preview/"
         "fig3_cotton_locus/rescue_cgvd1245/A_cgvd.bed"

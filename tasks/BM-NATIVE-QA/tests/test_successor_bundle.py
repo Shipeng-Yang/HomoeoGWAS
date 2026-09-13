@@ -3,12 +3,39 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 from bm_native_qa_harness import authority, bundle, identity, plan
 
 from scripts.benchmarks.v201.track_omnib import build_synthetic_omnib_context
+
+
+def test_family_mapped_marker_counts_exclude_unmapped_bed_variants() -> None:
+    family = SimpleNamespace(
+        subgenomes=("A", "D"),
+        genes=(("gene_a1", "gene_d1"), ("gene_a2", "gene_d2")),
+    )
+    data = SimpleNamespace(
+        gene_snp={
+            "gene_a1": np.asarray([0, 2, 2], dtype=np.int64),
+            "gene_a2": np.asarray([3, 5], dtype=np.int64),
+        }
+    )
+    context = SimpleNamespace(
+        subdata={"A": data},
+        retained_variant_masks={
+            "A": np.asarray(
+                [True, True, False, True, True, False, True, True],
+                dtype=np.bool_,
+            )
+        },
+    )
+
+    assert int(context.retained_variant_masks["A"].sum()) == 6
+    assert bundle._family_mapped_marker_counts(context, family, "A") == (4, 2)
 
 
 def _inventory(tmp_path: Path) -> plan.ProspectiveInventory:
@@ -54,7 +81,7 @@ def _inventory(tmp_path: Path) -> plan.ProspectiveInventory:
     responses = tuple(
         plan.ResponseSpec(
             response_id=(
-                f"qa_real80_njobs128_v2.{context.panel_id}."
+                f"qa_real80_njobs128_v3.{context.panel_id}."
                 f"{context.sample_context}.{truth}"
             ),
             context_key=context.key,
@@ -96,14 +123,14 @@ def _verified(
     tmp_path: Path,
     inventory: plan.ProspectiveInventory,
 ) -> authority.VerifiedMaterializationAuthority:
-    artifact_root = tmp_path / "materialized" / "njobs128-v2"
+    artifact_root = tmp_path / "materialized" / "njobs128-v3"
     layout = identity._future_artifact_layout(
         inventory,
         root=str(artifact_root),
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
     )
     return authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
         qa_design_hash="1" * 64,
         inventory={"design_payload": {"future_artifacts": layout}},
         artifact_root=artifact_root,
@@ -139,7 +166,7 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
     )
 
     manifest = bundle.materialize_bundle(
@@ -160,13 +187,13 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     physical = json.loads((root / "materialization-manifest.json").read_text())
     assert physical == manifest
     assert physical["execution_authorized"] is False
-    assert physical["run_namespace"] == "qa_real80_njobs128_v2"
+    assert physical["run_namespace"] == "qa_real80_njobs128_v3"
     assert all(
-        row["response_id"].startswith("qa_real80_njobs128_v2.")
+        row["response_id"].startswith("qa_real80_njobs128_v3.")
         for row in physical["responses"]
     )
     assert all(
-        row["invocation_id"].startswith("qa_real80_njobs128_v2.")
+        row["invocation_id"].startswith("qa_real80_njobs128_v3.")
         for row in physical["configs"]
     )
     assert physical["authority_bindings"]["materialization_authority_sha256"] == (
@@ -216,32 +243,75 @@ def test_replica_identity_guard_rejects_any_scientific_difference() -> None:
         bundle.require_replica_identity(rows)
 
 
-def test_bundle_preserves_abort_diagnostics_and_forbids_retry(tmp_path: Path) -> None:
+def test_marker_count_failure_precedes_v3_lock_and_attempt(tmp_path: Path) -> None:
     inventory = _inventory(tmp_path)
     verified = _verified(tmp_path, inventory)
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
     )
     calls = 0
 
-    def failing_loader(context: plan.ContextSpec):
+    def marker_mismatch_loader(context: plan.ContextSpec):
         nonlocal calls
         calls += 1
         if calls == 2:
-            raise ValueError("fixture failure")
+            raise ValueError(
+                f"context retained marker count differs: {context.key}:A"
+            )
         return _synthetic_loader(context)
+
+    with pytest.raises(ValueError, match="retained marker count differs"):
+        bundle.materialize_bundle(
+            verified,
+            inventory=inventory,
+            seeds=seeds,
+            context_loader=marker_mismatch_loader,
+        )
+
+    assert calls == 2
+    assert not verified.artifact_root.exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v3.materialization-lock"
+    ).exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v3.materialization-attempt"
+    ).exists()
+
+
+def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _inventory(tmp_path)
+    verified = _verified(tmp_path, inventory)
+    seeds = identity.build_seed_ledger(
+        verified.qa_design_hash,
+        inventory,
+        run_namespace="qa_real80_njobs128_v3",
+    )
+    original_prepare_anchor = bundle.prepare_anchor
+    prepare_calls = 0
+
+    def failing_prepare_anchor(*args, **kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 2:
+            raise ValueError("fixture failure")
+        return original_prepare_anchor(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "prepare_anchor", failing_prepare_anchor)
 
     with pytest.raises(ValueError, match="fixture failure"):
         bundle.materialize_bundle(
             verified,
             inventory=inventory,
             seeds=seeds,
-            context_loader=failing_loader,
+            context_loader=_synthetic_loader,
         )
 
-    attempt = verified.artifact_root.parent / ".njobs128-v2.materialization-attempt"
+    attempt = verified.artifact_root.parent / ".njobs128-v3.materialization-attempt"
     assert not verified.artifact_root.exists()
     abort = json.loads((attempt / "materialization-abort.json").read_text())
     assert abort["qa_design_hash"] == verified.qa_design_hash
@@ -264,9 +334,9 @@ def test_bundle_refuses_preexisting_exclusive_lock(tmp_path: Path) -> None:
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
     )
-    lock = verified.artifact_root.parent / ".njobs128-v2.materialization-lock"
+    lock = verified.artifact_root.parent / ".njobs128-v3.materialization-lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("occupied\n", encoding="utf-8")
 

@@ -109,7 +109,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "schema": "homoeogwas-bm-native-qa-materialization-authority-v2",
                 "response_materialization_authorized": True,
                 "execution_authorized": False,
-                "run_namespace": "qa_real80_njobs128_v2",
+                "run_namespace": "qa_real80_njobs128_v3",
                 "successor_design_sha256": _sha256(bound_files["successor.yaml"]),
                 "decision_sha256": _sha256(bound_files["decision.md"]),
                 "qa_design_hash": qa_design_hash,
@@ -151,7 +151,7 @@ def test_authority_verifies_all_bindings_before_returning(tmp_path: Path) -> Non
     assert verified.qa_design_hash == authority._mapping_sha256(
         verified.inventory["design_payload"]
     )
-    assert verified.run_namespace == "qa_real80_njobs128_v2"
+    assert verified.run_namespace == "qa_real80_njobs128_v3"
     assert verified.inventory["schema"].endswith("v3")
     assert verified.artifact_root == tmp_path / "materialized"
     assert verified.binding_hashes["materialization_authority_sha256"] == _sha256(
@@ -214,10 +214,10 @@ def test_authority_requires_review_to_bind_runner_mapping(tmp_path: Path) -> Non
 
 
 def test_materialization_launch_contract_is_exact(tmp_path: Path) -> None:
-    task_root = tmp_path / "runtime-task-v2"
+    task_root = tmp_path / "runtime-task-v3"
     helper_root = tmp_path / "r3-source"
     authority_path = tmp_path / "authority.yaml"
-    artifact_root = tmp_path / "materialized" / "njobs128-v2"
+    artifact_root = tmp_path / "materialized" / "njobs128-v3"
     runtime = {
         "harness_task_root": str(task_root),
         "accepted_helper_source_root": str(helper_root),
@@ -235,7 +235,7 @@ def test_materialization_launch_contract_is_exact(tmp_path: Path) -> None:
         },
     }
     verified = authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v2",
+        run_namespace="qa_real80_njobs128_v3",
         qa_design_hash="1" * 64,
         inventory={},
         artifact_root=artifact_root,
@@ -495,6 +495,14 @@ def test_authority_rejects_failed_njobs128_v1_flat_identity(
             "prospective_inventory_sha256",
             "c0361c4baab8b7b5ffe9781abb14c9305ed357c66625bdf595313e0c0ffa8e85",
         ),
+        (
+            "qa_design_hash",
+            "62c8cd9a1ca3ccbfae8664813cb34c3b0166ba74efd00b738a4645b565172b75",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "177a7db1104ba907eb78a9eca4be5bb2713046ce2fcc37061299871f21a79bc6",
+        ),
     ],
 )
 def test_authority_rejects_rejected_v2_flat_identity(
@@ -523,6 +531,7 @@ def test_authority_rejects_rejected_v2_flat_identity(
         "prospective-inventory.njobs128-v2.pre-code-review-changes-required-20260913.json",
         "prospective-inventory.njobs128-v2.design-delta-changes-required-20260913.json",
         "prospective-inventory.njobs128-v2.second-design-delta-changes-required-20260913.json",
+        "prospective-inventory.njobs128-v2.json",
     ],
 )
 def test_authority_rejects_rejected_v2_runner_mapping(
@@ -547,6 +556,78 @@ def test_authority_rejects_rejected_v2_runner_mapping(
     authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
 
     with pytest.raises(authority.AuthorityBlocked, match="rejected v2 runner/test"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "forbidden"),
+    [
+        (
+            "qa_design_hash",
+            "a78e2eca7ee9beab05d83167ac2b051b8db02d10b428cf08251d7852e56f1968",
+        ),
+        (
+            "prospective_inventory_sha256",
+            "9470941e68661f32a583fb04c72dd6aacdb5c6f35dc5f0aa6f1a5ca677150662",
+        ),
+    ],
+)
+def test_authority_rejects_rejected_v3_flat_identity(
+    tmp_path: Path,
+    field: str,
+    forbidden: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    payload = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    payload[field] = forbidden
+    authority_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="rejected v3 identity"):
+        authority.verify_materialization_authority(
+            authority_path,
+            expected_authority_path=authority_path,
+            task_root=task_root,
+            expected_successor_design_sha256=_sha256(tmp_path / "successor.yaml"),
+            expected_worker_decision_sha256=_sha256(tmp_path / "decision.md"),
+        )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "prospective-inventory.njobs128-v3.pre-code-review-changes-required-20260913.json",
+        "prospective-inventory.njobs128-v3.pre-real-context-preflight-failure-20260913.json",
+        "prospective-inventory.njobs128-v3.pre-rejected-v3-identity-gate-20260913.json",
+    ],
+)
+def test_authority_rejects_rejected_v3_runner_mapping(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    authority_path, task_root = _write_fixture(tmp_path)
+    record = yaml.safe_load(authority_path.read_text(encoding="utf-8"))
+    inventory_path = Path(record["paths"]["prospective_inventory"])
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    rejected = json.loads(
+        (
+            Path("/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA")
+            / filename
+        ).read_text(encoding="utf-8")
+    )
+    rejected_mapping = rejected["runner_test_sha256s"]
+    inventory["runner_test_sha256s"] = rejected_mapping
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    record["runner_test_sha256s"] = rejected_mapping
+    record["prospective_inventory_sha256"] = _sha256(inventory_path)
+    authority_path.write_text(yaml.safe_dump(record), encoding="utf-8")
+
+    with pytest.raises(authority.AuthorityBlocked, match="rejected v3 runner/test"):
         authority.verify_materialization_authority(
             authority_path,
             expected_authority_path=authority_path,
@@ -655,6 +736,12 @@ def test_failed_njobs128_v1_literals_match_preserved_inventory() -> None:
             "8a527004528387f4872f31030a33d6b0129b81f2d891565e88974713fc41562e",
             "931c4b5cd88b960e971f7ebf37d3fe3231c73db68c28f9d4531acf3d5ba1fbca",
         ),
+        (
+            "prospective-inventory.njobs128-v2.json",
+            "177a7db1104ba907eb78a9eca4be5bb2713046ce2fcc37061299871f21a79bc6",
+            "62c8cd9a1ca3ccbfae8664813cb34c3b0166ba74efd00b738a4645b565172b75",
+            "13d8ef76a5e2c3bb9031c825ed485f761987189499393f875a80bfdcbfef9dbe",
+        ),
     ],
 )
 def test_rejected_v2_literals_match_preserved_inventories(
@@ -672,3 +759,43 @@ def test_rejected_v2_literals_match_preserved_inventories(
     assert qa_design_hash in authority.REJECTED_V2_QA_DESIGN_HASHES
     assert inventory_sha256 in authority.REJECTED_V2_INVENTORY_SHA256S
     assert mapping_sha256 in authority.REJECTED_V2_RUNNER_TEST_MAPPING_SHA256S
+
+
+@pytest.mark.parametrize(
+    ("filename", "inventory_sha256", "qa_design_hash", "mapping_sha256"),
+    [
+        (
+            "prospective-inventory.njobs128-v3.pre-code-review-changes-required-20260913.json",
+            "9470941e68661f32a583fb04c72dd6aacdb5c6f35dc5f0aa6f1a5ca677150662",
+            "a78e2eca7ee9beab05d83167ac2b051b8db02d10b428cf08251d7852e56f1968",
+            "af2328831e45d5903700381fd5960e883074d1f6da4e67f7ea0e1c1299e27800",
+        ),
+        (
+            "prospective-inventory.njobs128-v3.pre-real-context-preflight-failure-20260913.json",
+            "ed97d365a0b5f0cde7d4997ced0753ab44a14bb1cda4da758316569cc0c976db",
+            "f741abbd968bb76bd56340cf715a0cc7031119388cb0de6d95d7b44cae5eaf7e",
+            "d0bd1cc0a9c12dfd0b4b8aa0acadc0470a18b304a0fe891baa748de1d4e661fd",
+        ),
+        (
+            "prospective-inventory.njobs128-v3.pre-rejected-v3-identity-gate-20260913.json",
+            "1408fe7e9d5846cc7d785bda6d66be981b4f48346ca7de8903bb4fe3415a675b",
+            "0b668c77c6792d566a18bc068564ec7736b177ad50105199e3f9490aed5b77fa",
+            "13261cc62cdd3e9396f9a6cf236a3291fcec0f4735b82ab6f96401fb9c588482",
+        ),
+    ],
+)
+def test_rejected_v3_literals_match_preserved_inventories(
+    filename: str,
+    inventory_sha256: str,
+    qa_design_hash: str,
+    mapping_sha256: str,
+) -> None:
+    path = Path("/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA") / filename
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert _sha256(path) == inventory_sha256
+    assert payload["qa_design_hash"] == qa_design_hash
+    assert authority._mapping_sha256(payload["runner_test_sha256s"]) == mapping_sha256
+    assert qa_design_hash in authority.REJECTED_V3_QA_DESIGN_HASHES
+    assert inventory_sha256 in authority.REJECTED_V3_INVENTORY_SHA256S
+    assert mapping_sha256 in authority.REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S

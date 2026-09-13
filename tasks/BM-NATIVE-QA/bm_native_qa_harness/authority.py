@@ -47,6 +47,7 @@ REJECTED_V2_QA_DESIGN_HASHES = frozenset(
         "523194f359e8fc0f07c30d345d5cef9eb3968456c8890277fd6c2bbc3ea3eca2",
         "383e6322c3cd6e7deccc8542f22f8a31d3e6638d92a0e03a62f1017542ff0c09",
         "8a527004528387f4872f31030a33d6b0129b81f2d891565e88974713fc41562e",
+        "62c8cd9a1ca3ccbfae8664813cb34c3b0166ba74efd00b738a4645b565172b75",
     }
 )
 REJECTED_V2_INVENTORY_SHA256S = frozenset(
@@ -54,6 +55,7 @@ REJECTED_V2_INVENTORY_SHA256S = frozenset(
         "584358ded7e8c7f3e028af5afac5834ee06fc4c85a1284bc6f966b039629dbb3",
         "16b67d9030ce32cc8a67f3551640a7d7470063494b3155eb7ac1b8ef2c204d96",
         "c0361c4baab8b7b5ffe9781abb14c9305ed357c66625bdf595313e0c0ffa8e85",
+        "177a7db1104ba907eb78a9eca4be5bb2713046ce2fcc37061299871f21a79bc6",
     }
 )
 REJECTED_V2_RUNNER_TEST_MAPPING_SHA256S = frozenset(
@@ -61,6 +63,28 @@ REJECTED_V2_RUNNER_TEST_MAPPING_SHA256S = frozenset(
         "41c01cce14bfb214cfb654af1e9ec14f48bfd9e7dd2317984a8373ec42e0efd3",
         "6a59398b21e32228fb9456e11a8a71a9ea1bf41e2493b18a5ec201d260b94931",
         "931c4b5cd88b960e971f7ebf37d3fe3231c73db68c28f9d4531acf3d5ba1fbca",
+        "13d8ef76a5e2c3bb9031c825ed485f761987189499393f875a80bfdcbfef9dbe",
+    }
+)
+REJECTED_V3_QA_DESIGN_HASHES = frozenset(
+    {
+        "a78e2eca7ee9beab05d83167ac2b051b8db02d10b428cf08251d7852e56f1968",
+        "f741abbd968bb76bd56340cf715a0cc7031119388cb0de6d95d7b44cae5eaf7e",
+        "0b668c77c6792d566a18bc068564ec7736b177ad50105199e3f9490aed5b77fa",
+    }
+)
+REJECTED_V3_INVENTORY_SHA256S = frozenset(
+    {
+        "9470941e68661f32a583fb04c72dd6aacdb5c6f35dc5f0aa6f1a5ca677150662",
+        "ed97d365a0b5f0cde7d4997ced0753ab44a14bb1cda4da758316569cc0c976db",
+        "1408fe7e9d5846cc7d785bda6d66be981b4f48346ca7de8903bb4fe3415a675b",
+    }
+)
+REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S = frozenset(
+    {
+        "af2328831e45d5903700381fd5960e883074d1f6da4e67f7ea0e1c1299e27800",
+        "d0bd1cc0a9c12dfd0b4b8aa0acadc0470a18b304a0fe891baa748de1d4e661fd",
+        "13261cc62cdd3e9396f9a6cf236a3291fcec0f4735b82ab6f96401fb9c588482",
     }
 )
 ACCEPTED_PRODUCT_COMMIT = "9d7faee655c020d84bdd6a6fba33b42a8428aea6"
@@ -692,6 +716,12 @@ def verify_materialization_authority(
         in REJECTED_V2_INVENTORY_SHA256S
     ):
         raise AuthorityBlocked("rejected v2 identity is forbidden")
+    if (
+        hashes["qa_design_hash"] in REJECTED_V3_QA_DESIGN_HASHES
+        or hashes["prospective_inventory_sha256"]
+        in REJECTED_V3_INVENTORY_SHA256S
+    ):
+        raise AuthorityBlocked("rejected v3 identity is forbidden")
     if hashes["successor_design_sha256"] != expected_successor_design_sha256:
         raise AuthorityBlocked("successor design hash is not the reviewed identity")
     if hashes["decision_sha256"] != expected_worker_decision_sha256:
@@ -730,7 +760,7 @@ def verify_materialization_authority(
 
     inventory = _mapping(paths["prospective_inventory"], json_format=True)
     if inventory.get("schema") != "homoeogwas-bm-native-qa-prospective-inventory-v3":
-        raise AuthorityBlocked("prospective inventory is not successor v2")
+        raise AuthorityBlocked("prospective inventory is not the active successor")
     if inventory.get("response_materialization_authorized") is not False or (
         inventory.get("execution_authorized") is not False
     ):
@@ -778,6 +808,8 @@ def verify_materialization_authority(
         raise AuthorityBlocked("v1 runner/test identity is forbidden")
     if runner_mapping_sha256 in REJECTED_V2_RUNNER_TEST_MAPPING_SHA256S:
         raise AuthorityBlocked("rejected v2 runner/test identity is forbidden")
+    if runner_mapping_sha256 in REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S:
+        raise AuthorityBlocked("rejected v3 runner/test identity is forbidden")
     root = task_root.resolve()
     observed_members = enumerate_runner_test_sources(root)
     if set(observed_members) != set(authority_runner_hashes):

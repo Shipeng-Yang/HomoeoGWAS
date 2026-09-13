@@ -204,7 +204,9 @@ def freeze_successor_identity(
     if not artifact_root.is_absolute():
         raise IdentityError("successor artifact root must be absolute")
     if run_namespace != SUCCESSOR_RUN_NAMESPACE:
-        raise IdentityError("successor run namespace is not the reviewed v2 identity")
+        raise IdentityError(
+            "successor run namespace is not the reviewed active identity"
+        )
     return freeze_identity(
         inventory,
         fixture_manifest_sha256=fixture_manifest_sha256,

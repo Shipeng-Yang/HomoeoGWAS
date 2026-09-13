@@ -62,6 +62,7 @@ def bind_context_inputs(
     contexts: list[ContextSpec] = []
     for context in inventory.contexts:
         copies = evidence_contexts[context.key]["copies"]
+        source_samples = _source_sample_record(context, context_evidence)
         subgenomes = tuple(str(label) for label in copies)
         declared_paths = declared_context_input_paths(context, context_evidence)
         bound_hashes: tuple[tuple[str, str], ...] = ()
@@ -77,6 +78,10 @@ def bind_context_inputs(
                 raise PlanError("prospective groups hash differs from amendment")
             if hashes[str(context.samples_path)] != context.samples_sha256:
                 raise PlanError("prospective samples hash differs from amendment")
+            if hashes[str(source_samples["samples_path"])] != str(
+                source_samples["samples_sha256"]
+            ):
+                raise PlanError("prospective source sample manifest hash differs")
         contexts.append(
             replace(
                 context,
@@ -94,12 +99,32 @@ def bind_context_inputs(
     return replace(inventory, contexts=tuple(contexts))
 
 
+def _source_sample_record(
+    context: ContextSpec,
+    context_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    panel = context.key.split(".", 1)[0]
+    record = context_evidence.get("contexts", {}).get(f"{panel}.full")
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("samples_path"), str)
+        or not isinstance(record.get("samples_sha256"), str)
+    ):
+        raise PlanError(f"missing source sample manifest evidence: {panel}")
+    return record
+
+
 def declared_context_input_paths(
     context: ContextSpec,
     context_evidence: dict[str, Any],
 ) -> tuple[str, ...]:
     copies = context_evidence["contexts"][context.key]["copies"]
-    paths = [str(context.groups_path), str(context.samples_path)]
+    source_samples = _source_sample_record(context, context_evidence)
+    paths = [
+        str(context.groups_path),
+        str(context.samples_path),
+        str(source_samples["samples_path"]),
+    ]
     for label in copies:
         bed = Path(copies[label]["bed"])
         if bed.suffix != ".bed":
