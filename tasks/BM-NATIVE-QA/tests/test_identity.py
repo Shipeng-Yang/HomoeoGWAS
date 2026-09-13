@@ -105,6 +105,19 @@ def test_seed_ledger_rejects_role_collision(amendment: dict, monkeypatch) -> Non
         identity.build_seed_ledger("0" * 64, build_inventory(amendment))
 
 
+def test_extra_identity_bindings_cannot_replace_frozen_science(
+    amendment: dict,
+) -> None:
+    with pytest.raises(identity.IdentityError, match="collide"):
+        identity.freeze_identity(
+            build_inventory(amendment),
+            fixture_manifest_sha256="a" * 64,
+            amendment_sha256="b" * 64,
+            runner_test_sha256s={"runner.py": "c" * 64},
+            extra_bindings={"canonical_interact": {}},
+        )
+
+
 def test_sha256_file_hashes_exact_bytes(tmp_path: Path) -> None:
     path = tmp_path / "member.bin"
     path.write_bytes(b"abc")

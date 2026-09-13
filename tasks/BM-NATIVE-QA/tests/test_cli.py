@@ -164,3 +164,34 @@ def test_runner_hash_inventory_includes_nested_python_sources(tmp_path: Path) ->
         "bm_native_qa_harness/nested/worker.py",
         "tests/nested/test_worker.py",
     }
+
+
+def test_invalid_successor_authority_stops_before_numerical_imports(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    candidate = tmp_path / "authority.yaml"
+    candidate.write_text("response_materialization_authorized: true\n", encoding="utf-8")
+    imported = []
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "numpy" or name.startswith(("homoeogwas", "scripts.benchmarks")):
+            imported.append(name)
+            raise AssertionError(f"authority preflight imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert cli.main(
+        [
+            "materialize",
+            "--authority",
+            str(candidate),
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    ) != 0
+    assert "exact reviewed path" in capsys.readouterr().err
+    assert imported == []

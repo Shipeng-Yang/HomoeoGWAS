@@ -133,7 +133,11 @@ def _require_number(record: Mapping[str, Any], field: str) -> float:
     return numeric
 
 
-def evaluate_static_preflight(record: Mapping[str, Any]) -> StaticPreflight:
+def evaluate_static_preflight(
+    record: Mapping[str, Any],
+    *,
+    mem_available_floor_gib: int = 128,
+) -> StaticPreflight:
     """Evaluate only recorded host availability and supervisor configuration."""
 
     allowed = {
@@ -164,8 +168,17 @@ def evaluate_static_preflight(record: Mapping[str, Any]) -> StaticPreflight:
     mem_available = _require_number(record, "mem_available_bytes")
     output_free = _require_number(record, "output_filesystem_free_bytes")
     _require_number(record, "temporary_filesystem_free_bytes")
-    if mem_available < 128 * _GIB:
-        raise ExecutionBlocked("static preflight MemAvailable is below 128 GiB")
+    if (
+        isinstance(mem_available_floor_gib, bool)
+        or not isinstance(mem_available_floor_gib, int)
+        or mem_available_floor_gib < 1
+    ):
+        raise ExecutionBlocked("static preflight MemAvailable floor is invalid")
+    if mem_available < mem_available_floor_gib * _GIB:
+        raise ExecutionBlocked(
+            "static preflight MemAvailable is below "
+            f"{mem_available_floor_gib} GiB"
+        )
     if output_free < 20 * _GIB:
         raise ExecutionBlocked("static preflight output filesystem is below 20 GiB")
     if record.get("output_root_exists") is not False:
@@ -188,6 +201,14 @@ def evaluate_static_preflight(record: Mapping[str, Any]) -> StaticPreflight:
         record=MappingProxyType(normalized),
         record_sha256=sha256_payload(normalized),
     )
+
+
+def evaluate_successor_static_preflight(
+    record: Mapping[str, Any],
+) -> StaticPreflight:
+    """Apply the reviewed workers128 successor admission floor."""
+
+    return evaluate_static_preflight(record, mem_available_floor_gib=192)
 
 
 def _validate_resource_sample(sample: ResourceSample) -> None:

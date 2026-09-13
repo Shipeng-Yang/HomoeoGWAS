@@ -11,6 +11,18 @@ class CLIError(RuntimeError):
     """The requested orchestration stage is not prospectively authorized."""
 
 
+SUCCESSOR_DESIGN_SHA256 = (
+    "f2dfacc5181c504b420fa09835e32cea4c4229e28188a8d87533d4c778dda586"
+)
+WORKER_DECISION_SHA256 = (
+    "ade451d2eaef49530011d1558d042bbce3fc2c2d3f6e9cea78c2bcb244c4e0e0"
+)
+MATERIALIZATION_AUTHORITY_PATH = Path(
+    "/mnt/7302share/fast_ysp/U7_GWAS/tasks/BM-NATIVE-QA/"
+    "QA-NJOBS128-RESPONSE-MATERIALIZATION-AUTHORIZATION-v1-20260913.yaml"
+)
+
+
 def _ensure_repo_import_root() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     if str(repo_root) not in sys.path:
@@ -24,11 +36,15 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--amendment", type=Path, required=True)
     plan.add_argument("--context-evidence", type=Path, required=True)
     plan.add_argument("--fixture-manifest", type=Path, required=True)
+    plan.add_argument("--successor-design", type=Path)
     plan.add_argument("--out", type=Path, required=True)
-    for name in ("materialize", "run"):
-        command = subparsers.add_parser(name)
-        command.add_argument("--amendment", type=Path, required=True)
-        command.add_argument("--out", type=Path, required=True)
+    materialize = subparsers.add_parser("materialize")
+    materialize.add_argument("--authority", type=Path)
+    materialize.add_argument("--amendment", type=Path)
+    materialize.add_argument("--out", type=Path, required=True)
+    run = subparsers.add_parser("run")
+    run.add_argument("--amendment", type=Path, required=True)
+    run.add_argument("--out", type=Path, required=True)
     return parser
 
 
@@ -49,21 +65,20 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _runner_test_sha256s(task_root: Path) -> dict[str, str]:
+    from .authority import enumerate_runner_test_sources
     from .identity import sha256_file
 
-    members = sorted(
-        (*task_root.joinpath("bm_native_qa_harness").rglob("*.py"),)
-        + (*task_root.joinpath("tests").rglob("*.py"),),
-        key=lambda path: path.relative_to(task_root).as_posix(),
-    )
-    if not members:
-        raise CLIError("runner/test source inventory is empty")
+    members = enumerate_runner_test_sources(task_root)
     return {
-        path.relative_to(task_root).as_posix(): sha256_file(path) for path in members
+        relative: sha256_file(members[relative]) for relative in sorted(members)
     }
 
 
-def _seed_derivations(inventory) -> list[dict[str, object]]:
+def _seed_derivations(
+    inventory,
+    *,
+    run_namespace: str = "qa_real80_v4",
+) -> list[dict[str, object]]:
     derivations: list[dict[str, object]] = []
     responses_by_context = {
         context.key: tuple(
@@ -74,7 +89,7 @@ def _seed_derivations(inventory) -> list[dict[str, object]]:
         for context in inventory.contexts
     }
     for context in inventory.contexts:
-        base = f"qa_real80_v4.{context.panel_id}.{context.sample_context}"
+        base = f"{run_namespace}.{context.panel_id}.{context.sample_context}"
         derivations.append(
             {
                 "purpose": "anchor",
@@ -202,9 +217,10 @@ def _prospective_input_hashes(
 
 
 def _write_plan(args: argparse.Namespace) -> None:
-    _ensure_repo_import_root()
-    from .identity import freeze_identity, sha256_file
-    from .plan import bind_context_inputs, build_inventory
+    if args.successor_design is None:
+        _ensure_repo_import_root()
+    from .identity import freeze_identity, freeze_successor_identity, sha256_file
+    from .plan import bind_context_inputs, build_inventory, build_successor_inventory
 
     amendment = _load_yaml(args.amendment)
     _validate_amendment_acceptance(amendment, args.amendment)
@@ -230,8 +246,34 @@ def _write_plan(args: argparse.Namespace) -> None:
 
     task_root = Path(__file__).resolve().parents[1]
     runner_test_sha256s = _runner_test_sha256s(task_root)
-    inventory = build_inventory(amendment)
     project_root = args.amendment.parent.parent.parent
+    successor = None
+    successor_hash = None
+    decision_hash = None
+    run_namespace = "qa_real80_v4"
+    if args.successor_design is None:
+        inventory = build_inventory(amendment)
+    else:
+        successor_hash = sha256_file(args.successor_design)
+        if successor_hash != SUCCESSOR_DESIGN_SHA256:
+            raise CLIError("successor design differs from the independently accepted bytes")
+        successor = _load_yaml(args.successor_design)
+        superseded = successor["supersedes_for_future_materialization"]
+        base_binding = superseded["base_amendment"]
+        if sha256_file(args.amendment) != base_binding.get("sha256"):
+            raise CLIError("amendment differs from the successor design binding")
+        decision = successor["authority"]["global_worker_override"]
+        decision_path = Path(str(decision["decision_path"]))
+        if not decision_path.is_absolute():
+            decision_path = project_root / decision_path
+        decision_hash = sha256_file(decision_path)
+        if (
+            decision_hash != WORKER_DECISION_SHA256
+            or decision_hash != decision.get("decision_sha256")
+        ):
+            raise CLIError("worker decision differs from the successor design binding")
+        run_namespace = str(successor["successor_identity"]["run_namespace"])
+        inventory = build_successor_inventory(amendment, successor)
     input_file_sha256s = _prospective_input_hashes(
         inventory,
         context_evidence,
@@ -242,17 +284,31 @@ def _write_plan(args: argparse.Namespace) -> None:
         context_evidence,
         input_file_sha256s,
     )
-    frozen = freeze_identity(
-        inventory,
-        fixture_manifest_sha256=fixture_hash,
-        amendment_sha256=sha256_file(args.amendment),
-        runner_test_sha256s=runner_test_sha256s,
-    )
+    if successor is None:
+        frozen = freeze_identity(
+            inventory,
+            fixture_manifest_sha256=fixture_hash,
+            amendment_sha256=sha256_file(args.amendment),
+            runner_test_sha256s=runner_test_sha256s,
+        )
+        schema = "homoeogwas-bm-native-qa-prospective-inventory-v1"
+    else:
+        artifact_root = Path(str(successor["successor_identity"]["artifact_root"]))
+        frozen = freeze_successor_identity(
+            inventory,
+            fixture_manifest_sha256=fixture_hash,
+            amendment_sha256=sha256_file(args.amendment),
+            successor_design_sha256=str(successor_hash),
+            worker_decision_sha256=str(decision_hash),
+            runner_test_sha256s=runner_test_sha256s,
+            artifact_root=artifact_root,
+        )
+        schema = str(successor["successor_identity"]["prospective_inventory_schema"])
     design_payload = dict(frozen.design_payload)
     future_artifacts = design_payload["future_artifacts"]
     assert isinstance(future_artifacts, dict)
     payload = {
-        "schema": "homoeogwas-bm-native-qa-prospective-inventory-v1",
+        "schema": schema,
         "status": "prospective_only_no_generated_values",
         "response_materialization_authorized": False,
         "execution_authorized": False,
@@ -272,9 +328,19 @@ def _write_plan(args: argparse.Namespace) -> None:
         },
         "runner_test_sha256s": runner_test_sha256s,
         "design_payload": design_payload,
-        "seed_derivations": _seed_derivations(inventory),
+        "seed_derivations": _seed_derivations(
+            inventory,
+            run_namespace=run_namespace,
+        ),
         "semantic_invocations": _semantic_invocations(inventory, design_payload),
     }
+    if successor_hash is not None and decision_hash is not None:
+        payload["source_bindings"].update(
+            {
+                "successor_design_sha256": successor_hash,
+                "worker_decision_sha256": decision_hash,
+            }
+        )
     text = json.dumps(
         payload,
         sort_keys=True,
@@ -290,6 +356,8 @@ def _write_plan(args: argparse.Namespace) -> None:
 
 
 def _reject_closed_stage(args: argparse.Namespace) -> None:
+    if args.amendment is None:
+        raise CLIError("materialize requires the exact reviewed authority file")
     amendment = _load_yaml(args.amendment)
     flag = (
         "response_materialization_authorized"
@@ -301,14 +369,129 @@ def _reject_closed_stage(args: argparse.Namespace) -> None:
     raise CLIError(f"{args.command} stage lacks a separately reviewed activation adapter")
 
 
+def _verify_materialization_cli(args: argparse.Namespace):
+    from .authority import AuthorityBlocked, verify_materialization_authority
+
+    if args.authority is None:
+        _reject_closed_stage(args)
+    try:
+        return verify_materialization_authority(
+            args.authority,
+            expected_authority_path=MATERIALIZATION_AUTHORITY_PATH,
+            task_root=Path(__file__).resolve().parents[1],
+            expected_successor_design_sha256=SUCCESSOR_DESIGN_SHA256,
+            expected_worker_decision_sha256=WORKER_DECISION_SHA256,
+        )
+    except AuthorityBlocked as exc:
+        raise CLIError(str(exc)) from exc
+
+
+def _require_rehydrated_identity(
+    frozen,
+    *,
+    qa_design_hash: str,
+    inventory_payload: object,
+) -> None:
+    from .authority import _mapping_sha256
+
+    if (
+        frozen.qa_design_hash != qa_design_hash
+        or not isinstance(inventory_payload, dict)
+        or _mapping_sha256(frozen.design_payload)
+        != _mapping_sha256(inventory_payload)
+    ):
+        raise CLIError("rehydrated successor identity differs from frozen inventory")
+
+
+def _activate_materialization(args: argparse.Namespace, verified) -> None:
+    """Import numerical code only after the complete authority rehash passes."""
+
+    from .authority import verify_loaded_numerical_origins
+    from .bundle import make_real_context_loader, materialize_bundle
+    from .identity import freeze_successor_identity, sha256_file
+    from .plan import bind_context_inputs, build_successor_inventory
+
+    verify_loaded_numerical_origins(verified)
+
+    project_root = MATERIALIZATION_AUTHORITY_PATH.parent.parent.parent
+    amendment_path = (
+        project_root
+        / "tasks/BM-NATIVE-QA/QA-EXECUTION-AMENDMENT-v1-20260910.yaml"
+    )
+    context_evidence_path = (
+        project_root
+        / "tasks/BM-INPUTS/staging/real-core-v4-primary80-estimability/manifest.json"
+    )
+    fixture_manifest_path = (
+        project_root / "tasks/BM-FIXTURE-V3/manifest.20260910-v5-r3.json"
+    )
+    successor_path = verified.paths["successor_design"]
+    amendment = _load_yaml(amendment_path)
+    _validate_amendment_acceptance(amendment, amendment_path)
+    successor = _load_yaml(successor_path)
+    context_evidence = _load_json(context_evidence_path)
+    fixture_manifest = _load_json(fixture_manifest_path)
+    inventory = build_successor_inventory(amendment, successor)
+    input_hashes = _prospective_input_hashes(
+        inventory,
+        context_evidence,
+        project_root,
+    )
+    inventory = bind_context_inputs(inventory, context_evidence, input_hashes)
+    frozen = freeze_successor_identity(
+        inventory,
+        fixture_manifest_sha256=sha256_file(fixture_manifest_path),
+        amendment_sha256=sha256_file(amendment_path),
+        successor_design_sha256=SUCCESSOR_DESIGN_SHA256,
+        worker_decision_sha256=WORKER_DECISION_SHA256,
+        runner_test_sha256s=verified.inventory["runner_test_sha256s"],
+        artifact_root=verified.artifact_root,
+    )
+    _require_rehydrated_identity(
+        frozen,
+        qa_design_hash=verified.qa_design_hash,
+        inventory_payload=verified.inventory.get("design_payload"),
+    )
+    if args.out.resolve() != verified.artifact_root.resolve():
+        raise CLIError("materialization --out differs from the reviewed artifact root")
+    expected_fixture = verified.inventory["source_bindings"]
+    if (
+        fixture_manifest.get("source_commit")
+        != expected_fixture.get("fixture_source_commit")
+        or fixture_manifest.get("source_tree")
+        != expected_fixture.get("fixture_source_tree")
+    ):
+        raise CLIError("fixture source identity differs during materialization")
+    loader = make_real_context_loader(
+        project_root=project_root,
+        context_evidence=context_evidence,
+    )
+    materialize_bundle(
+        verified,
+        inventory=inventory,
+        seeds=frozen.seeds,
+        context_loader=loader,
+        context_evidence=context_evidence,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "plan":
             _write_plan(args)
+        elif args.command == "materialize" and args.authority is not None:
+            verified = _verify_materialization_cli(args)
+            from .authority import verify_runtime_import_isolation
+
+            verify_runtime_import_isolation(
+                verified,
+                task_root=Path(__file__).resolve().parents[1],
+            )
+            _activate_materialization(args, verified)
         else:
             _reject_closed_stage(args)
-    except (CLIError, FileNotFoundError, KeyError, ValueError) as exc:
+    except (CLIError, FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         print(f"ERROR: bm-native-qa: {exc}", file=sys.stderr)
         return 2
     return 0

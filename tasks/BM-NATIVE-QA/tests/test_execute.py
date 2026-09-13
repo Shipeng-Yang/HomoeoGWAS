@@ -10,6 +10,7 @@ from bm_native_qa_harness.execute import (
     RuntimeObservation,
     commands_for_invocation,
     evaluate_static_preflight,
+    evaluate_successor_static_preflight,
     run_sequence,
 )
 from bm_native_qa_harness.plan import InvocationSpec
@@ -184,6 +185,17 @@ def test_static_preflight_accepts_exact_floors_without_running_a_probe() -> None
     assert set(result.record).isdisjoint(
         {"supervisor_self_test", "resource_projection", "timing_workload"}
     )
+
+
+def test_successor_static_preflight_requires_192_gib_memavailable() -> None:
+    record = _static_preflight_record()
+    record["mem_available_bytes"] = 191 * 1024**3
+
+    with pytest.raises(RuntimeError, match="below 192 GiB"):
+        evaluate_successor_static_preflight(record)
+
+    record["mem_available_bytes"] = 192 * 1024**3
+    assert evaluate_successor_static_preflight(record).status == "PASS"
 
 
 @pytest.mark.parametrize(

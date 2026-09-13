@@ -57,14 +57,18 @@ def _plain_record(value: Any) -> dict[str, object]:
     }
 
 
-def _future_artifact_layout(inventory: ProspectiveInventory) -> dict[str, object]:
-    root = "tasks/BM-NATIVE-QA/materialized/v1"
+def _future_artifact_layout(
+    inventory: ProspectiveInventory,
+    *,
+    root: str = "tasks/BM-NATIVE-QA/materialized/v1",
+    run_namespace: str = "qa_real80_v4",
+) -> dict[str, object]:
     return {
         "root": root,
         "anchors": [
             {
                 "anchor_id": (
-                    f"qa_real80_v4.{context.panel_id}."
+                    f"{run_namespace}.{context.panel_id}."
                     f"{context.sample_context}.anchor"
                 ),
                 "context_key": context.key,
@@ -112,6 +116,9 @@ def freeze_identity(
     fixture_manifest_sha256: str,
     amendment_sha256: str,
     runner_test_sha256s: Mapping[str, str],
+    artifact_root: str | Path | None = None,
+    run_namespace: str = "qa_real80_v4",
+    extra_bindings: Mapping[str, object] | None = None,
 ) -> FrozenIdentity:
     _require_sha256(fixture_manifest_sha256, "fixture manifest")
     _require_sha256(amendment_sha256, "amendment")
@@ -148,13 +155,63 @@ def freeze_identity(
             "checkpoint_mode": "indexed_required",
         },
         "aggregate_caps": dict(NATIVE_CAPS),
-        "future_artifacts": _future_artifact_layout(inventory),
+        "future_artifacts": _future_artifact_layout(
+            inventory,
+            root=(
+                "tasks/BM-NATIVE-QA/materialized/v1"
+                if artifact_root is None
+                else str(artifact_root)
+            ),
+            run_namespace=run_namespace,
+        ),
     }
+    if extra_bindings is not None:
+        collisions = sorted(set(extra_bindings) & set(payload))
+        if collisions:
+            raise IdentityError(
+                "extra identity bindings collide with frozen payload: "
+                + ", ".join(collisions)
+            )
+        payload.update(extra_bindings)
     design_hash = sha256_payload(payload)
     return FrozenIdentity(
         qa_design_hash=design_hash,
         design_payload=payload,
-        seeds=build_seed_ledger(design_hash, inventory),
+        seeds=build_seed_ledger(
+            design_hash,
+            inventory,
+            run_namespace=run_namespace,
+        ),
+    )
+
+
+def freeze_successor_identity(
+    inventory: ProspectiveInventory,
+    *,
+    fixture_manifest_sha256: str,
+    amendment_sha256: str,
+    successor_design_sha256: str,
+    worker_decision_sha256: str,
+    runner_test_sha256s: Mapping[str, str],
+    artifact_root: Path,
+) -> FrozenIdentity:
+    """Freeze the reviewed workers128 successor without altering v1 behavior."""
+
+    _require_sha256(successor_design_sha256, "successor design")
+    _require_sha256(worker_decision_sha256, "worker decision")
+    if not artifact_root.is_absolute():
+        raise IdentityError("successor artifact root must be absolute")
+    return freeze_identity(
+        inventory,
+        fixture_manifest_sha256=fixture_manifest_sha256,
+        amendment_sha256=amendment_sha256,
+        runner_test_sha256s=runner_test_sha256s,
+        artifact_root=artifact_root,
+        run_namespace="qa_real80_njobs128_v1",
+        extra_bindings={
+            "successor_design_sha256": successor_design_sha256,
+            "worker_decision_sha256": worker_decision_sha256,
+        },
     )
 
 
@@ -182,6 +239,8 @@ def _seed_record(
 def build_seed_ledger(
     design_hash: str,
     inventory: ProspectiveInventory,
+    *,
+    run_namespace: str = "qa_real80_v4",
 ) -> tuple[SeedRecord, ...]:
     responses_by_context = {
         context.key: tuple(
@@ -193,7 +252,7 @@ def build_seed_ledger(
     }
     records: list[SeedRecord] = []
     for context in inventory.contexts:
-        base = f"qa_real80_v4.{context.panel_id}.{context.sample_context}"
+        base = f"{run_namespace}.{context.panel_id}.{context.sample_context}"
         records.append(
             _seed_record(
                 design_hash,

@@ -212,3 +212,101 @@ def build_inventory(amendment: dict[str, Any]) -> ProspectiveInventory:
         responses=responses,
         invocations=invocations,
     )
+
+
+def build_successor_inventory(
+    amendment: dict[str, Any],
+    successor: dict[str, Any],
+) -> ProspectiveInventory:
+    """Replace only the obsolete worker-count invocation layer."""
+
+    base = build_inventory(amendment)
+    if successor.get("schema") != (
+        "homoeogwas-bm-native-qa-njobs128-successor-design-v1"
+    ):
+        raise PlanError("successor design schema is invalid")
+    if successor.get("execution_authorized") is not False:
+        raise PlanError("successor execution_authorized must remain false")
+    override = successor.get("invocation_override")
+    identity = successor.get("successor_identity")
+    if not isinstance(override, dict) or not isinstance(identity, dict):
+        raise PlanError("successor invocation or identity block is missing")
+    jobs = override.get("requested_jobs")
+    if isinstance(jobs, bool) or jobs != 128:
+        raise PlanError("successor requested_jobs must equal 128")
+    rows = tuple(
+        (
+            str(row["sample_context"]),
+            tuple(str(replica) for replica in row["replicas"]),
+        )
+        for row in override.get("context_rows", ())
+    )
+    expected_rows = (
+        ("pc1_spread_192", ("replica_a", "replica_b")),
+        ("seeded_random_192", ("primary",)),
+        ("holdout_192", ("primary",)),
+    )
+    if rows != expected_rows:
+        raise PlanError("successor context/replica rows differ from the reviewed design")
+    namespace = identity.get("run_namespace")
+    if namespace != "qa_real80_njobs128_v1":
+        raise PlanError("successor run namespace differs from the reviewed design")
+
+    contexts_by_identity = {
+        (context.panel_id, context.sample_context): context for context in base.contexts
+    }
+    panels = tuple(str(panel) for panel in amendment["matrix"]["panels"])
+    truths = tuple(amendment["matrix"]["truths"])
+    contexts = tuple(
+        contexts_by_identity[(panel_id, sample_context)]
+        for panel_id in panels
+        for sample_context, _replicas in rows
+    )
+    responses = tuple(
+        ResponseSpec(
+            response_id=f"{namespace}.{context.panel_id}.{context.sample_context}.{truth['id']}",
+            context_key=context.key,
+            truth_id=str(truth["id"]),
+            generator_scale_interaction_pve=float(
+                truth["generator_scale_interaction_pve"]
+            ),
+        )
+        for context in contexts
+        for truth in truths
+    )
+    response_by_key = {
+        (response.context_key, response.truth_id): response for response in responses
+    }
+    invocations = tuple(
+        InvocationSpec(
+            invocation_id=(
+                f"{response_by_key[(context.key, str(truth['id']))].response_id}"
+                f".workers128.{replica}"
+            ),
+            response_id=response_by_key[
+                (context.key, str(truth["id"]))
+            ].response_id,
+            panel_id=panel_id,
+            sample_context=sample_context,
+            truth_id=str(truth["id"]),
+            jobs=128,
+        )
+        for panel_id in panels
+        for truth in truths
+        for sample_context, replicas in rows
+        for context in (contexts_by_identity[(panel_id, sample_context)],)
+        for replica in replicas
+    )
+    if (
+        len(contexts) != 6
+        or len(responses) != 12
+        or len(invocations) != 16
+        or len({row.invocation_id for row in invocations}) != 16
+        or {row.jobs for row in invocations} != {128}
+    ):
+        raise PlanError("successor inventory differs from reviewed 6/12/16 workers128 design")
+    return ProspectiveInventory(
+        contexts=contexts,
+        responses=responses,
+        invocations=invocations,
+    )
