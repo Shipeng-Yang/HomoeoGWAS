@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-SUCCESSOR_RUN_NAMESPACE = "qa_real80_njobs128_v4"
+SUCCESSOR_RUN_NAMESPACE = "qa_real80_njobs128_v5"
 THREAD_ENV_NAMES = (
     "OPENBLAS_NUM_THREADS",
     "OMP_NUM_THREADS",

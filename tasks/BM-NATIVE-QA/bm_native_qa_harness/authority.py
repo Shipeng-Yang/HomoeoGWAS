@@ -90,6 +90,15 @@ REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S = frozenset(
         "6253c131a42ca6402b17736ac0076a367a41232a5e96b3b954f30fcaa87de6f6",
     }
 )
+REJECTED_V4_QA_DESIGN_HASHES = frozenset(
+    {"947aab2d9c1a1682e42f03e76ea71a4447df43e6451094d93a42ac04aea13d15"}
+)
+REJECTED_V4_INVENTORY_SHA256S = frozenset(
+    {"899ad4efd07383553f87560bf981d847ca4bb9d67bb9e2aa8e035497788df3f4"}
+)
+REJECTED_V4_RUNNER_TEST_MAPPING_SHA256S = frozenset(
+    {"c169100739ddcc36d3343da0e34b4e39116e8f3b19f8581e490fd44223335fe1"}
+)
 ACCEPTED_PRODUCT_COMMIT = "9d7faee655c020d84bdd6a6fba33b42a8428aea6"
 ACCEPTED_PRODUCT_TREE = "92355ddcbb2cd3d749169291fcbf6065eb556311"
 ACCEPTED_HOMOEO_GWAS_PACKAGE_SOURCE_SHA256 = (
@@ -725,6 +734,12 @@ def verify_materialization_authority(
         in REJECTED_V3_INVENTORY_SHA256S
     ):
         raise AuthorityBlocked("rejected v3 identity is forbidden")
+    if (
+        hashes["qa_design_hash"] in REJECTED_V4_QA_DESIGN_HASHES
+        or hashes["prospective_inventory_sha256"]
+        in REJECTED_V4_INVENTORY_SHA256S
+    ):
+        raise AuthorityBlocked("rejected v4 identity is forbidden")
     if hashes["successor_design_sha256"] != expected_successor_design_sha256:
         raise AuthorityBlocked("successor design hash is not the reviewed identity")
     if hashes["decision_sha256"] != expected_worker_decision_sha256:
@@ -762,7 +777,7 @@ def verify_materialization_authority(
             raise AuthorityBlocked(f"bound file hash mismatch: {path_key}")
 
     inventory = _mapping(paths["prospective_inventory"], json_format=True)
-    if inventory.get("schema") != "homoeogwas-bm-native-qa-prospective-inventory-v4":
+    if inventory.get("schema") != "homoeogwas-bm-native-qa-prospective-inventory-v5":
         raise AuthorityBlocked("prospective inventory is not the active successor")
     if inventory.get("response_materialization_authorized") is not False or (
         inventory.get("execution_authorized") is not False
@@ -813,6 +828,8 @@ def verify_materialization_authority(
         raise AuthorityBlocked("rejected v2 runner/test identity is forbidden")
     if runner_mapping_sha256 in REJECTED_V3_RUNNER_TEST_MAPPING_SHA256S:
         raise AuthorityBlocked("rejected v3 runner/test identity is forbidden")
+    if runner_mapping_sha256 in REJECTED_V4_RUNNER_TEST_MAPPING_SHA256S:
+        raise AuthorityBlocked("rejected v4 runner/test identity is forbidden")
     root = task_root.resolve()
     observed_members = enumerate_runner_test_sources(root)
     if set(observed_members) != set(authority_runner_hashes):

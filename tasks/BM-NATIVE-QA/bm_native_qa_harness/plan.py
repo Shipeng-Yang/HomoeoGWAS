@@ -249,7 +249,7 @@ def build_successor_inventory(
 
     base = build_inventory(amendment)
     if successor.get("schema") != (
-        "homoeogwas-bm-native-qa-njobs128-successor-design-v2"
+        "homoeogwas-bm-native-qa-njobs128-successor-design-v3"
     ):
         raise PlanError("successor design schema is invalid")
     if successor.get("execution_authorized") is not False:

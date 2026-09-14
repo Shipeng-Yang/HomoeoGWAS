@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from bm_native_qa_harness import authority, cli
+from bm_native_qa_harness import SUCCESSOR_RUN_NAMESPACE, authority, cli
 
 REQUIRED = (
     ("bed_reader", "bed-reader"),
@@ -108,10 +108,10 @@ def _verified_dependency_fixture(
         "files": files,
     }
     return authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
         qa_design_hash="1" * 64,
         inventory={},
-        artifact_root=tmp_path / "materialized" / "njobs128-v4",
+        artifact_root=tmp_path / "materialized" / "njobs128-v5",
         paths={},
         binding_hashes={},
         source_reverification=source_reverification,
@@ -264,7 +264,7 @@ def test_cli_maps_materialization_import_error_to_clean_failure(
     assert "No module named 'scripts'" in capsys.readouterr().err
 
 
-def test_dependency_gate_names_missing_bed_reader_before_v4_lock(
+def test_dependency_gate_names_missing_bed_reader_before_v5_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -281,11 +281,13 @@ def test_dependency_gate_names_missing_bed_reader_before_v4_lock(
     with pytest.raises(authority.AuthorityBlocked, match="bed_reader"):
         authority.verify_runtime_dependencies(verified)
 
-    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    lock = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-lock"
+    )
     assert not lock.exists()
 
 
-def test_cli_dependency_failure_precedes_bundle_import_and_v4_lock(
+def test_cli_dependency_failure_precedes_bundle_import_and_v5_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -301,7 +303,9 @@ def test_cli_dependency_failure_precedes_bundle_import_and_v4_lock(
         cli._activate_materialization(Namespace(), verified)
 
     assert "bm_native_qa_harness.bundle" not in sys.modules
-    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    lock = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-lock"
+    )
     assert not lock.exists()
 
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
-from bm_native_qa_harness import authority, bundle, identity, plan
+from bm_native_qa_harness import SUCCESSOR_RUN_NAMESPACE, authority, bundle, identity, plan
 
 from scripts.benchmarks.v201.track_omnib import build_synthetic_omnib_context
 
@@ -81,7 +81,7 @@ def _inventory(tmp_path: Path) -> plan.ProspectiveInventory:
     responses = tuple(
         plan.ResponseSpec(
             response_id=(
-                f"qa_real80_njobs128_v4.{context.panel_id}."
+                f"{SUCCESSOR_RUN_NAMESPACE}.{context.panel_id}."
                 f"{context.sample_context}.{truth}"
             ),
             context_key=context.key,
@@ -123,14 +123,14 @@ def _verified(
     tmp_path: Path,
     inventory: plan.ProspectiveInventory,
 ) -> authority.VerifiedMaterializationAuthority:
-    artifact_root = tmp_path / "materialized" / "njobs128-v4"
+    artifact_root = tmp_path / "materialized" / "njobs128-v5"
     layout = identity._future_artifact_layout(
         inventory,
         root=str(artifact_root),
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     return authority.VerifiedMaterializationAuthority(
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
         qa_design_hash="1" * 64,
         inventory={"design_payload": {"future_artifacts": layout}},
         artifact_root=artifact_root,
@@ -200,7 +200,7 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
 
     manifest = bundle.materialize_bundle(
@@ -221,13 +221,13 @@ def test_bundle_exclusively_writes_six_twelve_sixteen_and_no_native_dirs(
     physical = json.loads((root / "materialization-manifest.json").read_text())
     assert physical == manifest
     assert physical["execution_authorized"] is False
-    assert physical["run_namespace"] == "qa_real80_njobs128_v4"
+    assert physical["run_namespace"] == "qa_real80_njobs128_v5"
     assert all(
-        row["response_id"].startswith("qa_real80_njobs128_v4.")
+        row["response_id"].startswith("qa_real80_njobs128_v5.")
         for row in physical["responses"]
     )
     assert all(
-        row["invocation_id"].startswith("qa_real80_njobs128_v4.")
+        row["invocation_id"].startswith("qa_real80_njobs128_v5.")
         for row in physical["configs"]
     )
     assert physical["authority_bindings"]["materialization_authority_sha256"] == (
@@ -277,13 +277,13 @@ def test_replica_identity_guard_rejects_any_scientific_difference() -> None:
         bundle.require_replica_identity(rows)
 
 
-def test_marker_count_failure_precedes_v4_lock_and_attempt(tmp_path: Path) -> None:
+def test_marker_count_failure_precedes_v5_lock_and_attempt(tmp_path: Path) -> None:
     inventory = _inventory(tmp_path)
     verified = _verified(tmp_path, inventory)
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     calls = 0
 
@@ -307,14 +307,16 @@ def test_marker_count_failure_precedes_v4_lock_and_attempt(tmp_path: Path) -> No
     assert calls == 2
     assert not verified.artifact_root.exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-lock"
     ).exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-attempt"
     ).exists()
 
 
-def test_anchor_preparation_failure_precedes_v4_lock_and_attempt(
+def test_anchor_preparation_failure_precedes_v5_lock_and_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -323,7 +325,7 @@ def test_anchor_preparation_failure_precedes_v4_lock_and_attempt(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     original_prepare_anchor = bundle.prepare_anchor
     prepare_calls = 0
@@ -348,14 +350,16 @@ def test_anchor_preparation_failure_precedes_v4_lock_and_attempt(
     assert prepare_calls == 2
     assert not verified.artifact_root.exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-lock"
     ).exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-attempt"
     ).exists()
 
 
-def test_response_generation_failure_precedes_v4_filesystem_side_effects(
+def test_response_generation_failure_precedes_v5_filesystem_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -364,7 +368,7 @@ def test_response_generation_failure_precedes_v4_filesystem_side_effects(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     original_generate_response = bundle.generate_response
     generation_calls = 0
@@ -390,14 +394,16 @@ def test_response_generation_failure_precedes_v4_filesystem_side_effects(
     assert not verified.artifact_root.parent.exists()
     assert not verified.artifact_root.exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-lock"
     ).exists()
     assert not (
-        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+        verified.artifact_root.parent
+        / f".{verified.artifact_root.name}.materialization-attempt"
     ).exists()
 
 
-def test_all_response_generations_precede_v4_filesystem_side_effects(
+def test_all_response_generations_precede_v5_filesystem_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -406,12 +412,16 @@ def test_all_response_generations_precede_v4_filesystem_side_effects(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     original_generate_response = bundle.generate_response
     observed_response_ids: list[str] = []
-    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
-    attempt = verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+    lock = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-lock"
+    )
+    attempt = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-attempt"
+    )
 
     def prelock_response(*args, **kwargs):
         assert not verified.artifact_root.exists()
@@ -445,7 +455,7 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
     original_write_response = bundle.write_roundtrip_response
     response_writes = 0
@@ -467,7 +477,9 @@ def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
             context_loader=_synthetic_loader,
         )
 
-    attempt = verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+    attempt = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-attempt"
+    )
     assert not verified.artifact_root.exists()
     abort = json.loads((attempt / "materialization-abort.json").read_text())
     assert abort["qa_design_hash"] == verified.qa_design_hash
@@ -490,9 +502,11 @@ def test_bundle_refuses_preexisting_exclusive_lock(tmp_path: Path) -> None:
     seeds = identity.build_seed_ledger(
         verified.qa_design_hash,
         inventory,
-        run_namespace="qa_real80_njobs128_v4",
+        run_namespace=SUCCESSOR_RUN_NAMESPACE,
     )
-    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    lock = verified.artifact_root.parent / (
+        f".{verified.artifact_root.name}.materialization-lock"
+    )
     lock.parent.mkdir(parents=True)
     lock.write_text("occupied\n", encoding="utf-8")
 
