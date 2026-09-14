@@ -355,6 +355,87 @@ def test_anchor_preparation_failure_precedes_v4_lock_and_attempt(
     ).exists()
 
 
+def test_response_generation_failure_precedes_v4_filesystem_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _inventory(tmp_path)
+    verified = _verified(tmp_path, inventory)
+    seeds = identity.build_seed_ledger(
+        verified.qa_design_hash,
+        inventory,
+        run_namespace="qa_real80_njobs128_v4",
+    )
+    original_generate_response = bundle.generate_response
+    generation_calls = 0
+
+    def failing_second_response(*args, **kwargs):
+        nonlocal generation_calls
+        generation_calls += 1
+        if generation_calls == 2:
+            raise ValueError("prelock response fixture failure")
+        return original_generate_response(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "generate_response", failing_second_response)
+
+    with pytest.raises(ValueError, match="prelock response fixture failure"):
+        bundle.materialize_bundle(
+            verified,
+            inventory=inventory,
+            seeds=seeds,
+            context_loader=_synthetic_loader,
+        )
+
+    assert generation_calls == 2
+    assert not verified.artifact_root.parent.exists()
+    assert not verified.artifact_root.exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    ).exists()
+    assert not (
+        verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+    ).exists()
+
+
+def test_all_response_generations_precede_v4_filesystem_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _inventory(tmp_path)
+    verified = _verified(tmp_path, inventory)
+    seeds = identity.build_seed_ledger(
+        verified.qa_design_hash,
+        inventory,
+        run_namespace="qa_real80_njobs128_v4",
+    )
+    original_generate_response = bundle.generate_response
+    observed_response_ids: list[str] = []
+    lock = verified.artifact_root.parent / ".njobs128-v4.materialization-lock"
+    attempt = verified.artifact_root.parent / ".njobs128-v4.materialization-attempt"
+
+    def prelock_response(*args, **kwargs):
+        assert not verified.artifact_root.exists()
+        assert not lock.exists()
+        assert not attempt.exists()
+        observed_response_ids.append(kwargs["response_id"])
+        return original_generate_response(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "generate_response", prelock_response)
+
+    bundle.materialize_bundle(
+        verified,
+        inventory=inventory,
+        seeds=seeds,
+        context_loader=_synthetic_loader,
+    )
+
+    assert len(observed_response_ids) == 12
+    assert set(observed_response_ids) == {
+        response.response_id for response in inventory.responses
+    }
+    assert len(set(observed_response_ids)) == len(observed_response_ids)
+
+
 def test_bundle_preserves_abort_diagnostics_and_forbids_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

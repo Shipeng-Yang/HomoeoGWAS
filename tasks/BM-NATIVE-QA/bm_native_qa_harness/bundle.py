@@ -18,6 +18,7 @@ from .config import (
 )
 from .identity import SeedRecord, sha256_file
 from .materialize import (
+    MaterializedResponse,
     _float64_sha256,
     generate_response,
     prepare_anchor,
@@ -549,6 +550,84 @@ def _preflight_anchors(
     return prepared_by_context, samples_by_context, estimable_by_context
 
 
+def _preflight_responses(
+    responses: Sequence[Any],
+    prepared_by_context: Mapping[str, Any],
+    samples_by_context: Mapping[str, Sequence[str]],
+    seed_by_role: Mapping[tuple[str, str, str | None], SeedRecord],
+) -> dict[str, MaterializedResponse]:
+    """Generate and validate every response before claiming materialization."""
+
+    cache: dict[str, MaterializedResponse] = {}
+    for response_spec in responses:
+        if response_spec.response_id in cache:
+            raise ValueError(f"duplicate response ID: {response_spec.response_id}")
+        generated = generate_response(
+            prepared_by_context[response_spec.context_key],
+            response_id=response_spec.response_id,
+            truth_id=response_spec.truth_id,
+            response_seed=seed_by_role[
+                ("observed", response_spec.context_key, response_spec.truth_id)
+            ].value,
+        )
+        if generated.response_id != response_spec.response_id:
+            raise ValueError(f"generated response ID differs: {response_spec.response_id}")
+        if generated.truth_id != response_spec.truth_id:
+            raise ValueError(f"generated truth ID differs: {response_spec.response_id}")
+        expected_shape = (len(samples_by_context[response_spec.context_key]),)
+        values = np.asarray(generated.values)
+        post_int_values = np.asarray(generated.post_int_values)
+        if (
+            values.ndim != 1
+            or values.shape != expected_shape
+            or not np.isfinite(values).all()
+            or post_int_values.ndim != 1
+            or post_int_values.shape != expected_shape
+            or not np.isfinite(post_int_values).all()
+        ):
+            raise ValueError(
+                f"generated response values differ from context samples: "
+                f"{response_spec.response_id}"
+            )
+        pve = generated.metadata.get("generator_scale_interaction_pve")
+        if response_spec.truth_id == "gaussian_null":
+            if pve != 0.0:
+                raise ValueError(
+                    f"null response generator-scale PVE differs: "
+                    f"{response_spec.response_id}"
+                )
+        elif response_spec.truth_id == "mixed_sign_diagnostic_pve0p03":
+            signal = generated.signal
+            if signal is None:
+                raise ValueError(
+                    f"mixed-sign response lacks signal: {response_spec.response_id}"
+                )
+            signal_values = np.asarray(signal)
+            if (
+                signal_values.ndim != 1
+                or signal_values.shape != expected_shape
+                or not np.isfinite(signal_values).all()
+            ):
+                raise ValueError(
+                    f"mixed-sign response signal differs from context samples: "
+                    f"{response_spec.response_id}"
+                )
+            try:
+                pve_error = abs(float(pve) - 0.03)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"mixed-sign response generator-scale PVE differs: "
+                    f"{response_spec.response_id}"
+                ) from exc
+            if not np.isfinite(pve_error) or pve_error > 1e-12:
+                raise ValueError(
+                    f"mixed-sign response generator-scale PVE differs: "
+                    f"{response_spec.response_id}"
+                )
+        cache[response_spec.response_id] = generated
+    return cache
+
+
 def materialize_bundle(
     verified: VerifiedMaterializationAuthority,
     *,
@@ -580,6 +659,12 @@ def materialize_bundle(
         seed_by_role,
         qa_design_hash=verified.qa_design_hash,
         context_evidence=context_evidence,
+    )
+    response_cache = _preflight_responses(
+        inventory.responses,
+        prepared_by_context,
+        samples_by_context,
+        seed_by_role,
     )
     root.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -682,16 +767,10 @@ def materialize_bundle(
                 }
             )
         for response_spec in inventory.responses:
-            prepared = prepared_by_context[response_spec.context_key]
             response_seed = seed_by_role[
                 ("observed", response_spec.context_key, response_spec.truth_id)
             ]
-            generated = generate_response(
-                prepared,
-                response_id=response_spec.response_id,
-                truth_id=response_spec.truth_id,
-                response_seed=response_seed.value,
-            )
+            generated = response_cache[response_spec.response_id]
             row = response_layout[response_spec.response_id]
             npy_physical = _attempt_path(
                 row["response_npy"], root=root, attempt=attempt
