@@ -121,6 +121,21 @@ def validated_covariance_root(
     return v_hat, _root_from_covariance(v_hat)
 
 
+def _finite_mean_impute_gene_block(block: np.ndarray, *, label: str) -> np.ndarray:
+    values = np.asarray(block, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 1:
+        raise MaterializationBlocked(f"gene block {label!r} must be a non-empty matrix")
+    finite = np.isfinite(values)
+    counts = finite.sum(axis=0)
+    if np.any(counts == 0):
+        raise MaterializationBlocked(
+            f"gene block {label!r} has a column with no finite mean"
+        )
+    sums = np.where(finite, values, 0.0).sum(axis=0, dtype=np.float64)
+    means = sums / counts
+    return np.ascontiguousarray(np.where(finite, values, means), dtype=np.float64)
+
+
 def prepare_anchor(
     context: OmniBBenchmarkContext,
     *,
@@ -160,6 +175,12 @@ def prepare_anchor(
         raise MaterializationBlocked(
             f"production gating made QA gene non-estimable: {missing[0]!r}"
         )
+    gene_blocks = {
+        key: _finite_mean_impute_gene_block(
+            block, label=f"{key[0]}:{key[1]}"
+        )
+        for key, block in gene_blocks.items()
+    }
     return PreparedAnchor(
         context=anchored_context,
         scores=scores,

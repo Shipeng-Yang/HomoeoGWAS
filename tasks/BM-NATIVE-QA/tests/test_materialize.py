@@ -11,6 +11,55 @@ from homoeogwas.group_family import MasterGroupFamily
 from scripts.benchmarks.v201.track_omnib import build_synthetic_omnib_context
 
 
+def test_finite_mean_imputation_replaces_nonfinite_cells_without_mutating_input():
+    raw = np.array([[0.0, np.nan], [2.0, 4.0], [np.inf, 8.0]])
+    before = raw.copy()
+    observed = materialize._finite_mean_impute_gene_block(raw, label="A:g0")
+    assert np.array_equal(observed, np.array([[0.0, 6.0], [2.0, 4.0], [1.0, 8.0]]))
+    assert np.array_equal(raw, before, equal_nan=True)
+    assert observed.dtype == np.float64
+    assert observed.flags.c_contiguous
+
+
+def test_finite_mean_imputation_rejects_column_without_finite_observation():
+    raw = np.array([[0.0, np.nan], [2.0, np.inf]])
+    with pytest.raises(materialize.MaterializationBlocked, match="no finite mean"):
+        materialize._finite_mean_impute_gene_block(raw, label="A:g0")
+
+
+def test_prepare_anchor_imputes_nonfinite_gene_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_synthetic_omnib_context(n=24, groups=2, copies=2, seed=7)
+    original_gene_blocks = materialize._gene_blocks
+    expected = {}
+
+    def contaminated_gene_blocks(anchored_context, scores):
+        blocks = original_gene_blocks(anchored_context, scores)
+        contaminated = dict(blocks)
+        block = np.array(contaminated[("A", "g0")], copy=True)
+        expected_first = block[1:, 0].mean()
+        expected_second = np.concatenate((block[:1, 1], block[2:, 1])).mean()
+        block[0, 0] = np.nan
+        block[1, 1] = np.inf
+        contaminated[("A", "g0")] = block
+        expected["means"] = (expected_first, expected_second)
+        return contaminated
+
+    monkeypatch.setattr(materialize, "_gene_blocks", contaminated_gene_blocks)
+    prepared = materialize.prepare_anchor(
+        context,
+        design_hash="0" * 64,
+        scenario_id="qa_test.synthetic.pc1",
+        anchor_seed=11,
+    )
+
+    observed = prepared.gene_blocks[("A", "g0")]
+    assert np.isfinite(observed).all()
+    assert observed[0, 0] == pytest.approx(expected["means"][0])
+    assert observed[1, 1] == pytest.approx(expected["means"][1])
+
+
 def test_materialization_gate_rejects_before_numerical_adapter_is_called() -> None:
     called = False
 
