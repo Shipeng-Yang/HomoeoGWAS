@@ -157,7 +157,7 @@ def _require_equal(label: str, expected: Any, actual: Any) -> None:
 
 
 def _formal_checkpoint_requested(raw_config: dict[str, Any]) -> bool:
-    """Return whether raw config requests the canonical checkpointed omniB path."""
+    """Return whether checkpointed omniB requires formal provenance."""
     interact = raw_config.get("interact")
     if not isinstance(interact, dict):
         return False
@@ -167,7 +167,22 @@ def _formal_checkpoint_requested(raw_config: dict[str, Any]) -> bool:
     if not isinstance(calibration, dict):
         return False
     checkpoint = calibration.get("checkpoint")
-    return isinstance(checkpoint, dict) and checkpoint.get("enabled") is True
+    if not isinstance(checkpoint, dict) or checkpoint.get("enabled") is not True:
+        return False
+    identity = interact.get("benchmark_identity")
+    benchmark_qa = (
+        calibration.get("qa_only") is True
+        and isinstance(identity, dict)
+        and set(identity) == {"panel_id", "sample_context", "feature_seed"}
+        and isinstance(identity["panel_id"], str)
+        and bool(identity["panel_id"])
+        and isinstance(identity["sample_context"], str)
+        and bool(identity["sample_context"])
+        and not isinstance(identity["feature_seed"], bool)
+        and isinstance(identity["feature_seed"], int)
+        and identity["feature_seed"] >= 0
+    )
+    return not benchmark_qa
 
 
 def verify_formal_launch(

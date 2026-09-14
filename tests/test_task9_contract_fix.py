@@ -458,6 +458,121 @@ def test_formal_checkpoint_without_pre_run_manifest_fails_closed(tmp_path):
         P.verify_formal_launch(config_path, cfg)
 
 
+def test_checkpointed_benchmark_qa_does_not_require_formal_manifest(tmp_path):
+    """QA-only benchmark checkpoints must retain the benchmark_qa route."""
+    from homoeogwas import formal_provenance as P
+
+    config_path = tmp_path / "benchmark-qa-checkpoint.yaml"
+    cfg = {
+        "interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "benchmark_identity": {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": 17,
+            },
+            "calibration": {
+                "method": "bootstrap",
+                "B": 199,
+                "qa_only": True,
+                "checkpoint": {
+                    "enabled": True,
+                    "root": str(tmp_path / "checkpoint"),
+                },
+            },
+        },
+    }
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert P.verify_formal_launch(config_path, reloaded) is None
+
+
+@pytest.mark.parametrize(
+    ("identity", "qa_only"),
+    [
+        (
+            {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": 17,
+            },
+            False,
+        ),
+        (
+            {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": 17,
+            },
+            1,
+        ),
+        (
+            {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": True,
+            },
+            True,
+        ),
+        (None, True),
+        (
+            {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": 17,
+                "truth_id": "gaussian_null",
+            },
+            True,
+        ),
+        (
+            {
+                "panel_id": "",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": 17,
+            },
+            True,
+        ),
+        (
+            {
+                "panel_id": "REALG.TEST",
+                "sample_context": "pc1_spread_192",
+                "feature_seed": -1,
+            },
+            True,
+        ),
+    ],
+)
+def test_checkpoint_qa_exemption_requires_strict_noninferential_identity(
+    tmp_path,
+    identity,
+    qa_only,
+):
+    """Malformed or inferential benchmark labels must not bypass provenance."""
+    from homoeogwas import formal_provenance as P
+
+    config_path = tmp_path / "non-qa-checkpoint.yaml"
+    cfg = {
+        "interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "benchmark_identity": identity,
+            "calibration": {
+                "qa_only": qa_only,
+                "checkpoint": {
+                    "enabled": True,
+                    "root": str(tmp_path / "checkpoint"),
+                },
+            },
+        },
+    }
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    with pytest.raises(P.FormalLaunchError, match="pre_run_manifest"):
+        P.verify_formal_launch(config_path, cfg)
+
+
 def test_explicit_noncheckpoint_config_retains_legacy_provenance_opt_out(
     tmp_path,
 ):
