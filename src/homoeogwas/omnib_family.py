@@ -1619,6 +1619,21 @@ def _group_identity_record(
     }
 
 
+def _full_edge_group_primary_matrix(
+    scores: OmniBFamilyScores,
+    expanded: ExpandedEdgeFamily,
+) -> np.ndarray:
+    """Mask group-primary rows unless every declared pair edge is estimable."""
+    edge_estimable = np.asarray(scores.edge_estimable, bool)
+    full_edge = np.asarray([
+        bool((indices := np.asarray(edge_indices, int)).size)
+        and bool(edge_estimable[indices].all())
+        for edge_indices in expanded.group_edge_indices
+    ], bool)
+    eligible = np.asarray(scores.group_estimable, bool) & full_edge
+    return np.where(eligible[:, None], scores.group_p, np.nan)
+
+
 def _select_primary_family(
     scores: OmniBFamilyScores,
     family: MasterGroupFamily,
@@ -1626,6 +1641,7 @@ def _select_primary_family(
     hypothesis_unit: str,
     family_scope: str,
 ) -> tuple[np.ndarray, list[dict], str, list[str]]:
+    group_primary_p = _full_edge_group_primary_matrix(scores, expanded)
     edge_records = [
         _edge_identity_record(scores, expanded, index)
         for index in range(len(expanded.edges))
@@ -1636,14 +1652,14 @@ def _select_primary_family(
     ]
     if family_scope == "joint":
         return (
-            np.vstack([scores.edge_p, scores.group_p]),
+            np.vstack([scores.edge_p, group_primary_p]),
             edge_records + group_records,
             "joint",
             ["edge", "group"],
         )
     if hypothesis_unit == "edge":
         return scores.edge_p, edge_records, "edge", ["edge"]
-    return scores.group_p, group_records, "group", ["group"]
+    return group_primary_p, group_records, "group", ["group"]
 
 
 def _ranking_rows(

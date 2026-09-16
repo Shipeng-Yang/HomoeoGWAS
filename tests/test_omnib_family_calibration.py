@@ -152,6 +152,8 @@ def test_joint_family_concatenates_once_and_preserves_full_index_mapping(
     calls = []
 
     def fake_calibration(p_obs, p_null, *, alpha):
+        assert p_obs.shape == (6,)
+        assert p_null.shape == (6, 3)
         calls.append((p_obs.copy(), p_null.copy(), alpha))
         return {
             "alpha": alpha,
@@ -161,9 +163,8 @@ def test_joint_family_concatenates_once_and_preserves_full_index_mapping(
             "threshold": 1.0,
             "threshold_comparator": "strict_less_than",
             "rejected": True,
-            "rejected_local": [0, 1, 2, 3, 4, 5, 6],
-            "adjusted_p_local": np.array(
-                [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]),
+            "rejected_local": [0, 1, 2, 3, 4, 5],
+            "adjusted_p_local": np.full(6, 0.01),
             "n_degenerate_replicates": 0,
             "degenerate_policy": "conservative",
         }
@@ -176,14 +177,20 @@ def test_joint_family_concatenates_once_and_preserves_full_index_mapping(
         bootstrap_B=3, full_dump_path=str(ranking_path))
 
     assert len(calls) == 1
-    assert calls[0][0].shape == (7,)  # five finite edges + two groups
-    assert result.G == 8
+    assert calls[0][0].shape == (6,)  # five finite edges + one full-edge group
+    assert result.G == result.n_planned == 8
+    assert result.n_valid == 6
+    assert result.n_unestimable == 2
     fwer = result.model_diagnostics["bootstrap_fwer"]
     assert fwer["family_id"] == "joint"
     assert fwer["calibrated_layers"] == ["edge", "group"]
     assert fwer["hypothesis_ids"][0].startswith("edge:")
     assert fwer["hypothesis_ids"][-1].startswith("group:")
+    assert fwer["n_calibrated"] == 6
     assert fwer["adjusted_p"][4] is None
+    assert fwer["adjusted_p"][7] is None
+    assert fwer["observed_p"][4] is None
+    assert fwer["observed_p"][7] is None
     ranking = pd.read_csv(ranking_path, sep="\t", keep_default_na=False)
     assert len(ranking) == 8
     nonestimable = ranking.loc[
@@ -192,6 +199,12 @@ def test_joint_family_concatenates_once_and_preserves_full_index_mapping(
     assert nonestimable.p_interaction == "NA"
     assert nonestimable.p_adjusted_bootstrap_minp == "NA"
     assert int(nonestimable.primary_sig) == 0
+    partial_group = ranking.loc[
+        ranking.hypothesis_id == fwer["hypothesis_ids"][7]
+    ].iloc[0]
+    assert partial_group.p_interaction == "NA"
+    assert partial_group.p_adjusted_bootstrap_minp == "NA"
+    assert int(partial_group.primary_sig) == 0
 
 
 @pytest.mark.parametrize("bootstrap_B", [0, -1])

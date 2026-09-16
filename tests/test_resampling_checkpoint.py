@@ -340,6 +340,42 @@ def _checkpoint_group_run(
     )
 
 
+def test_checkpoint_group_primary_excludes_partial_group_from_calibration(
+        tmp_path):
+    from homoeogwas.group_family import MasterGroupFamily
+    from homoeogwas.omnib_family import run_group_scan_omnib
+
+    subdata, _family, y, sample_idx = _small_group_fixture()
+    family = MasterGroupFamily(
+        subgenomes=("A", "B", "D"),
+        group_ids=("complete", "partial"),
+        genes=(("g0", "g0", "g0"), ("g1", "g1", "missing")),
+    )
+    checkpoint_root = tmp_path / "partial_group"
+    result = run_group_scan_omnib(
+        subdata, family, y, sample_idx,
+        hypothesis_unit="group", family_scope="primary_only",
+        cap=150, n_pc=3, transform="INT", bootstrap_B=3,
+        bootstrap_seed=2026, n_jobs=1, grm_method="grm_from_X",
+        maf_min=0.01, burden_maf=0.01, min_snp=3,
+        checkpoint_dir=checkpoint_root, checkpoint_block_size=3,
+        alpha=0.05, inferential=False,
+    )
+
+    fwer = result.model_diagnostics["bootstrap_fwer"]
+    assert result.G == result.n_planned == 2
+    assert result.n_valid == fwer["n_calibrated"] == 1
+    assert result.n_unestimable == 1
+    assert fwer["observed_p"] == [fwer["observed_p"][0], None]
+    assert fwer["adjusted_p"] == [None, None]
+    with np.load(checkpoint_root / "observed.npz", allow_pickle=False) as observed:
+        assert observed["observed_p"].shape == (2,)
+        assert np.isfinite(observed["observed_p"][0])
+        assert np.isnan(observed["observed_p"][1])
+    with np.load(checkpoint_root / "block_0_3.npz", allow_pickle=False) as block:
+        assert block["primary_null_p"].shape == (1, 3)
+
+
 def _result_bytes(result, *, exclude_execution_metadata=False):
     from homoeogwas.interact import _json_safe
 
