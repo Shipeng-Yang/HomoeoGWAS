@@ -58,6 +58,100 @@ def _validate_n_jobs(n_jobs: int) -> int:
     return n_jobs
 
 
+class ForkBlockPool:
+    """One forked worker pool reused across ordered block batches.
+
+    Large numerical state is installed by ``state_setter`` before the pool is
+    forked. Children inherit it through copy-on-write; queue messages contain
+    only the supplied block objects.
+    """
+
+    def __init__(
+        self,
+        worker: Callable[[Any], Any],
+        *,
+        n_jobs: int,
+        max_blocks: int,
+        state_setter: Callable[[], None],
+        state_clearer: Callable[[], None],
+    ) -> None:
+        self._requested_jobs = _validate_n_jobs(n_jobs)
+        if (
+            isinstance(max_blocks, bool)
+            or not isinstance(max_blocks, int)
+            or max_blocks < 1
+        ):
+            raise ValueError("max_blocks must be an integer >= 1")
+        self._worker = worker
+        self._state_setter = state_setter
+        self._state_clearer = state_clearer
+        self._parent_pid = os.getpid()
+        cpu_count = os.cpu_count() or 1
+        self._effective_jobs = min(self._requested_jobs, max_blocks, cpu_count)
+        fork_available = (
+            os.name == "posix" and "fork" in mp.get_all_start_methods())
+        self._use_processes = self._effective_jobs > 1 and fork_available
+        self._fallback_reason = None
+        if self._requested_jobs > 1 and not self._use_processes:
+            self._fallback_reason = (
+                "fork_unavailable" if not fork_available
+                else "effective_jobs_bounded_to_one"
+            )
+        self._pool = None
+        self._previous_worker: Callable[[Any], Any] | None = None
+        self._worker_pids: set[int] = set()
+
+    def __enter__(self) -> ForkBlockPool:
+        global _ACTIVE_WORKER
+        self._previous_worker = _ACTIVE_WORKER
+        self._state_setter()
+        _ACTIVE_WORKER = self._worker
+        if self._use_processes:
+            context = mp.get_context("fork")
+            self._pool = context.Pool(processes=self._effective_jobs)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        global _ACTIVE_WORKER
+        try:
+            if self._pool is not None:
+                self._pool.terminate()
+        finally:
+            self._pool = None
+            _ACTIVE_WORKER = self._previous_worker
+            self._state_clearer()
+
+    def imap(self, blocks: Iterable[Any]):
+        """Yield block values in submission order as they complete."""
+        indexed = list(enumerate(blocks))
+        if self._pool is not None:
+            records = self._pool.imap(_run_indexed_block, indexed, chunksize=1)
+        else:
+            records = (_run_indexed_block(item) for item in indexed)
+        for index, pid, ok, error_type, message, value in records:
+            if not ok:
+                raise ParallelBlockError(
+                    f"parallel block {index} failed with {error_type}: {message}")
+            self._worker_pids.add(int(pid))
+            yield value
+
+    def map(self, blocks: Iterable[Any]) -> list[Any]:
+        return list(self.imap(blocks))
+
+    @property
+    def execution(self) -> ParallelExecution:
+        return ParallelExecution(
+            requested_jobs=self._requested_jobs,
+            effective_jobs=self._effective_jobs if self._use_processes else 1,
+            backend="fork_shared_memory" if self._use_processes else "serial",
+            process_model="processes" if self._use_processes else "serial",
+            inner_threads=1,
+            parent_pid=self._parent_pid,
+            worker_pids=tuple(sorted(self._worker_pids)),
+            fallback_reason=self._fallback_reason,
+        )
+
+
 def run_fork_blocks(
     blocks: Iterable[Any],
     worker: Callable[[Any], Any],
@@ -66,17 +160,9 @@ def run_fork_blocks(
     state_setter: Callable[[], None],
     state_clearer: Callable[[], None],
 ) -> tuple[list[Any], ParallelExecution]:
-    """Run ordered blocks serially or in POSIX fork workers.
-
-    Large numerical state is installed by ``state_setter`` before the pool is
-    forked. Children inherit it through copy-on-write; queue messages contain
-    only the supplied block objects.
-    """
-    global _ACTIVE_WORKER
-
+    """Run ordered blocks serially or in POSIX fork workers."""
     requested_jobs = _validate_n_jobs(n_jobs)
-    indexed = list(enumerate(blocks))
-    parent_pid = os.getpid()
+    indexed = list(blocks)
     if not indexed:
         return [], ParallelExecution(
             requested_jobs=requested_jobs,
@@ -84,54 +170,16 @@ def run_fork_blocks(
             backend="serial",
             process_model="serial",
             inner_threads=1,
-            parent_pid=parent_pid,
+            parent_pid=os.getpid(),
             worker_pids=(),
             fallback_reason="no_blocks",
         )
-
-    cpu_count = os.cpu_count() or 1
-    effective_jobs = min(requested_jobs, len(indexed), cpu_count)
-    fork_available = os.name == "posix" and "fork" in mp.get_all_start_methods()
-    use_processes = effective_jobs > 1 and fork_available
-    fallback_reason = None
-    if requested_jobs > 1 and not use_processes:
-        fallback_reason = (
-            "fork_unavailable" if not fork_available
-            else "effective_jobs_bounded_to_one"
-        )
-
-    previous_worker = _ACTIVE_WORKER
-    state_setter()
-    _ACTIVE_WORKER = worker
-    try:
-        if use_processes:
-            context = mp.get_context("fork")
-            with context.Pool(processes=effective_jobs) as pool:
-                records = pool.map(_run_indexed_block, indexed, chunksize=1)
-            backend = "fork_shared_memory"
-            process_model = "processes"
-        else:
-            records = [_run_indexed_block(item) for item in indexed]
-            backend = "serial"
-            process_model = "serial"
-
-        for index, _pid, ok, error_type, message, _value in records:
-            if not ok:
-                raise ParallelBlockError(
-                    f"parallel block {index} failed with {error_type}: {message}")
-        records.sort(key=lambda record: record[0])
-        values = [record[5] for record in records]
-        worker_pids = tuple(sorted({int(record[1]) for record in records}))
-        return values, ParallelExecution(
-            requested_jobs=requested_jobs,
-            effective_jobs=effective_jobs if use_processes else 1,
-            backend=backend,
-            process_model=process_model,
-            inner_threads=1,
-            parent_pid=parent_pid,
-            worker_pids=worker_pids,
-            fallback_reason=fallback_reason,
-        )
-    finally:
-        _ACTIVE_WORKER = previous_worker
-        state_clearer()
+    with ForkBlockPool(
+        worker,
+        n_jobs=requested_jobs,
+        max_blocks=len(indexed),
+        state_setter=state_setter,
+        state_clearer=state_clearer,
+    ) as pool:
+        values = pool.map(indexed)
+        return values, pool.execution

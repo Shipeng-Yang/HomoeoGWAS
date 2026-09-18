@@ -1,0 +1,1 @@
+`omnib_pool_reference_9c14d6f.json`: checkpointed omniB group-scan identity (observed/adjusted p, null minima, checkpoint file and manifest hashes) recorded with the unchanged implementation at commit 9c14d6f by the helpers in `tests/test_omnib_pool_reuse.py` (n_jobs=1); bound to the numeric runtime fingerprint stored in the file.

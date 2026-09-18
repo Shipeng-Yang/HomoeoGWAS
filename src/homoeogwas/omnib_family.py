@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .group_family import ExpandedEdgeFamily, MasterGroupFamily, expand_pair_edges
-from .parallel import run_fork_blocks
+from .parallel import ForkBlockPool, run_fork_blocks
 
 OMNIB_COMPONENT_NAMES = ("minor_burden", "pc1", "kernel_hadamard")
 INDEXED_SCORE_MICROBLOCK = 25
@@ -389,9 +389,10 @@ def _score_prepared_block(bounds):
     from . import interact as I
 
     state = _require_omnib_worker_state("prepared")
-    lo, hi = bounds
+    lo, hi, block_lo, block_hi = bounds
     edge_indices = state["valid_indices"][lo:hi]
-    response_count = state["response_count"]
+    blocks = state["whitened_blocks"][block_lo:block_hi]
+    response_count = blocks[-1][1]
     values = np.full((edge_indices.size, response_count), np.nan)
     component_values = np.full(
         (edge_indices.size, len(OMNIB_COMPONENT_NAMES), response_count),
@@ -399,7 +400,7 @@ def _score_prepared_block(bounds):
     )
     for local, edge_index in enumerate(edge_indices):
         prepared = state["projection_cache"][int(edge_index)]
-        for start, stop, response_block in state["whitened_blocks"]:
+        for start, stop, response_block in blocks:
             components = _prepared_components_over_Y(
                 response_block, prepared)[:, :stop - start]
             component_values[local, :, start:stop] = components
@@ -408,6 +409,64 @@ def _score_prepared_block(bounds):
                 for column in range(stop - start)
             ], float)
     return edge_indices, values, component_values
+
+
+def _edge_task_ranges(count: int, parts: int) -> list[tuple[int, int]]:
+    """Split ``count`` edges into at most ``parts`` balanced contiguous ranges."""
+    count = int(count)
+    if count < 1:
+        return []
+    parts = min(count, int(parts))
+    base, extra = divmod(count, parts)
+    ranges = []
+    lo = 0
+    for part in range(parts):
+        hi = lo + base + (1 if part < extra else 0)
+        ranges.append((lo, hi))
+        lo = hi
+    return ranges
+
+
+def _stage_whitened_microblocks(
+    W: np.ndarray,
+    responses: np.ndarray,
+) -> list[tuple[int, int, np.ndarray]]:
+    """Whiten one response batch column by column into padded microblocks."""
+    response_count = int(responses.shape[1])
+    # Whiten each response independently, then batch only column-independent
+    # contractions below. General matrix multiplication may select a reduction
+    # strategy from the block shape and thereby change the last bits.
+    whitened = np.column_stack([
+        W @ responses[:, column] for column in range(response_count)])
+    blocks = []
+    for start in range(0, response_count, INDEXED_SCORE_MICROBLOCK):
+        stop = min(start + INDEXED_SCORE_MICROBLOCK, response_count)
+        width = stop - start
+        padded = np.zeros(
+            (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
+        padded[:, :width] = whitened[:, start:stop]
+        blocks.append((start, stop, padded))
+    return blocks
+
+
+def _aggregate_group_p(
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    edge_p: np.ndarray,
+) -> np.ndarray:
+    from . import interact as I
+
+    response_count = int(edge_p.shape[1])
+    group_p = np.full((len(family.group_ids), response_count), np.nan)
+    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
+        selected = np.asarray(edge_indices, int)
+        if selected.size == 1:
+            group_p[group_index] = edge_p[selected[0]]
+        else:
+            for column in range(response_count):
+                group_p[group_index, column] = I.acat(
+                    edge_p[selected, column])
+    return group_p
 
 
 @dataclass
@@ -1178,8 +1237,6 @@ def _score_prepared_responses(
     n_jobs: int = 8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Score response columns through one frozen prepared omniB algorithm."""
-    from . import interact as I
-
     responses = np.asarray(responses, float)
     if responses.ndim == 1:
         responses = responses.reshape(-1, 1)
@@ -1194,19 +1251,7 @@ def _score_prepared_responses(
             np.empty((len(family.group_ids), 0), float),
             np.empty((len(expanded.edges), len(OMNIB_COMPONENT_NAMES), 0), float),
         )
-    # Whiten each response independently, then batch only column-independent
-    # contractions below. General matrix multiplication may select a reduction
-    # strategy from the block shape and thereby change the last bits.
-    whitened = np.column_stack([
-        scores.W @ responses[:, column] for column in range(response_count)])
-    whitened_blocks = []
-    for start in range(0, response_count, INDEXED_SCORE_MICROBLOCK):
-        stop = min(start + INDEXED_SCORE_MICROBLOCK, response_count)
-        width = stop - start
-        padded = np.zeros(
-            (whitened.shape[0], INDEXED_SCORE_MICROBLOCK), dtype=whitened.dtype)
-        padded[:, :width] = whitened[:, start:stop]
-        whitened_blocks.append((start, stop, padded))
+    whitened_blocks = _stage_whitened_microblocks(scores.W, responses)
     edge_p = np.full((len(expanded.edges), response_count), np.nan)
     edge_components = np.full(
         (len(expanded.edges), len(OMNIB_COMPONENT_NAMES), response_count),
@@ -1216,15 +1261,13 @@ def _score_prepared_responses(
     _update_group_partial(scores, expanded)
     valid_indices = np.flatnonzero(scores.edge_estimable)
 
-    step = max(1, valid_indices.size // (int(n_jobs) * 8))
     blocks = [
-        (lo, min(lo + step, valid_indices.size))
-        for lo in range(0, valid_indices.size, step)
+        (lo, hi, 0, len(whitened_blocks))
+        for lo, hi in _edge_task_ranges(valid_indices.size, int(n_jobs) * 8)
     ]
     worker_state = {
         "mode": "prepared",
         "valid_indices": valid_indices,
-        "response_count": response_count,
         "projection_cache": scores.projection_cache,
         "whitened_blocks": whitened_blocks,
     }
@@ -1237,16 +1280,7 @@ def _score_prepared_responses(
     for edge_indices, values, component_values in results:
         edge_p[edge_indices] = values
         edge_components[edge_indices] = component_values
-
-    group_p = np.full((len(family.group_ids), response_count), np.nan)
-    for group_index, edge_indices in enumerate(expanded.group_edge_indices):
-        selected = np.asarray(edge_indices, int)
-        if selected.size == 1:
-            group_p[group_index] = edge_p[selected[0]]
-        else:
-            for column in range(response_count):
-                group_p[group_index, column] = I.acat(
-                    edge_p[selected, column])
+    group_p = _aggregate_group_p(family, expanded, edge_p)
     return edge_p, group_p, edge_components
 
 
@@ -1352,6 +1386,100 @@ def score_omnib_null_indices(
     if return_components:
         return edge_p, group_p, components
     return edge_p, group_p
+
+
+def _score_null_ranges_pooled(
+    scores: OmniBFamilyScores,
+    family: MasterGroupFamily,
+    expanded: ExpandedEdgeFamily,
+    ranges,
+    *,
+    base_seed: int,
+    n_jobs: int,
+    consume,
+) -> dict:
+    """Score indexed null ranges through one forked pool, in range order.
+
+    ``consume(start, stop, edge_p, group_p)`` receives each range exactly as
+    ``score_omnib_null_indices`` would have returned it.
+    """
+    from . import interact as I
+
+    ranges = [(int(start), int(stop)) for start, stop in ranges]
+    if not ranges or any(stop <= start for start, stop in ranges):
+        raise ValueError("pooled null scoring requires non-empty index ranges")
+    if (
+        scores.null_covariance is None
+        or scores.null_beta is None
+        or scores.null_design is None
+        or not scores.null_kernels
+    ):
+        raise RuntimeError("omniB score context lacks its frozen null fit")
+    null_fit = (
+        scores.W,
+        scores.null_covariance,
+        scores.null_beta,
+        scores.covariance_components,
+    )
+    # One batched draw is bit-identical: each replicate owns its own seeded RNG.
+    response_list, _, _ = I.null_replicates_by_index(
+        scores.null_kernels, scores.y, scores.null_design,
+        indices=[index for start, stop in ranges for index in range(start, stop)],
+        base_seed=base_seed, null_fit=null_fit)
+    _prepare_projection_cache(scores, expanded)
+    _update_group_partial(scores, expanded)
+    valid_indices = np.flatnonzero(scores.edge_estimable)
+    edge_ranges = _edge_task_ranges(valid_indices.size, int(n_jobs))
+
+    whitened_blocks = []
+    block_spans = []
+    cursor = 0
+    for start, stop in ranges:
+        responses = np.column_stack(response_list[cursor:cursor + stop - start])
+        cursor += stop - start
+        staged = _stage_whitened_microblocks(scores.W, responses)
+        block_spans.append((len(whitened_blocks), len(whitened_blocks) + len(staged)))
+        whitened_blocks.extend(staged)
+    tasks = [
+        (lo, hi, block_lo, block_hi)
+        for block_lo, block_hi in block_spans
+        for lo, hi in edge_ranges
+    ]
+    worker_state = {
+        "mode": "prepared",
+        "valid_indices": valid_indices,
+        "projection_cache": scores.projection_cache,
+        "whitened_blocks": whitened_blocks,
+    }
+    edge_count = len(expanded.edges)
+    with ForkBlockPool(
+        _score_prepared_block,
+        n_jobs=int(n_jobs),
+        max_blocks=max(1, len(edge_ranges)),
+        state_setter=lambda: _set_omnib_worker_state(worker_state),
+        state_clearer=_clear_omnib_worker_state,
+    ) as pool:
+        results = pool.imap(tasks)
+        for start, stop in ranges:
+            width = stop - start
+            edge_p = np.full((edge_count, width), np.nan)
+            components = np.full(
+                (edge_count, len(OMNIB_COMPONENT_NAMES), width), np.nan)
+            for _ in edge_ranges:
+                edge_indices, values, component_values = next(results)
+                edge_p[edge_indices] = values
+                components[edge_indices] = component_values
+            group_p = _aggregate_group_p(family, expanded, edge_p)
+            diagnostics = _response_failure_diagnostics(scores, components)
+            scores.response_diagnostics = diagnostics
+            _apply_native_response_failure_policy(
+                edge_p, group_p, diagnostics, includes_observed=False)
+            consume(start, stop, edge_p, group_p)
+        execution = pool.execution.as_dict()
+    return execution | {
+        "bootstrap_blocks_scored": len(ranges),
+        "bootstrap_tasks_per_block": len(edge_ranges),
+    }
 
 
 def _normalized_nested_bases(
@@ -2038,13 +2166,29 @@ def run_group_scan_omnib(
         store.bind_manifest(manifest)
         hypothesis_ids = [record["hypothesis_id"] for record in identities]
         store.write_observed(observed, hypothesis_ids)
-        for start, stop in store.missing_ranges():
-            edge_null, group_null = score_omnib_null_indices(
-                scores, family, expanded, range(start, stop),
-                base_seed=bootstrap_seed, n_jobs=n_jobs)
+        pool_forks = int(
+            scores.parallel_execution.get("backend") == "fork_shared_memory")
+        execution = dict(scores.parallel_execution) | {
+            "bootstrap_blocks_scored": 0,
+            "bootstrap_tasks_per_block": 0,
+        }
+
+        def publish_block(start, stop, edge_null, group_null):
             block = _select_primary_matrix(
                 edge_null, group_null, hypothesis_unit, family_scope)
             store.write_block(start, stop, block[finite])
+
+        missing = store.missing_ranges()
+        if missing:
+            execution = _score_null_ranges_pooled(
+                scores, family, expanded, missing,
+                base_seed=bootstrap_seed, n_jobs=n_jobs,
+                consume=publish_block)
+            pool_forks += int(execution.get("backend") == "fork_shared_memory")
+        scores.parallel_execution = execution | {
+            "pool_reuse": True,
+            "pool_forks_per_response": pool_forks,
+        }
         primary_null = store.concatenate(require_complete=True)
         if primary_null.shape != (int(finite.sum()), bootstrap_B):
             raise RuntimeError(

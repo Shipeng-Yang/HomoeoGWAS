@@ -1,0 +1,291 @@
+{
+ "generated_at_commit": "9c14d6f",
+ "generator": "tests/test_omnib_pool_reuse.py helpers, n_jobs=1, unchanged implementation",
+ "runtime": {
+  "blas": [
+   {
+    "architecture": "Haswell",
+    "internal_api": "openblas",
+    "version": "0.3.31.dev"
+   },
+   {
+    "architecture": "Haswell",
+    "internal_api": "openblas",
+    "version": "0.3.34.106.0"
+   }
+  ],
+  "machine": "x86_64",
+  "numpy": "2.5.3",
+  "scipy": "1.18.1"
+ },
+ "scenarios": {
+  "edge_bs25": {
+   "G": 15,
+   "adjusted_p": [
+    1.0,
+    1.0,
+    0.9,
+    1.0,
+    0.95,
+    1.0,
+    1.0,
+    0.3,
+    0.35,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    null,
+    null
+   ],
+   "checkpoint_files": {
+    "block_0_19.npz": "0982ba3996524b9ddc942922c38df2d4ad461a594aad57b44437a1727dff5f69",
+    "manifest.json": "b96d7410340fd95f1cf7f9eb928eba2f8d4550214649623477d3ef5942e95bf4",
+    "observed.npz": "c2f2d7753430690407b70baa08bb37a345d4a917c955ce52f1af6b369c8ca825"
+   },
+   "completed_ranges": [
+    [
+     0,
+     19
+    ]
+   ],
+   "empirical_p": 0.3,
+   "family_order_sha256": "62cc9f793a9f3cc0f72ef669bd74269224be98ef47a54e68ec23f899f3fbe9bc",
+   "feature_cache_sha256": "1973acc7c91be9c85c6dcc259e72355f265228ab217260cac7a1123c6141d59d",
+   "fixed_mask_sha256": "277aa701b2b7d118d716e3eddef48e156559424ec0da2a101283c70024cd697f",
+   "hypothesis_ids": [
+    "edge:AB:g0:g0",
+    "edge:AD:g0:g0",
+    "edge:BD:g0:g0",
+    "edge:AB:g1:g1",
+    "edge:AD:g1:g1",
+    "edge:BD:g1:g1",
+    "edge:AB:g2:g2",
+    "edge:AD:g2:g2",
+    "edge:BD:g2:g2",
+    "edge:AB:g3:g3",
+    "edge:AD:g3:g3",
+    "edge:BD:g3:g3",
+    "edge:AB:g4:g4",
+    "edge:AD:g4:missing",
+    "edge:BD:g4:missing"
+   ],
+   "manifest_id": "5786ea47a67453607f3f2bd47b3ceaf8742dacd3c07014b238df9a9e4115c699",
+   "n_valid": 13,
+   "null_fit_sha256": "4be95fb390da121a4d22faff7e0b314481ce383e7a6fc096baddd71f1e945d5e",
+   "null_min": [
+    0.23953695601981773,
+    0.015585758704236397,
+    0.194145842496726,
+    0.0881991835409916,
+    0.1254447568863103,
+    0.06548035836727578,
+    0.05425528934537255,
+    0.09302435099655093,
+    0.013742251997675037,
+    0.020756223096760062,
+    0.006735218212913063,
+    0.0322343851788941,
+    0.015277771589154832,
+    0.11157267409838423,
+    0.03680045318250308,
+    0.12660396221283637,
+    0.05683195627445681,
+    0.03142135431544901,
+    0.04021747347771604
+   ],
+   "observed_p": [
+    0.6895612764687111,
+    0.4176254385630144,
+    0.17267534627494008,
+    0.26765698963542706,
+    0.2028034263027691,
+    0.8784974296658501,
+    0.9300601829021777,
+    0.028432276074923102,
+    0.03174505189593063,
+    0.5710598934410698,
+    0.37398520384330924,
+    0.5917246470710088,
+    0.97557594977733,
+    null,
+    null
+   ],
+   "prepared_design_sha256": "a9df40e0525c4d9ab8826907274e6f14b87162612ea3e5fa8c38319ee57a4c8f",
+   "primary_null_p_sha256": "71e8a42e935deac83c9cb870d0955962157d35841b72463b7e833505e699f72f",
+   "rejected_hypothesis_ids": [],
+   "threshold": 0.006735218212913063,
+   "top": [
+    [
+     "edge:AD:g2:g2",
+     0.028432276074923102
+    ],
+    [
+     "edge:BD:g2:g2",
+     0.03174505189593063
+    ],
+    [
+     "edge:BD:g0:g0",
+     0.17267534627494008
+    ],
+    [
+     "edge:AD:g1:g1",
+     0.2028034263027691
+    ],
+    [
+     "edge:AB:g1:g1",
+     0.26765698963542706
+    ]
+   ]
+  },
+  "joint_bs5": {
+   "G": 20,
+   "adjusted_p": [
+    1.0,
+    1.0,
+    0.9,
+    1.0,
+    0.95,
+    1.0,
+    1.0,
+    0.3,
+    0.35,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    null,
+    null,
+    1.0,
+    1.0,
+    0.55,
+    1.0,
+    null
+   ],
+   "checkpoint_files": {
+    "block_0_5.npz": "6e375dc576f5bbf2f6c1b56871f676eac6db94b832e359091fe2a3ca557585e3",
+    "block_10_15.npz": "3595884b551aca5a3d3ba2e80ab81037d5638438c1f925b84ab404bdaf84f206",
+    "block_15_19.npz": "8f67bfc8e0ba8140bb5f2fd90396bfc64849754fd9a1d77664657b23387975bb",
+    "block_5_10.npz": "ef0188f136cc032a66b5354a83112f05d1230e36a1e31c2d249937c1dc74f60c",
+    "manifest.json": "12371b1266b295e49c24b97415a7e96804a1f84e19093ff385537313d10c6615",
+    "observed.npz": "6d75a097272bf57b245c3b7b37568456864b5d014aa3cc0c54fded31ca637f80"
+   },
+   "completed_ranges": [
+    [
+     0,
+     5
+    ],
+    [
+     5,
+     10
+    ],
+    [
+     10,
+     15
+    ],
+    [
+     15,
+     19
+    ]
+   ],
+   "empirical_p": 0.3,
+   "family_order_sha256": "1f322882afff9e9105862737f13d0ffe2c36a623c590340cd13cfe5c27bf89d8",
+   "feature_cache_sha256": "1973acc7c91be9c85c6dcc259e72355f265228ab217260cac7a1123c6141d59d",
+   "fixed_mask_sha256": "277aa701b2b7d118d716e3eddef48e156559424ec0da2a101283c70024cd697f",
+   "hypothesis_ids": [
+    "edge:AB:g0:g0",
+    "edge:AD:g0:g0",
+    "edge:BD:g0:g0",
+    "edge:AB:g1:g1",
+    "edge:AD:g1:g1",
+    "edge:BD:g1:g1",
+    "edge:AB:g2:g2",
+    "edge:AD:g2:g2",
+    "edge:BD:g2:g2",
+    "edge:AB:g3:g3",
+    "edge:AD:g3:g3",
+    "edge:BD:g3:g3",
+    "edge:AB:g4:g4",
+    "edge:AD:g4:missing",
+    "edge:BD:g4:missing",
+    "group:group_0",
+    "group:group_1",
+    "group:group_2",
+    "group:group_3",
+    "group:group_4"
+   ],
+   "manifest_id": "247a4abf9b4c17945faf08c3026967842854d11746e7f3a01d58c73bf6cddf11",
+   "n_valid": 17,
+   "null_fit_sha256": "4be95fb390da121a4d22faff7e0b314481ce383e7a6fc096baddd71f1e945d5e",
+   "null_min": [
+    0.23953695601981773,
+    0.015585758704236397,
+    0.194145842496726,
+    0.0881991835409916,
+    0.1254447568863103,
+    0.06548035836727578,
+    0.05425528934537255,
+    0.09302435099655093,
+    0.013742251997675037,
+    0.020756223096760062,
+    0.006735218212913063,
+    0.0322343851788941,
+    0.015277771589154832,
+    0.11157267409838423,
+    0.03680045318250308,
+    0.12660396221283637,
+    0.05683195627445681,
+    0.03142135431544901,
+    0.04021747347771604
+   ],
+   "observed_p": [
+    0.6895612764687111,
+    0.4176254385630144,
+    0.17267534627494008,
+    0.26765698963542706,
+    0.2028034263027691,
+    0.8784974296658501,
+    0.9300601829021777,
+    0.028432276074923102,
+    0.03174505189593063,
+    0.5710598934410698,
+    0.37398520384330924,
+    0.5917246470710088,
+    0.97557594977733,
+    null,
+    null,
+    0.3746901988325938,
+    0.5259701604362605,
+    0.05663883638366224,
+    0.5111875150509736,
+    null
+   ],
+   "prepared_design_sha256": "a9df40e0525c4d9ab8826907274e6f14b87162612ea3e5fa8c38319ee57a4c8f",
+   "primary_null_p_sha256": "4b5e5e0eb1103da3e26fcaecf4e4c02b3492a89928d21bbd2acda3d848d0e019",
+   "rejected_hypothesis_ids": [],
+   "threshold": 0.006735218212913063,
+   "top": [
+    [
+     "edge:AD:g2:g2",
+     0.028432276074923102
+    ],
+    [
+     "edge:BD:g2:g2",
+     0.03174505189593063
+    ],
+    [
+     "group:group_2",
+     0.05663883638366224
+    ],
+    [
+     "edge:BD:g0:g0",
+     0.17267534627494008
+    ],
+    [
+     "edge:AD:g1:g1",
+     0.2028034263027691
+    ]
+   ]
+  }
+ }
+}
