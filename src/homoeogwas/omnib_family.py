@@ -510,6 +510,7 @@ class OmniBFamilyScores:
     edge_membership: np.ndarray = field(
         default_factory=lambda: np.empty(0, bool), repr=False)
     grm_provenance: dict = field(default_factory=dict)
+    grm_cache_diagnostics: dict = field(default_factory=dict)
     retained_variant_mask_identity: dict = field(default_factory=dict)
     parallel_execution: dict = field(default_factory=dict)
     response_diagnostics: OmniBResponseDiagnostics | None = None
@@ -700,6 +701,7 @@ def score_omnib_family(
     min_snp: int = 3,
     covariates: dict = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
+    grm_cache=None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Prepare once, then score observed and optional bootstrap responses."""
     if isinstance(bootstrap_B, bool) or int(bootstrap_B) != bootstrap_B:
@@ -727,6 +729,7 @@ def score_omnib_family(
         burden_maf=burden_maf,
         min_snp=min_snp,
         covariates=covariates,
+        grm_cache=grm_cache,
     )
     scores.feature_seed_provenance["policy"] = feature_seed_policy
     response_count = bootstrap_B + 1
@@ -894,6 +897,7 @@ def prepare_omnib_design(
     min_snp: int,
     covariates: dict | None = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
+    grm_cache=None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Prepare one immutable raw-family/null/feature omniB design."""
     from . import interact as I
@@ -924,6 +928,7 @@ def prepare_omnib_design(
     n = sample_idx.size
     kernels = {}
     grm_provenance = {}
+    grm_cache_diagnostics = {}
     for sub in subdata:
         kernel, provenance = I._build_grm(
             subdata[sub], sample_idx, grm_method, maf_min,
@@ -932,11 +937,21 @@ def prepare_omnib_design(
                 if retained_variant_masks is None
                 else retained_variant_masks[sub]
             ),
-            return_provenance=True)
+            return_provenance=True,
+            grm_cache=grm_cache,
+            subgenome=sub,
+            mask_policy=(
+                {"thresholds": retained_variant_mask_identity[sub].get("thresholds")}
+                if sub in retained_variant_mask_identity else None
+            ))
         kernels[sub] = kernel
+        # The cache record stays out of grm_provenance so checkpoint manifests
+        # and prepared-design identities are byte-identical with or without it.
+        if "cache" in provenance:
+            grm_cache_diagnostics[sub] = provenance["cache"]
         grm_provenance[sub] = {
             key: value for key, value in provenance.items()
-            if key != "retained_variant_mask"
+            if key not in {"retained_variant_mask", "cache"}
         }
     C = None
     covariate_metadata = {"policy": "none"}
@@ -1048,6 +1063,7 @@ def prepare_omnib_design(
         null_kernels=kernels,
         edge_membership=edge_membership,
         grm_provenance=grm_provenance,
+        grm_cache_diagnostics=grm_cache_diagnostics,
         retained_variant_mask_identity=retained_variant_mask_identity,
     )
     scores.fixed_mask_sha256 = _fixed_component_mask_sha256(scores)
@@ -1149,6 +1165,7 @@ def _prepare_checkpoint_omnib(
     covariates: dict | None,
     feature_seed: int | None = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
+    grm_cache=None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Compatibility wrapper around :func:`prepare_omnib_design`."""
     if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
@@ -1169,6 +1186,7 @@ def _prepare_checkpoint_omnib(
         burden_maf=burden_maf,
         min_snp=min_snp,
         covariates=covariates,
+        grm_cache=grm_cache,
     )
     scores.feature_seed_provenance["policy"] = policy
     return scores, expanded
@@ -1988,6 +2006,18 @@ def _checkpoint_manifest(
     }
 
 
+def _grm_provenance_with_cache(scores: OmniBFamilyScores) -> dict:
+    if not scores.grm_cache_diagnostics:
+        return scores.grm_provenance
+    return {
+        sub: (
+            dict(provenance) | {"cache": scores.grm_cache_diagnostics[sub]}
+            if sub in scores.grm_cache_diagnostics else provenance
+        )
+        for sub, provenance in scores.grm_provenance.items()
+    }
+
+
 def _select_primary_matrix(edge_p, group_p, hypothesis_unit, family_scope):
     if family_scope == "joint":
         return np.vstack([edge_p, group_p])
@@ -2022,6 +2052,7 @@ def run_group_scan_omnib(
     checkpoint_manifest_context=None,
     retained_variant_masks=None,
     evidence_role="legacy",
+    grm_cache=None,
 ):
     """Run an edge, group or jointly calibrated omniB family.
 
@@ -2096,7 +2127,8 @@ def run_group_scan_omnib(
             n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates,
-            retained_variant_masks=retained_variant_masks)
+            retained_variant_masks=retained_variant_masks,
+            grm_cache=grm_cache)
         primary_p, identities, family_id, calibrated_layers = (
             _select_primary_family(
                 scores, family, expanded, hypothesis_unit, family_scope))
@@ -2129,7 +2161,8 @@ def run_group_scan_omnib(
             n_jobs=n_jobs,
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates,
-            retained_variant_masks=retained_variant_masks)
+            retained_variant_masks=retained_variant_masks,
+            grm_cache=grm_cache)
         score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(
@@ -2360,7 +2393,7 @@ def run_group_scan_omnib(
         "grm_provenance": {
             "method": grm_method,
             "maf_min": float(maf_min),
-            "subgenomes": scores.grm_provenance,
+            "subgenomes": _grm_provenance_with_cache(scores),
         },
         "feature_provenance": scores.feature_seed_provenance | {
             "feature_cache_sha256": scores.feature_cache_sha256,
