@@ -288,6 +288,19 @@ same fork/shared-memory process contract and records its execution metadata in
 `followup_summary.json`. Launch it through the installed console entry point so
 native thread limits are applied before numerical-library import.
 
+The per-subgenome GRM depends only on genotype bytes, the analysed sample
+rows, the marker filter and `grm.maf_min`, never on the phenotype. Repeated
+canonical group omniB runs on one panel can reuse it through an opt-in cache:
+`grm: {..., cache_dir: /abs/path}`. Entries are `<key>.npy` + `<key>.json`,
+keyed by a SHA-256 over the BED/BIM digests, the ordered sample rows and IDs,
+the mask policy, `maf_min`, the method and the subgenome label. A hit is
+accepted only when the matrix bytes, the identity fields and the runtime
+fingerprint (numpy/scipy versions, the four BLAS thread variables) all match;
+any mismatch or half-written entry aborts the run instead of recomputing
+silently. Results are bitwise identical with or without the cache; the only
+addition is `model_diagnostics.grm_provenance.subgenomes.<S>.cache`
+(`enabled`, `hit`, `key`, `npy_sha256`). Checkpoint manifests do not change.
+
 A complete worked example on an allo-octoploid (strawberry, AABBCCDD,
 2n=8x=56) — one group family with six derived pair edges — is in
 [`examples/strawberry_octoploid.md`](examples/strawberry_octoploid.md).

@@ -48,6 +48,7 @@ from scipy import stats
 
 from . import omnib_family as _family_score
 from .formal_provenance import FormalLaunchError, verify_formal_launch
+from .grm_cache import GRMCache, GRMCacheError
 from .group_family import (
     ExpandedEdgeFamily,
     MasterGroupFamily,
@@ -1081,6 +1082,7 @@ class SubgenomeData:
     gene_snp: dict                      # gene_id -> snp_idx (into X)
     samples: list
     chunk: object = None                # GenoChunk (for grm.compute_grm)
+    genotype_source: dict = None        # bound PLINK/mapping identity for the GRM cache
 
 
 @dataclass(frozen=True)
@@ -1217,7 +1219,14 @@ def _load_subgenome(
     gene_ids = z["gene_ids"].tolist()
     snp_idx = z["snp_idx"]
     gene_snp = {g: np.asarray(snp_idx[i], int) for i, g in enumerate(gene_ids)}
-    return SubgenomeData(X=X, gene_snp=gene_snp, samples=samples, chunk=bed)
+    genotype_source = {
+        "plink_prefix": str(plink_prefix),
+        "bim_sha256": str(np.asarray(z["bim_sha256"]).item()),
+        "n_variants": n_variants,
+    }
+    return SubgenomeData(
+        X=X, gene_snp=gene_snp, samples=samples, chunk=bed,
+        genotype_source=genotype_source)
 
 
 def _build_grm(
@@ -1228,11 +1237,16 @@ def _build_grm(
     *,
     retained_variant_mask: np.ndarray | None = None,
     return_provenance: bool = False,
+    grm_cache: GRMCache | None = None,
+    subgenome: str | None = None,
+    mask_policy: dict | None = None,
 ) -> np.ndarray | tuple[np.ndarray, dict]:
     """Subgenome GRM restricted to valid samples, trace-normed. ``compute_grm_maf`` reuses the
     package GRM; ``grm_from_X`` is the all-SNP PSD-clipped variant (sensitivity)."""
     n_t = sample_idx.size
     if method == "compute_grm_maf":
+        if grm_cache is not None:
+            raise GRMCacheError("GRM cache supports only grm.method=grm_from_X")
         if retained_variant_mask is not None:
             raise ValueError(
                 "explicit retained_variant_mask requires grm_from_X")
@@ -1242,16 +1256,33 @@ def _build_grm(
         K = K / (np.trace(K) / n_t)
         return (K, dict(info)) if return_provenance else K
     if method == "grm_from_X":
-        # Selection precedes every missingness, allele-frequency and MAF
-        # decision. Held-out FAM rows therefore cannot alter the formal null.
-        analysis_X = np.asarray(sd.X, float)[np.asarray(sample_idx, int), :]
-        K, provenance = grm_from_X(
-            analysis_X,
-            maf_min=maf_min,
-            retained_variant_mask=retained_variant_mask,
-            return_provenance=True,
-        )
-        K = K / (np.trace(K) / n_t)
+        def compute():
+            # Selection precedes every missingness, allele-frequency and MAF
+            # decision. Held-out FAM rows therefore cannot alter the formal null.
+            analysis_X = np.asarray(sd.X, float)[np.asarray(sample_idx, int), :]
+            K, provenance = grm_from_X(
+                analysis_X,
+                maf_min=maf_min,
+                retained_variant_mask=retained_variant_mask,
+                return_provenance=True,
+            )
+            return K / (np.trace(K) / n_t), provenance
+
+        if grm_cache is None:
+            K, provenance = compute()
+        else:
+            rows = np.asarray(sample_idx, int)
+            K, provenance = grm_cache.fetch_or_compute(
+                genotype_source=sd.genotype_source,
+                subgenome=subgenome,
+                sample_idx=rows,
+                sample_ids=[sd.samples[index] for index in rows],
+                method=method,
+                maf_min=maf_min,
+                retained_variant_mask=retained_variant_mask,
+                mask_policy=mask_policy,
+                compute=compute,
+            )
         return (K, provenance) if return_provenance else K
     raise ValueError(f"unknown grm.method '{method}' (use compute_grm_maf | grm_from_X)")
 
@@ -3359,6 +3390,30 @@ def _load_pair_weights(path: str, subs: list[str]) -> dict:
             for r in df[cols + ["weight"]].itertuples(index=False, name=None)}
 
 
+def _validate_grm_cache_dir(grm, *, canonical: bool) -> None:
+    if not isinstance(grm, dict) or grm.get("cache_dir") is None:
+        return
+    cache_dir = grm["cache_dir"]
+    if not canonical:
+        raise SystemExit(
+            "ERR: interact.grm.cache_dir is supported only by canonical group "
+            "omniB (mode=group, statistic=omniB)")
+    if not isinstance(cache_dir, str) or not cache_dir.strip():
+        raise SystemExit(
+            "ERR: interact.grm.cache_dir must be a non-empty path string")
+    path = Path(cache_dir)
+    if not path.is_absolute():
+        raise SystemExit(
+            f"ERR: interact.grm.cache_dir must be an absolute path; got {cache_dir!r}")
+    existing = path
+    while not existing.exists():
+        existing = existing.parent
+    if not existing.is_dir():
+        raise SystemExit(
+            f"ERR: interact.grm.cache_dir {cache_dir!r} cannot be created: "
+            f"{existing} is not a directory")
+
+
 def validate_interact_config(cfg: dict) -> None:
     """Validate the interaction schema without opening large genotype matrices."""
     cfg = normalize_interact_config(cfg)
@@ -3495,6 +3550,8 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit(
             "ERR: interact.statistic=triad3 requires mode=triad and exactly "
             "three subgenomes")
+    _validate_grm_cache_dir(ic.get("grm"), canonical=(
+        mode == "group" and statistic == "omnib"))
     primary_transform = str(ic.get("primary_transform", "INT")).upper()
     if primary_transform not in {"INT", "RAW"}:
         raise SystemExit(
@@ -4065,6 +4122,13 @@ def cmd_interact(args) -> int:
         for problem in problems:
             print(f"  - {problem}")
         return 1
+    grm_cache = None
+    if (ic.get("grm") or {}).get("cache_dir") is not None:
+        try:
+            grm_cache = GRMCache(ic["grm"]["cache_dir"])
+        except GRMCacheError as exc:
+            print(f"ERROR: GRM cache unavailable: {exc}")
+            return 1
     group_modes = ("group", "triad")
     out_dir = Path(args.out_dir or cfg.get("outputs", {}).get("out_dir", "results/interact"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -4252,32 +4316,37 @@ def cmd_interact(args) -> int:
             f"(n_sub={len(subs)}) ({time.time()-t0:.1f}s)",
             flush=True,
         )
-        r = run_group_scan_omnib(
-            subdata, family, y_raw, sample_idx,
-            hypothesis_unit=hypothesis_unit,
-            family_scope=family_scope,
-            cap=cap,
-            n_pc=n_pc,
-            transform="INT",
-            bootstrap_B=boot_B,
-            bootstrap_seed=boot_seed,
-            feature_seed=feature_seed,
-            n_jobs=n_jobs,
-            grm_method=grm_method,
-            maf_min=maf_min,
-            burden_maf=burden_maf,
-            min_snp=min_snp,
-            covariates=cov_arg,
-            full_dump_path=_dump_path("INT"),
-            inferential=not calibration_qa_only,
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_block_size=checkpoint_block_size,
-            checkpoint_manifest_context=(
-                verified_launch.checkpoint_context
-                if verified_launch is not None else None),
-            retained_variant_masks=retained_variant_masks,
-            evidence_role=evidence_role,
-        )
+        try:
+            r = run_group_scan_omnib(
+                subdata, family, y_raw, sample_idx,
+                hypothesis_unit=hypothesis_unit,
+                family_scope=family_scope,
+                cap=cap,
+                n_pc=n_pc,
+                transform="INT",
+                bootstrap_B=boot_B,
+                bootstrap_seed=boot_seed,
+                feature_seed=feature_seed,
+                n_jobs=n_jobs,
+                grm_method=grm_method,
+                maf_min=maf_min,
+                burden_maf=burden_maf,
+                min_snp=min_snp,
+                covariates=cov_arg,
+                full_dump_path=_dump_path("INT"),
+                inferential=not calibration_qa_only,
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_block_size=checkpoint_block_size,
+                checkpoint_manifest_context=(
+                    verified_launch.checkpoint_context
+                    if verified_launch is not None else None),
+                retained_variant_masks=retained_variant_masks,
+                evidence_role=evidence_role,
+                grm_cache=grm_cache,
+            )
+        except GRMCacheError as exc:
+            print(f"ERROR: GRM cache: {exc}")
+            return 1
         r.trait = trait
         results = {"INT": r.__dict__}
         canonical_family_provenance = dict(
