@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -1887,6 +1888,9 @@ def _family_provenance(
     }
 
 
+_HASH_CHUNK_BYTES = 64 << 20
+
+
 def _array_identity(values: np.ndarray) -> dict:
     """Hash an array together with shape and dtype without phenotype semantics."""
     array = np.asarray(values)
@@ -1895,10 +1899,12 @@ def _array_identity(values: np.ndarray) -> dict:
     digest.update(b"\0")
     digest.update(json.dumps(array.shape, separators=(",", ":")).encode())
     digest.update(b"\0")
-    if array.flags.c_contiguous:
+    if array.size and array.flags.c_contiguous:
         digest.update(memoryview(array).cast("B"))
-    else:
-        digest.update(np.ascontiguousarray(array).tobytes(order="C"))
+    elif array.size:
+        step = max(1, _HASH_CHUNK_BYTES // max(1, array[0].nbytes))
+        for start in range(0, array.shape[0], step):
+            digest.update(np.ascontiguousarray(array[start:start + step]).data)
     return {
         "shape": list(array.shape),
         "dtype": array.dtype.str,
@@ -1942,6 +1948,9 @@ def _checkpoint_manifest(
     from .resampling_checkpoint import CHECKPOINT_SCHEMA_VERSION
 
     subgenome_identity = {}
+    with ThreadPoolExecutor(max_workers=len(family.subgenomes)) as pool:
+        dosage = dict(zip(family.subgenomes, pool.map(
+            lambda sub: _array_identity(subdata[sub].X), family.subgenomes)))
     for sub in family.subgenomes:
         data = subdata[sub]
         gene_map = [
@@ -1949,7 +1958,7 @@ def _checkpoint_manifest(
             for gene, indices in sorted(data.gene_snp.items())
         ]
         subgenome_identity[sub] = {
-            "dosage": _array_identity(data.X),
+            "dosage": dosage[sub],
             "samples_sha256": _text_identity([str(value) for value in data.samples]),
             "gene_snp_sha256": _text_identity(gene_map),
         }
