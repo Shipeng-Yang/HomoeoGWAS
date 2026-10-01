@@ -4087,7 +4087,36 @@ def _build_benchmark_mask_records(
     return records
 
 
-def cmd_interact(args) -> int:
+class InteractPanelState:
+    """Phenotype-independent objects reused by consecutive interact cases of one panel."""
+
+    def __init__(self):
+        self.family_key = None
+        self.family = None
+        self.subdata_key = None
+        self.subdata = None
+        self.mask_key = None
+        self.masks = None
+        self.context_key = None
+        self.context = None
+
+    @staticmethod
+    def file_key(path) -> tuple:
+        path = Path(path)
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+
+    def genotype_key(self, ic, subs) -> tuple:
+        key = []
+        for sub in subs:
+            prefix = str(ic["genotype"][sub])
+            key.append((sub, tuple(
+                self.file_key(prefix + suffix) for suffix in (".bed", ".bim", ".fam")
+            ), self.file_key(ic["snp_to_gene"][sub])))
+        return tuple(key)
+
+
+def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
     import yaml
 
     t0 = time.time()
@@ -4110,9 +4139,19 @@ def cmd_interact(args) -> int:
             print(f"ERROR: interaction parallel runtime invalid: {exc}")
             return 1
     master_family = None
+    family_key = None
     if mode == "group":
         try:
-            master_family = load_master_group_family(ic["groups"], subs)
+            family_key = (
+                (InteractPanelState.file_key(ic["groups"]), tuple(subs))
+                if panel_state is not None else None)
+            if panel_state is not None and panel_state.family_key == family_key:
+                master_family = panel_state.family
+            else:
+                master_family = load_master_group_family(ic["groups"], subs)
+                if panel_state is not None:
+                    panel_state.family_key = family_key
+                    panel_state.family = master_family
         except Exception as exc:  # noqa: BLE001 - user-facing input repair
             print(f"ERROR: groups table invalid: {exc}")
             return 1
@@ -4138,11 +4177,23 @@ def cmd_interact(args) -> int:
           flush=True)
     # preflight_interact has already verified every mapping fingerprint; avoid
     # hashing very large BIMs a second time while loading dosage matrices.
-    subdata = {
-        s: _load_subgenome(
-            ic["genotype"][s], ic["snp_to_gene"][s], verify_mapping=False)
-        for s in subs
-    }
+    subdata_key = (
+        panel_state.genotype_key(ic, subs) if panel_state is not None else None)
+    if panel_state is not None and panel_state.subdata_key == subdata_key:
+        subdata = panel_state.subdata
+    else:
+        if panel_state is not None:
+            panel_state.__init__()
+            panel_state.family_key = family_key
+            panel_state.family = master_family
+        subdata = {
+            s: _load_subgenome(
+                ic["genotype"][s], ic["snp_to_gene"][s], verify_mapping=False)
+            for s in subs
+        }
+        if panel_state is not None:
+            panel_state.subdata_key = subdata_key
+            panel_state.subdata = subdata
     samples = subdata[subs[0]].samples
     for s in subs[1:]:
         if subdata[s].samples != samples:
@@ -4279,9 +4330,21 @@ def cmd_interact(args) -> int:
         and evidence_role.startswith("benchmark_")
     ):
         try:
-            retained_variant_masks = _build_benchmark_mask_records(
-                ic, subdata, sample_idx
-            )
+            mask_key = (
+                subdata_key,
+                hashlib.sha256(np.asarray(sample_idx, np.int64).tobytes()).hexdigest(),
+                ic["benchmark_identity"]["panel_id"],
+                ic["benchmark_identity"]["sample_context"],
+            ) if panel_state is not None else None
+            if panel_state is not None and panel_state.mask_key == mask_key:
+                retained_variant_masks = panel_state.masks
+            else:
+                retained_variant_masks = _build_benchmark_mask_records(
+                    ic, subdata, sample_idx
+                )
+                if panel_state is not None:
+                    panel_state.mask_key = mask_key
+                    panel_state.masks = retained_variant_masks
         except (OSError, ValueError) as exc:
             print(f"ERROR: benchmark marker-mask binding failed: {exc}")
             return 1
@@ -4316,6 +4379,27 @@ def cmd_interact(args) -> int:
             f"(n_sub={len(subs)}) ({time.time()-t0:.1f}s)",
             flush=True,
         )
+        panel_context = None
+        if (panel_state is not None and checkpoint_dir is not None and not cov_arg
+                and grm_cache is None):
+            from .omnib_family import build_omnib_panel_context
+
+            context_key = (
+                subdata_key, family_key,
+                hashlib.sha256(np.asarray(sample_idx, np.int64).tobytes()).hexdigest(),
+                cap, n_pc, feature_seed, grm_method, maf_min, burden_maf, min_snp,
+                None if retained_variant_masks is None else tuple(
+                    (sub, record["sha256"])
+                    for sub, record in sorted(retained_variant_masks.items())),
+            )
+            if panel_state.context_key != context_key:
+                panel_state.context = build_omnib_panel_context(
+                    subdata, family, sample_idx, cap=cap, n_pc=n_pc,
+                    feature_seed=feature_seed, grm_method=grm_method,
+                    maf_min=maf_min, burden_maf=burden_maf, min_snp=min_snp,
+                    retained_variant_masks=retained_variant_masks)
+                panel_state.context_key = context_key
+            panel_context = panel_state.context
         try:
             r = run_group_scan_omnib(
                 subdata, family, y_raw, sample_idx,
@@ -4343,6 +4427,7 @@ def cmd_interact(args) -> int:
                 retained_variant_masks=retained_variant_masks,
                 evidence_role=evidence_role,
                 grm_cache=grm_cache,
+                panel_context=panel_context,
             )
         except GRMCacheError as exc:
             print(f"ERROR: GRM cache: {exc}")

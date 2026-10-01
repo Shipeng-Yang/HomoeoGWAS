@@ -882,15 +882,57 @@ def score_omnib_subset(
     )
 
 
-def prepare_omnib_design(
+@dataclass
+class OmniBPanelContext:
+    """Phenotype-independent omniB preparation shared by responses of one panel."""
+
+    subdata: dict = field(repr=False)
+    family: MasterGroupFamily = field(repr=False)
+    sample_idx: np.ndarray = field(repr=False)
+    settings: dict
+    covariates: dict | None = field(repr=False)
+    expanded: ExpandedEdgeFamily = field(repr=False)
+    kernels: dict = field(repr=False)
+    grm_provenance: dict
+    grm_cache_diagnostics: dict
+    covariate_block: np.ndarray | None = field(repr=False)
+    covariate_metadata: dict
+    null_design: np.ndarray = field(repr=False)
+    gated_snp: dict = field(repr=False)
+    feature_cache: dict = field(repr=False)
+    feature_identity: dict = field(repr=False)
+    component_rank_reduced: np.ndarray = field(repr=False)
+    component_dfn: np.ndarray = field(repr=False)
+    component_dfd: np.ndarray = field(repr=False)
+    component_estimable: np.ndarray = field(repr=False)
+    edge_membership: np.ndarray = field(repr=False)
+    group_estimable: np.ndarray = field(repr=False)
+    retained_variant_mask_identity: dict
+    subgenome_manifest_identity: dict | None = field(default=None, repr=False)
+
+    def require_compatible(
+        self, subdata, family, sample_idx, settings, covariates,
+        retained_variant_mask_identity,
+    ) -> None:
+        if subdata is not self.subdata or family is not self.family:
+            raise ValueError("omniB panel context belongs to other genotype or family objects")
+        if not np.array_equal(np.asarray(sample_idx, int), self.sample_idx):
+            raise ValueError("omniB panel context was prepared for another sample set")
+        if settings != self.settings:
+            raise ValueError("omniB panel context was prepared with other settings")
+        if covariates is not self.covariates:
+            raise ValueError("omniB panel context was prepared with other covariates")
+        if retained_variant_mask_identity != self.retained_variant_mask_identity:
+            raise ValueError("omniB panel context was prepared with other variant masks")
+
+
+def build_omnib_panel_context(
     subdata: dict,
     family: MasterGroupFamily,
-    y_raw: np.ndarray,
     sample_idx: np.ndarray,
     *,
     cap: int,
     n_pc: int,
-    transform: str,
     feature_seed: int,
     grm_method: str,
     maf_min: float,
@@ -899,19 +941,14 @@ def prepare_omnib_design(
     covariates: dict | None = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
     grm_cache=None,
-) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
-    """Prepare one immutable raw-family/null/feature omniB design."""
+) -> OmniBPanelContext:
+    """Prepare everything in an omniB design that does not depend on the phenotype."""
     from . import interact as I
 
     sample_idx = np.asarray(sample_idx, int)
-    y_raw = np.asarray(y_raw, float)
-    if y_raw.ndim != 1 or y_raw.size != sample_idx.size:
-        raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
-    if not np.all(np.isfinite(y_raw)):
-        raise ValueError("phenotype contains non-finite values")
     if feature_seed is None:
         raise ValueError("prepare_omnib_design requires an explicit feature_seed")
-    feature_seed, feature_seed_policy = _resolve_feature_seed(feature_seed, 0)
+    feature_seed, _ = _resolve_feature_seed(feature_seed, 0)
     missing = [sub for sub in family.subgenomes if sub not in subdata]
     if missing:
         raise ValueError(
@@ -964,8 +1001,6 @@ def prepare_omnib_design(
         np.ones((n, 1))
         if C is None else np.asarray(C, float).reshape(n, -1)
     )
-    y = I.rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
-
     gated: dict[tuple[str, str], np.ndarray] = {}
     features: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     feature_identity: dict[tuple[str, str], dict] = {}
@@ -1026,6 +1061,105 @@ def prepare_omnib_design(
         bool(edge_membership[np.asarray(indices, int)].any())
         for indices in expanded.group_edge_indices
     ])
+    return OmniBPanelContext(
+        subdata=subdata,
+        family=family,
+        sample_idx=sample_idx.copy(),
+        settings=_panel_settings(
+            cap, n_pc, feature_seed, grm_method, maf_min, burden_maf, min_snp),
+        covariates=covariates,
+        expanded=expanded,
+        kernels=kernels,
+        grm_provenance=grm_provenance,
+        grm_cache_diagnostics=grm_cache_diagnostics,
+        covariate_block=C,
+        covariate_metadata=covariate_metadata,
+        null_design=C_design,
+        gated_snp=gated,
+        feature_cache=features,
+        feature_identity=feature_identity,
+        component_rank_reduced=component_rank_reduced,
+        component_dfn=component_dfn,
+        component_dfd=component_dfd,
+        component_estimable=component_estimable,
+        edge_membership=edge_membership,
+        group_estimable=group_estimable,
+        retained_variant_mask_identity=retained_variant_mask_identity,
+    )
+
+
+def _panel_settings(cap, n_pc, feature_seed, grm_method, maf_min, burden_maf, min_snp):
+    return {
+        "cap": int(cap), "n_pc": int(n_pc), "feature_seed": int(feature_seed),
+        "grm_method": str(grm_method), "maf_min": float(maf_min),
+        "burden_maf": float(burden_maf), "min_snp": int(min_snp),
+    }
+
+
+def prepare_omnib_design(
+    subdata: dict,
+    family: MasterGroupFamily,
+    y_raw: np.ndarray,
+    sample_idx: np.ndarray,
+    *,
+    cap: int,
+    n_pc: int,
+    transform: str,
+    feature_seed: int,
+    grm_method: str,
+    maf_min: float,
+    burden_maf: float,
+    min_snp: int,
+    covariates: dict | None = None,
+    retained_variant_masks: Mapping[str, np.ndarray] | None = None,
+    grm_cache=None,
+    panel_context: OmniBPanelContext | None = None,
+) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
+    """Prepare one immutable raw-family/null/feature omniB design."""
+    from . import interact as I
+
+    sample_idx = np.asarray(sample_idx, int)
+    y_raw = np.asarray(y_raw, float)
+    if y_raw.ndim != 1 or y_raw.size != sample_idx.size:
+        raise ValueError("y_raw must be one-dimensional and aligned to sample_idx")
+    if not np.all(np.isfinite(y_raw)):
+        raise ValueError("phenotype contains non-finite values")
+    if feature_seed is None:
+        raise ValueError("prepare_omnib_design requires an explicit feature_seed")
+    feature_seed, feature_seed_policy = _resolve_feature_seed(feature_seed, 0)
+    if panel_context is None:
+        panel_context = build_omnib_panel_context(
+            subdata, family, sample_idx, cap=cap, n_pc=n_pc,
+            feature_seed=feature_seed, grm_method=grm_method, maf_min=maf_min,
+            burden_maf=burden_maf, min_snp=min_snp, covariates=covariates,
+            retained_variant_masks=retained_variant_masks, grm_cache=grm_cache)
+    else:
+        _, mask_identity = _normalize_retained_variant_masks(
+            subdata, retained_variant_masks)
+        panel_context.require_compatible(
+            subdata, family, sample_idx,
+            _panel_settings(
+                cap, n_pc, feature_seed, grm_method, maf_min, burden_maf, min_snp),
+            covariates, mask_identity)
+    ctx = panel_context
+    expanded = ctx.expanded
+    kernels = ctx.kernels
+    grm_provenance = ctx.grm_provenance
+    grm_cache_diagnostics = ctx.grm_cache_diagnostics
+    C = ctx.covariate_block
+    covariate_metadata = ctx.covariate_metadata
+    C_design = ctx.null_design
+    gated = ctx.gated_snp
+    features = ctx.feature_cache
+    feature_identity = ctx.feature_identity
+    component_rank_reduced = ctx.component_rank_reduced.copy()
+    component_dfn = ctx.component_dfn.copy()
+    component_dfd = ctx.component_dfd.copy()
+    component_estimable = ctx.component_estimable.copy()
+    edge_membership = ctx.edge_membership.copy()
+    group_estimable = ctx.group_estimable.copy()
+    retained_variant_mask_identity = ctx.retained_variant_mask_identity
+    y = I.rank_int(y_raw) if transform == "INT" else y_raw.astype(float)
     W, V, beta, covariance_components = I.null_lmm_fit(
         kernels, y, C, seed=42)
 
@@ -1167,6 +1301,7 @@ def _prepare_checkpoint_omnib(
     feature_seed: int | None = None,
     retained_variant_masks: Mapping[str, np.ndarray] | None = None,
     grm_cache=None,
+    panel_context: OmniBPanelContext | None = None,
 ) -> tuple[OmniBFamilyScores, ExpandedEdgeFamily]:
     """Compatibility wrapper around :func:`prepare_omnib_design`."""
     if isinstance(n_jobs, bool) or int(n_jobs) != n_jobs or int(n_jobs) < 1:
@@ -1188,6 +1323,7 @@ def _prepare_checkpoint_omnib(
         min_snp=min_snp,
         covariates=covariates,
         grm_cache=grm_cache,
+        panel_context=panel_context,
     )
     scores.feature_seed_provenance["policy"] = policy
     return scores, expanded
@@ -1919,6 +2055,25 @@ def _text_identity(values) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _subgenome_manifest_identity(subdata, family) -> dict:
+    subgenome_identity = {}
+    with ThreadPoolExecutor(max_workers=len(family.subgenomes)) as pool:
+        dosage = dict(zip(family.subgenomes, pool.map(
+            lambda sub: _array_identity(subdata[sub].X), family.subgenomes)))
+    for sub in family.subgenomes:
+        data = subdata[sub]
+        gene_map = [
+            [str(gene), [int(index) for index in np.asarray(indices, int)]]
+            for gene, indices in sorted(data.gene_snp.items())
+        ]
+        subgenome_identity[sub] = {
+            "dosage": dosage[sub],
+            "samples_sha256": _text_identity([str(value) for value in data.samples]),
+            "gene_snp_sha256": _text_identity(gene_map),
+        }
+    return subgenome_identity
+
+
 def _checkpoint_manifest(
     subdata,
     family,
@@ -1942,26 +2097,18 @@ def _checkpoint_manifest(
     alpha,
     inferential,
     manifest_context,
+    panel_context: OmniBPanelContext | None = None,
 ) -> dict:
     """Bind every inference-relevant canonical group input to one run ID."""
     from . import __version__
     from .resampling_checkpoint import CHECKPOINT_SCHEMA_VERSION
 
-    subgenome_identity = {}
-    with ThreadPoolExecutor(max_workers=len(family.subgenomes)) as pool:
-        dosage = dict(zip(family.subgenomes, pool.map(
-            lambda sub: _array_identity(subdata[sub].X), family.subgenomes)))
-    for sub in family.subgenomes:
-        data = subdata[sub]
-        gene_map = [
-            [str(gene), [int(index) for index in np.asarray(indices, int)]]
-            for gene, indices in sorted(data.gene_snp.items())
-        ]
-        subgenome_identity[sub] = {
-            "dosage": dosage[sub],
-            "samples_sha256": _text_identity([str(value) for value in data.samples]),
-            "gene_snp_sha256": _text_identity(gene_map),
-        }
+    if panel_context is not None and panel_context.subgenome_manifest_identity is not None:
+        subgenome_identity = deepcopy(panel_context.subgenome_manifest_identity)
+    else:
+        subgenome_identity = _subgenome_manifest_identity(subdata, family)
+        if panel_context is not None:
+            panel_context.subgenome_manifest_identity = deepcopy(subgenome_identity)
     covariate_identity = {"configured": bool(covariates)}
     if covariates:
         covariate_identity["n_pcs"] = int(covariates.get("n_pcs", 0))
@@ -2062,6 +2209,7 @@ def run_group_scan_omnib(
     retained_variant_masks=None,
     evidence_role="legacy",
     grm_cache=None,
+    panel_context=None,
 ):
     """Run an edge, group or jointly calibrated omniB family.
 
@@ -2126,6 +2274,8 @@ def run_group_scan_omnib(
         raise ValueError("formal calibration requires at least one bootstrap replicate")
     _resolve_feature_seed(feature_seed, bootstrap_seed)
     checkpoint_metadata = None
+    if checkpoint_dir is None and panel_context is not None:
+        raise ValueError("a shared omniB panel context requires checkpointed calibration")
     if checkpoint_dir is None:
         # Keep the historical, single-stream bootstrap byte-for-byte unchanged
         # unless indexed checkpointing is explicitly requested.
@@ -2171,7 +2321,7 @@ def run_group_scan_omnib(
             grm_method=grm_method, maf_min=maf_min, burden_maf=burden_maf,
             min_snp=min_snp, covariates=covariates,
             retained_variant_masks=retained_variant_masks,
-            grm_cache=grm_cache)
+            grm_cache=grm_cache, panel_context=panel_context)
         score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(
@@ -2200,6 +2350,7 @@ def run_group_scan_omnib(
             alpha=alpha,
             inferential=inferential,
             manifest_context=checkpoint_manifest_context,
+            panel_context=panel_context,
         )
         manifest_id = canonical_manifest_id(manifest)
         store = CheckpointStore(
