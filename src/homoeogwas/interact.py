@@ -255,8 +255,12 @@ def null_replicates_by_index(
     indices,
     base_seed: int,
     null_fit: tuple | None = None,
+    variance_weights=None,
 ):
     """Generate indexed parametric-bootstrap phenotypes from one frozen null fit.
+
+    ``variance_weights`` (one positive weight per sample) scales each draw as
+    ``sqrt(w) * (V^1/2 z)``; omitted, the homoscedastic stream is unchanged.
 
     Each replicate owns a SHA-256-derived RNG stream keyed only by
     ``(base_seed, replicate_index)``.  Returned phenotypes remain on the input
@@ -286,11 +290,22 @@ def null_replicates_by_index(
     values, vectors = np.linalg.eigh(0.5 * (V + V.T))
     root = (vectors * np.sqrt(np.clip(values, 1e-12, None))) @ vectors.T
     fit = C @ np.asarray(beta, float)
-    out = [
-        fit + root @ np.random.default_rng(
-            replicate_seed(base_seed, index)).standard_normal(n)
-        for index in requested
-    ]
+    if variance_weights is None:
+        out = [
+            fit + root @ np.random.default_rng(
+                replicate_seed(base_seed, index)).standard_normal(n)
+            for index in requested
+        ]
+    else:
+        weights = np.asarray(variance_weights, float)
+        if weights.shape != (n,) or not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+            raise ValueError("variance_weights must be finite, positive and one per sample")
+        scale = np.sqrt(weights)
+        out = [
+            fit + scale * (root @ np.random.default_rng(
+                replicate_seed(base_seed, index)).standard_normal(n))
+            for index in requested
+        ]
     return out, W, cv
 
 
@@ -3631,6 +3646,18 @@ def validate_interact_config(cfg: dict) -> None:
     calibration_method = str(calibration.get(
         "method", "bootstrap" if statistic in {"omnib", "triad3"} else "permutation"
     )).lower()
+    null_variance = calibration.get("null_variance", "homoscedastic")
+    if null_variance not in ("homoscedastic", "smooth_pc4"):
+        raise SystemExit(
+            "ERR: interact.calibration.null_variance must be homoscedastic or smooth_pc4")
+    if null_variance != "homoscedastic" and not (mode == "group" and statistic == "omnib"):
+        raise SystemExit(
+            "ERR: interact.calibration.null_variance=smooth_pc4 is implemented for group omniB only")
+    if null_variance != "homoscedastic" and not (
+            isinstance(calibration.get("checkpoint"), dict)
+            and calibration["checkpoint"].get("enabled") is True):
+        raise SystemExit(
+            "ERR: interact.calibration.null_variance=smooth_pc4 requires checkpoint.enabled: true")
     qa_only = calibration.get("qa_only", False)
     if not isinstance(qa_only, bool):
         raise SystemExit(
@@ -4428,6 +4455,7 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
                 evidence_role=evidence_role,
                 grm_cache=grm_cache,
                 panel_context=panel_context,
+                null_variance=str(calib.get("null_variance", "homoscedastic")),
             )
         except GRMCacheError as exc:
             print(f"ERROR: GRM cache: {exc}")

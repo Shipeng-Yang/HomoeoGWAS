@@ -190,6 +190,18 @@ def _sha256_hex(value: Any) -> bool:
     )
 
 
+def _omnib_fwer_method_ok(diagnostics: dict) -> bool:
+    """The bootstrap method string must agree with the recorded null-variance model."""
+    method = (diagnostics.get("bootstrap_fwer") or {}).get("method")
+    model = diagnostics.get("null_variance_model")
+    if model is None:
+        return method == "parametric_bootstrap_minp_plus_one"
+    return (
+        isinstance(model, dict)
+        and model.get("model") == "smooth_pc4"
+        and method == "smooth_variance_parametric_bootstrap_minp_plus_one")
+
+
 def _canonical_omnib_contract_codes(
         payload: dict, provenance: dict, primary: dict) -> tuple[str, ...]:
     """Validate canonical family identity beyond the pure FWER serializer."""
@@ -246,7 +258,7 @@ def _canonical_omnib_contract_codes(
     if not counts_agree:
         codes.append("OMNIB_FWER_HYPOTHESIS_COUNT_MISMATCH")
 
-    if fwer.get("method") != "parametric_bootstrap_minp_plus_one":
+    if not _omnib_fwer_method_ok(diagnostics):
         codes.append("OMNIB_FWER_METHOD_MISMATCH")
     if provenance.get("primary_multiplicity") != "bootstrap_minp":
         codes.append("OMNIB_FWER_PRIMARY_MULTIPLICITY_MISMATCH")
@@ -489,9 +501,7 @@ def _interact_record(path: Path, payload: dict) -> AuditRecord:
             inferential = bootstrap_fwer.get("inferential")
             alpha = _finite(bootstrap_fwer.get("alpha"))
             empirical_p = _finite(bootstrap_fwer.get("empirical_p"))
-            method_ok = (
-                bootstrap_fwer.get("method")
-                == "parametric_bootstrap_minp_plus_one")
+            method_ok = _omnib_fwer_method_ok(primary.get("model_diagnostics") or {})
             decision_ok = (
                 isinstance(rejected, bool)
                 and calibrated_n is not None

@@ -515,6 +515,8 @@ class OmniBFamilyScores:
     retained_variant_mask_identity: dict = field(default_factory=dict)
     parallel_execution: dict = field(default_factory=dict)
     response_diagnostics: OmniBResponseDiagnostics | None = None
+    null_variance_weights: np.ndarray | None = field(default=None, repr=False)
+    null_variance_model: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -663,6 +665,66 @@ def omnib_components_over_Y(Wh, Yw, Cw, gsx, gsy):
         cross = (ax[:, :, None] * ay[:, None, :]).reshape(ax.shape[0], -1)
         components.append(I._batch_nested_f(Yw, reduced, Wh @ cross))
     return np.vstack(components)
+
+
+NULL_VARIANCE_MODELS = ("homoscedastic", "smooth_pc4")
+SMOOTH_VARIANCE_PCS = 4
+SMOOTH_VARIANCE_MAX_ITERATIONS = 50
+
+
+def _null_variance_design(kernels: dict, n_pcs: int) -> np.ndarray:
+    """Intercept plus the leading eigenvectors of the mean subgenome GRM."""
+    K = sum(kernels[sub] for sub in sorted(kernels)) / len(kernels)
+    values, vectors = np.linalg.eigh(0.5 * (K + K.T))
+    top = vectors[:, np.argsort(values)[::-1][:n_pcs]]
+    return np.column_stack([np.ones(K.shape[0]), top / top.std(axis=0)])
+
+
+def _gamma_log_variance(
+    r2: np.ndarray, X: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, bool]:
+    """Gamma GLM with log link: at most SMOOTH_VARIANCE_MAX_ITERATIONS Fisher-scoring
+    steps (the validated definition); fitted means normalised to mean one."""
+    r2 = np.maximum(r2, 1e-12 * np.mean(r2))
+    coef = np.zeros(X.shape[1])
+    coef[0] = np.log(np.mean(r2))
+    iterations = 0
+    converged = False
+    for iterations in range(1, SMOOTH_VARIANCE_MAX_ITERATIONS + 1):
+        mu = np.exp(X @ coef)
+        new = np.linalg.lstsq(X, X @ coef + (r2 - mu) / mu, rcond=None)[0]
+        converged = np.max(np.abs(new - coef)) < 1e-10
+        coef = new
+        if converged:
+            break
+    weights = np.exp(X @ coef)
+    if not np.all(np.isfinite(weights)) or not np.isfinite(weights.mean()):
+        raise RuntimeError(
+            f"smooth null-variance fit produced non-finite weights after {iterations} "
+            "IRLS iterations")
+    return weights / weights.mean(), coef, iterations, bool(converged)
+
+
+def fit_smooth_null_variance(scores, n_pcs: int = SMOOTH_VARIANCE_PCS) -> None:
+    """Fit the per-sample null variance as a smooth function of leading GRM PCs.
+
+    The whitened GLS null residual is regressed (squared) on the PCs; bootstrap
+    null responses are then drawn as ``C beta + sqrt(w) * V^1/2 z``.
+    """
+    residual = scores.W @ scores.y - (scores.W @ scores.null_design) @ scores.null_beta
+    X = _null_variance_design(scores.null_kernels, n_pcs)
+    weights, coef, iterations, converged = _gamma_log_variance(residual ** 2, X)
+    scores.null_variance_weights = weights
+    scores.null_variance_model = {
+        "model": "smooth_pc4",
+        "family": "gamma_log_link_irls",
+        "design": f"intercept_plus_top{n_pcs}_mean_grm_eigenvectors",
+        "coefficients": [float(value) for value in coef],
+        "iterations": int(iterations),
+        "converged": converged,
+        "weights": _array_identity(weights),
+        "weight_range": [float(weights.min()), float(weights.max())],
+    }
 
 
 def _null_bootstrap_responses(
@@ -1526,7 +1588,8 @@ def score_omnib_null_indices(
     )
     response_list, _, _ = I.null_replicates_by_index(
         scores.null_kernels, scores.y, scores.null_design,
-        indices=requested, base_seed=base_seed, null_fit=null_fit)
+        indices=requested, base_seed=base_seed, null_fit=null_fit,
+        variance_weights=scores.null_variance_weights)
     responses = np.column_stack(response_list)
     edge_p, group_p, components, diagnostics = score_omnib_responses(
         scores,
@@ -1580,7 +1643,8 @@ def _score_null_ranges_pooled(
     response_list, _, _ = I.null_replicates_by_index(
         scores.null_kernels, scores.y, scores.null_design,
         indices=[index for start, stop in ranges for index in range(start, stop)],
-        base_seed=base_seed, null_fit=null_fit)
+        base_seed=base_seed, null_fit=null_fit,
+        variance_weights=scores.null_variance_weights)
     _prepare_projection_cache(scores, expanded)
     _update_group_partial(scores, expanded)
     valid_indices = np.flatnonzero(scores.edge_estimable)
@@ -2210,6 +2274,7 @@ def run_group_scan_omnib(
     evidence_role="legacy",
     grm_cache=None,
     panel_context=None,
+    null_variance="homoscedastic",
 ):
     """Run an edge, group or jointly calibrated omniB family.
 
@@ -2274,6 +2339,11 @@ def run_group_scan_omnib(
         raise ValueError("formal calibration requires at least one bootstrap replicate")
     _resolve_feature_seed(feature_seed, bootstrap_seed)
     checkpoint_metadata = None
+    if null_variance not in NULL_VARIANCE_MODELS:
+        raise ValueError(
+            "null_variance must be one of " + ", ".join(NULL_VARIANCE_MODELS))
+    if checkpoint_dir is None and null_variance != "homoscedastic":
+        raise ValueError("a non-homoscedastic null variance requires checkpointed calibration")
     if checkpoint_dir is None and panel_context is not None:
         raise ValueError("a shared omniB panel context requires checkpointed calibration")
     if checkpoint_dir is None:
@@ -2322,6 +2392,8 @@ def run_group_scan_omnib(
             min_snp=min_snp, covariates=covariates,
             retained_variant_masks=retained_variant_masks,
             grm_cache=grm_cache, panel_context=panel_context)
+        if null_variance == "smooth_pc4":
+            fit_smooth_null_variance(scores)
         score_omnib_observed(scores, family, expanded, n_jobs=n_jobs)
         observed_matrix, identities, family_id, calibrated_layers = (
             _select_primary_family(
@@ -2352,6 +2424,8 @@ def run_group_scan_omnib(
             manifest_context=checkpoint_manifest_context,
             panel_context=panel_context,
         )
+        if scores.null_variance_model is not None:
+            manifest["null_variance"] = scores.null_variance_model
         manifest_id = canonical_manifest_id(manifest)
         store = CheckpointStore(
             checkpoint_dir, manifest_id, bootstrap_B,
@@ -2420,6 +2494,8 @@ def run_group_scan_omnib(
     # This is deliberately the sole calibration call for primary_only and joint.
     calibration = bootstrap_minp_calibration(
         observed[finite], primary_p[finite, 1:], alpha=alpha)
+    if scores.null_variance_model is not None:
+        calibration["method"] = "smooth_variance_parametric_bootstrap_minp_plus_one"
     diagnostic_adjusted = np.full(observed.size, np.nan)
     diagnostic_adjusted[finite] = calibration["adjusted_p_local"]
     adjusted = (
@@ -2547,6 +2623,8 @@ def run_group_scan_omnib(
         }
     model_diagnostics = {
         "bootstrap_fwer": fwer,
+        **({"null_variance_model": scores.null_variance_model}
+           if scores.null_variance_model is not None else {}),
         "response_failures": response_failures,
         "family_provenance": family_provenance,
         "parallel_execution": dict(scores.parallel_execution),
