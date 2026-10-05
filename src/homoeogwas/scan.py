@@ -17,6 +17,7 @@ EMMAX/P3D scan does not correct for it. Use the LOCO variants for that.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -521,6 +522,203 @@ def scan_bed_stream(
     return StreamScanSummary(
         out_path=str(out_path), backend_used=backend_used, subgenome=subgenome,
         n_input=n_input, n_kept=n_kept, n_chunks=n_chunks,
+        filter_counts=filt, runtime_sec=round(_time.time() - t0, 2),
+        chunk_size=chunk_size,
+    )
+
+
+_PARALLEL_STATE: dict = {}
+_STREAM_COLS = ["snp_id", "subgenome", "chrom", "pos", "variant_index",
+                "beta", "se", "chi2", "p", "n_obs", "maf", "call_rate"]
+
+
+def _parallel_chunk(task: tuple[int, int]):
+    """Score one ``[start, end)`` variant chunk in a forked worker.
+
+    Mirrors the CPU branch of :func:`scan_bed_stream` / :func:`scan_bed_stream_loco`
+    for one chunk with identical chunk boundaries, so per-variant results are
+    the same as the serial scan.
+    """
+    from threadpoolctl import threadpool_limits
+
+    with threadpool_limits(limits=1):
+        return _parallel_chunk_body(task)
+
+
+def _parallel_chunk_body(task: tuple[int, int]):
+    import gzip
+
+    import pandas as pd
+    from scipy import stats
+
+    st = _PARALLEL_STATE
+    start, end = task
+    bed = st.get("bed")
+    if bed is None:
+        from bed_reader import open_bed
+        bed = open_bed(st["bed_path"], count_A1=True,
+                       iid_count=st["iid_count"], sid_count=st["sid_count"])
+        st["bed"] = bed
+    raw = bed.read(index=(slice(None), slice(start, end)), dtype="float32",
+                   num_threads=1)
+    dosage = np.asarray(raw, dtype=np.float64)[st["order"], :]
+    m = dosage.shape[1]
+    sid = st["sid"][start:end]
+    chrom = st["chrom"][start:end]
+    pos = st["pos"][start:end]
+    maf_min, call_rate_min = st["maf_min"], st["call_rate_min"]
+    filt = {"call_rate": 0, "maf": 0, "zero_var_or_allmiss": 0, "bad_info": 0}
+    if st["loco"]:
+        runs = _chrom_runs(np.asarray(chrom).astype(str))
+        unknown = sorted({c for c, _, _ in runs if c not in st["contexts"]})
+        if unknown:
+            raise KeyError(
+                f"LOCO stream scan: chunk at variant {start} has unknown "
+                f"chrom(s) {unknown[:3]}; LOCOContext has "
+                f"{len(st['contexts'])} chrom")
+        batches = []
+        for c_name, r_start, r_end in runs:
+            run_batch = min(st["chunk_size"], r_end - r_start)
+            if run_batch <= 0:
+                continue
+            ctx_c = st["contexts"][c_name]
+            for b_start in range(r_start, r_end, run_batch):
+                batches.append((ctx_c.P, ctx_c.Py, b_start,
+                                min(b_start + run_batch, r_end)))
+    else:
+        batches = [(st["P"], st["Py"], 0, m)]
+    parts = []
+    n_kept = 0
+    for P, Py, b_start, b_end in batches:
+        G, keep, cr, maf, n_obs, var = _impute_filter_batch(
+            dosage[:, b_start:b_end], maf_min, call_rate_min)
+        for j in np.where(~keep)[0]:
+            if n_obs[j] == 0 or not np.isfinite(var[j]) or var[j] <= 0.0:
+                filt["zero_var_or_allmiss"] += 1
+            elif cr[j] < call_rate_min:
+                filt["call_rate"] += 1
+            else:
+                filt["maf"] += 1
+        if not keep.any():
+            continue
+        U, info = _scan_batch_cpu(P, Py, np.ascontiguousarray(G[:, keep]))
+        good = np.isfinite(info) & (info > 0) & np.isfinite(U)
+        filt["bad_info"] += int((~good).sum())
+        if not good.any():
+            continue
+        U, info = U[good], info[good]
+        chi2 = U * U / info
+        df = pd.DataFrame({
+            "snp_id": np.asarray(sid[b_start:b_end], dtype=object)[keep][good],
+            "subgenome": st["subgenome"],
+            "chrom": np.asarray(chrom[b_start:b_end], dtype=object)[keep][good],
+            "pos": np.asarray(pos[b_start:b_end], dtype=np.int64)[keep][good],
+            "variant_index": np.arange(start + b_start, start + b_end)[keep][good],
+            "beta": U / info,
+            "se": np.sqrt(1.0 / info),
+            "chi2": chi2,
+            "p": stats.chi2.sf(chi2, df=1),
+            "n_obs": n_obs[keep][good],
+            "maf": maf[keep][good],
+            "call_rate": cr[keep][good],
+        })
+        parts.append(df.to_csv(sep="\t", header=False, index=False))
+        n_kept += len(df)
+    text = "".join(parts).encode()
+    if st["gzip_out"]:
+        text = gzip.compress(text, mtime=0)
+    return m, n_kept, filt, text
+
+
+def scan_bed_stream_parallel(
+    context,
+    bed_prefix,
+    out_path,
+    *,
+    n_jobs: int,
+    chunk_size: int = 200_000,
+    maf_min: float = 0.01,
+    call_rate_min: float = 0.9,
+    subgenome: str | None = None,
+    gzip_out: bool = True,
+) -> StreamScanSummary:
+    """CPU streaming scan with chunks scored by ``n_jobs`` forked workers.
+
+    Accepts a :class:`ScanContext` or a :class:`LOCOContext`. Chunk
+    boundaries and per-chunk batches equal those of the serial streaming
+    scans; chunks are written in BED order. With ``gzip_out`` each chunk is a
+    separate gzip member (standard multi-member gzip); the decompressed TSV
+    equals the serial output run with one BLAS thread. Each worker uses one
+    native thread and holds about ``chunk_size * n_samples * 20`` bytes; a
+    worker that dies (e.g. out of memory) raises ``BrokenProcessPool``.
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    import time as _time
+
+    from bed_reader import open_bed
+
+    from .io import plink_path
+
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be >= 1")
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    loco = isinstance(context, LOCOContext)
+    if context.sample_ids is None:
+        raise ValueError("context sample_ids are required for streaming scans")
+    t0 = _time.time()
+    bed_path = str(plink_path(Path(bed_prefix), ".bed"))
+    with open_bed(bed_path, count_A1=True) as bed:
+        samples = np.asarray(bed.iid, dtype=object)
+        sid = np.asarray(bed.sid, dtype=object)
+        chrom = np.asarray(bed.chromosome, dtype=object)
+        pos = np.asarray(bed.bp_position, dtype=np.int64)
+        iid_count, sid_count = int(bed.iid_count), int(bed.sid_count)
+    if len(set(samples.tolist())) != samples.shape[0]:
+        raise ValueError("BED has duplicate sample IDs")
+    gpos = {s: i for i, s in enumerate(samples)}
+    ctx_ids = list(context.sample_ids)
+    missing = [s for s in ctx_ids if s not in gpos]
+    if missing:
+        raise ValueError(f"{len(missing)} context samples absent from BED "
+                         f"(e.g. {missing[:3]})")
+    _PARALLEL_STATE.clear()
+    _PARALLEL_STATE.update(
+        bed_path=bed_path, iid_count=iid_count, sid_count=sid_count,
+        order=np.array([gpos[s] for s in ctx_ids], dtype=np.int64),
+        sid=sid, chrom=chrom, pos=pos, loco=loco,
+        contexts=context.contexts if loco else None,
+        P=None if loco else context.P, Py=None if loco else context.Py,
+        chunk_size=chunk_size, maf_min=maf_min, call_rate_min=call_rate_min,
+        subgenome=subgenome if subgenome is not None else "",
+        gzip_out=gzip_out)
+    tasks = [(s, min(s + chunk_size, sid_count))
+             for s in range(0, sid_count, chunk_size)]
+    header = ("\t".join(_STREAM_COLS) + "\n").encode()
+    filt = {"call_rate": 0, "maf": 0, "zero_var_or_allmiss": 0, "bad_info": 0}
+    n_input = n_kept = 0
+    try:
+        with open(out_path, "wb") as fh:
+            if gzip_out:
+                import gzip
+                fh.write(gzip.compress(header, mtime=0))
+            else:
+                fh.write(header)
+            with ProcessPoolExecutor(
+                    max_workers=min(n_jobs, max(1, len(tasks))),
+                    mp_context=mp.get_context("fork")) as pool:
+                for m, k, f, text in pool.map(_parallel_chunk, tasks):
+                    fh.write(text)
+                    n_input += m
+                    n_kept += k
+                    for key, value in f.items():
+                        filt[key] += value
+    finally:
+        _PARALLEL_STATE.clear()
+    return StreamScanSummary(
+        out_path=str(out_path), backend_used="cpu", subgenome=subgenome,
+        n_input=n_input, n_kept=n_kept, n_chunks=len(tasks),
         filter_counts=filt, runtime_sec=round(_time.time() - t0, 2),
         chunk_size=chunk_size,
     )

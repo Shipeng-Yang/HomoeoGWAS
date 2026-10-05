@@ -5,16 +5,15 @@
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
 <!-- DOI badge added after the first Zenodo release:
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
-> **Current release: [v2.0.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.0.1)
-> (29 August 2026).** This release unifies two-, three-, and four-copy
-> homoeolog interaction analysis under one group-omniB engine, one declared
-> bootstrap-minP family, and one auditable cross-species runtime contract.
-> See the [full release notes](docs/releases/v2.0.1.md) and
+> **Current release: [v2.1.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.0).**
+> This release adds a heteroscedasticity-robust bootstrap null for group omniB
+> (`null_variance: smooth_pc4`), chunk-parallel streaming scans and MCP audit
+> and summary tools. See the [release notes](docs/releases/v2.1.0.md) and
 > [changelog](CHANGELOG.md).
 
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
@@ -44,6 +43,20 @@ optional research extensions. They are not required for the primary variance
 partition or interaction workflow and should not be treated as discovery
 evidence without a frozen benchmark.
 
+## What's new in v2.1.0
+
+- **Heteroscedasticity-robust calibration:** `interact.calibration.null_variance:
+  smooth_pc4` models residual variance as a smooth function of the leading
+  genotype principal components inside the parametric bootstrap; it restored
+  familywise calibration in the tested settings where residual variance tracks
+  population structure.
+- **Faster single-locus scans:** `scan.n_jobs` scores streaming chunks in
+  parallel worker processes with output identical to the serial scan.
+- **Agent tools:** MCP `audit_results` and `summarize_results`; agent-run
+  interaction analyses default to `smooth_pc4`.
+- **Behaviour change:** in group-unit families a homoeolog group is tested only
+  when all of its pair edges are estimable.
+
 ## What's new in v2.0.1
 
 - **One interaction contract across ploidies:** pair edges are the shared
@@ -64,9 +77,9 @@ validation results and upgrade guidance.
 ## Quick start
 
 ```bash
-# 1. Install the current v2.0.1 release (CPU)
+# 1. Install the current v2.1.0 release (CPU)
 python -m pip install \
-  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
+  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
 # Contributors may instead use: python -m pip install -e ".[dev]"
 
 # 2. Verify the install end-to-end (~2 s): synthesise a tiny dataset + run a fit
@@ -79,10 +92,10 @@ homoeogwas audit results/my_run       # validity, uncertainty and evidence limit
 
 # (Optional) GPU extras for the per-SNP scan
 python -m pip install \
-  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
+  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
 ```
 
-PyPI currently serves the older v1.0.1 package. Until v2.0.1 is published
+PyPI currently serves the older v1.0.1 package. Until v2.1.0 is published
 there, use the versioned GitHub command above for new analyses; an unpinned
 `pip install homoeogwas` will not install the algorithms described here.
 
@@ -148,7 +161,7 @@ to connect, pick whichever matches the agent you already use:
 # ── Option B · Any MCP client (Cursor, Cline, Windsurf, Claude Desktop, …) ─────
 # Install the current release with the MCP dependency:
 python -m pip install \
-  "homoeogwas[mcp] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.0.1.tar.gz"
+  "homoeogwas[mcp] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
 homoeogwas mcp                    # starts the MCP server (stdio)
 # Then register this server in your client's MCP config. Minimal entry:
 #   {"mcpServers": {"homoeogwas": {"command": "homoeogwas", "args": ["mcp"]}}}

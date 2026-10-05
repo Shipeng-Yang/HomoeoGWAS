@@ -133,7 +133,8 @@ def build_fit_config(*, subgenomes: Sequence[str], phenotype: str,
                      maf_min: float = 0.05, call_rate_min: float = 0.9,
                      scan_mode: str = "memory", backend: str = "cpu",
                      marker_encoding: str = "diploid_0_1_2",
-                     marker_manifest_template: str | None = None) -> dict:
+                     marker_manifest_template: str | None = None,
+                     scan_jobs: int = 1) -> dict:
     """Assemble a ``homoeogwas fit`` config dict from high-level inputs."""
     loco_block = ({"enabled": True, "fallback": "error"} if loco
                   else {"enabled": False})
@@ -151,8 +152,10 @@ def build_fit_config(*, subgenomes: Sequence[str], phenotype: str,
                     "include_hadamard": bool(include_hadamard),
                     "hadamard_name": "hom"},
         "reml": {"n_starts": 10, "seed": 2026},
-        "scan": {"mode": scan_mode, "backend": backend, "maf_min": maf_min,
-                 "call_rate_min": call_rate_min, "loco": loco_block},
+        "scan": {"mode": "stream" if int(scan_jobs) > 1 else scan_mode,
+                 "backend": backend, "maf_min": maf_min,
+                 "call_rate_min": call_rate_min, "loco": loco_block,
+                 **({"n_jobs": int(scan_jobs)} if int(scan_jobs) > 1 else {})},
         "plots": {"enabled": True},
         "outputs": {"out_dir": out_dir, "prefix": trait},
     }
@@ -170,7 +173,8 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
                           groups: str | None = None,
                           hypothesis_unit: str | None = None,
                           subset_order: int = 2,
-                          family_scope: str = "primary_only") -> dict:
+                          family_scope: str = "primary_only",
+                          null_variance: str = "smooth_pc4") -> dict:
     """Assemble a ``homoeogwas interact`` config dict from high-level inputs."""
     mode = infer_interaction_mode(subgenomes)
     statistic_key = str(statistic).lower()
@@ -184,6 +188,14 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
         else {"method": "bootstrap", "B": perm_b, "seed": 2026}
     )
     is_canonical_omnib = statistic_key == "omnib"
+    if null_variance not in ("smooth_pc4", "homoscedastic"):
+        raise ValueError("null_variance must be smooth_pc4 or homoscedastic")
+    if is_canonical_omnib:
+        calibration["null_variance"] = null_variance
+        if null_variance == "smooth_pc4":
+            calibration["checkpoint"] = {
+                "enabled": True, "block_size": 25,
+                "root": str(Path(out_dir) / "checkpoints")}
     if min_snp is None:
         min_snp = 3 if is_canonical_omnib else 2
     if is_canonical_omnib:
@@ -278,11 +290,14 @@ def summarize_fit(out_dir: str, trait: str, top_n: int = 10) -> dict:
            "summary_json": str(summ_path),
            "figures": [str(p) for p in sorted(out.glob(f"*_{trait}.png"))]}
     ss = s.get("outputs", {}).get("sumstats", [])
-    if ss and Path(ss[0]).exists():
+    ss = [p for p in ss if Path(p).exists()]
+    if ss:
         try:
             import pandas as pd
-            df = pd.read_csv(ss[0], sep="\t",
-                             usecols=["subgenome", "chrom", "pos", "p"])
+            frames = [pd.read_csv(p, sep="\t",
+                                  usecols=["subgenome", "chrom", "pos", "p"])
+                      .nsmallest(top_n, "p") for p in ss]
+            df = pd.concat(frames, ignore_index=True)
             res["top_hits"] = df.nsmallest(top_n, "p").to_dict(orient="records")
         except Exception as e:   # noqa: BLE001 - top hits are best-effort
             res["top_hits_error"] = str(e)
@@ -390,7 +405,7 @@ def run_gwas(*, phenotype: str, sample_col: str, trait: str,
              bed_prefixes: Mapping[str, str] | None = None,
              include_hadamard: bool = False, loco: bool = False,
              run_plots: bool = True, allow_integer_ids: bool = False,
-             dry_run: bool = False) -> dict:
+             scan_jobs: int = 1, dry_run: bool = False) -> dict:
     """Generate a fit config from breeder-level inputs, validate, run, summarize.
 
     Blocks *before* any expensive run on the common breeder errors — a bad
@@ -421,7 +436,7 @@ def run_gwas(*, phenotype: str, sample_col: str, trait: str,
     cfg = build_fit_config(subgenomes=subgenomes, phenotype=phenotype,
                            sample_col=sample_col, trait=trait, bed_template=tmpl,
                            out_dir=out_dir, include_hadamard=include_hadamard,
-                           loco=loco)
+                           loco=loco, scan_jobs=scan_jobs)
     cfg_path = write_config(cfg, out / "configs" / "fit.generated.yaml")
     # the workflow owns out_dir (it wrote the config there), so fit overwrites it
     steps = [run_cli(["validate", "-c", cfg_path], dry_run=dry_run)]
@@ -451,6 +466,7 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
                     family_scope: str = "primary_only",
                     perm_b: int = 2000, n_jobs: int = 8,
                     statistic: str = "omniB",
+                    null_variance: str = "smooth_pc4",
                     dry_run: bool = False) -> dict:
     """Generate, validate, run, audit and summarize an interaction analysis.
 
@@ -484,15 +500,20 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
     absent = [p for p in needed if not Path(p).exists()]
     if not dry_run and absent:
         return {"ok": False, "reason": f"missing interaction inputs: {absent[:6]}"}
-    cfg = build_interact_config(subgenomes=subgenomes, bed_prefixes=bed_prefixes,
-                                snp_to_gene=snp_to_gene, phenotype=phenotype,
-                                sample_col=sample_col, trait=trait,
-                                out_dir=out_dir, pairs=pairs, triads=triads,
-                                groups=groups,
-                                hypothesis_unit=hypothesis_unit,
-                                subset_order=subset_order,
-                                family_scope=family_scope,
-                                perm_b=perm_b, statistic=statistic)
+    try:
+        cfg = build_interact_config(
+            subgenomes=subgenomes, bed_prefixes=bed_prefixes,
+            snp_to_gene=snp_to_gene, phenotype=phenotype,
+            sample_col=sample_col, trait=trait,
+            out_dir=out_dir, pairs=pairs, triads=triads,
+            groups=groups,
+            hypothesis_unit=hypothesis_unit,
+            subset_order=subset_order,
+            family_scope=family_scope,
+            perm_b=perm_b, statistic=statistic,
+            null_variance=null_variance)
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
     public_mode = "group" if canonical else mode
     declared_unit = cfg["interact"].get("hypothesis_unit")
     config_name = (
@@ -517,6 +538,46 @@ def run_interaction(*, phenotype: str, sample_col: str, trait: str,
     if not dry_run and failed is None:
         result["summary"] = summarize_interaction(out_dir, trait)
     return result
+
+
+def audit_results(*, out_dir: str, dry_run: bool = False) -> dict:
+    """Run ``homoeogwas audit`` on a finished fit or interact output directory
+    and return its overall status, the status of each audited record and the
+    report paths."""
+    out = Path(out_dir)
+    if not dry_run and not out.is_dir():
+        return {"ok": False, "reason": f"results directory not found: {out_dir}"}
+    step = run_cli(["audit", out_dir], dry_run=dry_run)
+    result = {"ok": step.get("returncode") in (None, 0), "out_dir": out_dir,
+              "step": step, "dry_run": dry_run}
+    audit_json = out / "audit" / "homoeogwas_audit.json"
+    if not dry_run and audit_json.exists():
+        payload = json.loads(audit_json.read_text())
+        result.update({
+            "audit_json": str(audit_json),
+            "overall_status": payload.get("overall_status"),
+            "records": [
+                {k: record.get(k) for k in (
+                    "source", "command", "trait", "status", "discovery_count",
+                    "lambda_gc", "flags")}
+                for record in payload.get("records", [])
+                if isinstance(record, dict)],
+        })
+    return result
+
+
+def summarize_results(*, out_dir: str, trait: str) -> dict:
+    """Summarize a finished run: per-subgenome PVE, λ_GC and top hits for a fit
+    directory, or the interaction family, discoveries and audit status for an
+    interact directory."""
+    out = Path(out_dir)
+    if (out / f"summary_{trait}.json").exists():
+        return {"ok": True, "kind": "fit", **summarize_fit(out_dir, trait)}
+    if (out / f"interact_{trait}.json").exists():
+        return {"ok": True, "kind": "interaction",
+                **summarize_interaction(out_dir, trait)}
+    return {"ok": False, "reason": (
+        f"no summary_{trait}.json or interact_{trait}.json in {out_dir}")}
 
 
 def split_genotype(*, species_yaml: str, out_dir: str, vcf: str | None = None,

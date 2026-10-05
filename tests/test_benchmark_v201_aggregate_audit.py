@@ -68,6 +68,13 @@ from scripts.benchmarks.v201.track_scaling import (
 )
 
 
+
+@pytest.fixture(autouse=True)
+def _v201_release_target(monkeypatch):
+    import homoeogwas
+    monkeypatch.setattr(homoeogwas, "__version__", "2.0.1")
+
+
 def _comparator_probe(width: int) -> dict[str, object]:
     return {
         "schema": "homoeogwas-snpxsnp-resource-probe-v1",

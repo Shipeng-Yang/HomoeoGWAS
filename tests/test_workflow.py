@@ -365,4 +365,75 @@ def test_mcp_server_builds_and_exposes_tools():
     import asyncio
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
-    assert {"run_gwas", "run_interaction", "get_guidance"} <= names
+    assert {"run_gwas", "run_interaction", "get_guidance", "audit_results",
+            "summarize_results"} <= names
+    interaction = next(t for t in tools if t.name == "run_interaction")
+    assert interaction.inputSchema["properties"]["null_variance"]["default"] == (
+        "smooth_pc4")
+
+
+def test_build_interact_config_defaults_to_smooth_pc4_with_checkpoint(tmp_path):
+    cfg = workflow.build_interact_config(
+        subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+        snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+        sample_col="sample", trait="t", out_dir=str(tmp_path / "o"), groups="g.tsv")
+    cal = cfg["interact"]["calibration"]
+    assert cal["null_variance"] == "smooth_pc4"
+    assert cal["checkpoint"] == {"enabled": True, "block_size": 25,
+                                 "root": str(tmp_path / "o" / "checkpoints")}
+    homo = workflow.build_interact_config(
+        subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+        snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+        sample_col="sample", trait="t", out_dir="o", groups="g.tsv",
+        null_variance="homoscedastic")
+    assert homo["interact"]["calibration"]["null_variance"] == "homoscedastic"
+    assert "checkpoint" not in homo["interact"]["calibration"]
+    with pytest.raises(ValueError):
+        workflow.build_interact_config(
+            subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+            snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+            sample_col="sample", trait="t", out_dir="o", groups="g.tsv",
+            null_variance="other")
+
+
+def test_generated_smooth_pc4_interact_config_passes_validation(tmp_path):
+    from homoeogwas.interact import validate_interact_config
+    cfg = workflow.build_interact_config(
+        subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+        snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+        sample_col="sample", trait="t", out_dir=str(tmp_path / "o"), groups="g.tsv")
+    validate_interact_config(cfg)
+
+
+def test_build_fit_config_scan_jobs_uses_streaming():
+    cfg = workflow.build_fit_config(
+        subgenomes=["A"], phenotype="p", sample_col="s", trait="t",
+        bed_template="b/{subgenome}/all", out_dir="o", scan_jobs=16)
+    assert cfg["scan"]["n_jobs"] == 16 and cfg["scan"]["mode"] == "stream"
+    serial = workflow.build_fit_config(
+        subgenomes=["A"], phenotype="p", sample_col="s", trait="t",
+        bed_template="b/{subgenome}/all", out_dir="o")
+    assert "n_jobs" not in serial["scan"] and serial["scan"]["mode"] == "memory"
+
+
+def test_audit_and_summarize_results(tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    (out / "audit").mkdir(parents=True)
+    (out / "audit" / "homoeogwas_audit.json").write_text(json.dumps({
+        "overall_status": "AUDIT_COMPLETE",
+        "records": [{"source": "x.json", "command": "fit", "trait": "t",
+                     "status": "AUDIT_COMPLETE", "discovery_count": 0,
+                     "lambda_gc": 1.01, "flags": []}]}))
+    monkeypatch.setattr(workflow, "run_cli", lambda args, dry_run=False: {
+        "command": args, "returncode": 0})
+    res = workflow.audit_results(out_dir=str(out))
+    assert res["ok"] and res["overall_status"] == "AUDIT_COMPLETE"
+    assert res["records"][0]["lambda_gc"] == 1.01
+    assert workflow.audit_results(out_dir=str(tmp_path / "absent"))["ok"] is False
+    assert workflow.summarize_results(out_dir=str(out), trait="t")["ok"] is False
+    (out / "summary_t.json").write_text(json.dumps({
+        "trait": "t", "n_analysis": 10, "subgenomes": ["A"],
+        "reml": {"pve": {"A": 0.3, "e": 0.7}}, "lambda_gc": {"all": 1.0},
+        "outputs": {"sumstats": []}}))
+    s = workflow.summarize_results(out_dir=str(out), trait="t")
+    assert s["ok"] and s["kind"] == "fit" and s["pve"]["A"] == 0.3

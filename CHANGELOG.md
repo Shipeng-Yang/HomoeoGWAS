@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (unreleased draft)
+
+### Added
+
+- `interact.calibration.null_variance: smooth_pc4` for canonical group omniB:
+  a parametric-bootstrap null whose residual variance follows a smooth
+  function of the leading genotype principal components, fitted by IRLS.
+  It restored familywise calibration in the tested settings where residual
+  variance tracks population structure; `homoscedastic` remains the default
+  of the low-level config and
+  is reported as a sensitivity analysis. Results record
+  `smooth_variance_parametric_bootstrap_minp_plus_one` and the fitted weights.
+  Requires bootstrap checkpointing.
+- `homoeogwas interact` batched cases share phenotype-independent panel
+  preparation (`interact_batch`), and an opt-in hash-keyed GRM cache
+  (`grm_cache`) reuses genotype relationship matrices across runs with
+  identical inputs.
+- `scan.n_jobs` for streaming single-locus scans (plain and LOCO): variant
+  chunks are scored by forked worker processes with the same chunk boundaries
+  and batches as the serial scan and one native thread each; the
+  decompressed summary statistics equal the serial output run with one BLAS
+  thread. Each worker holds about `chunk_size × n_samples × 20` bytes; a dead
+  worker stops the scan with an error. Gzip output is written as a
+  multi-member gzip stream. `scan.n_jobs: 1` (default) keeps the serial code
+  path; in-memory and GPU scans ignore it (with a warning in memory mode).
+- MCP tools `audit_results` and `summarize_results`; `run_interaction`
+  exposes `null_variance` (default `smooth_pc4`) and `run_gwas` exposes
+  `scan_jobs`. Workflow-generated group omniB configs enable checkpointing
+  when `smooth_pc4` is selected.
+- `interact.burden.feature_seed` separates gene-feature randomness from the
+  bootstrap seed (defaults to the bootstrap seed, as before).
+
+### Changed
+
+- In group-unit and joint families, a group is eligible only when every
+  declared pair edge is estimable; groups with an unestimable edge are marked
+  unestimable instead of being scored on a partial edge set, which can reduce
+  the family size. Edge-unit families are unchanged.
+- Bootstrap workers are reused across checkpoint blocks and edge tasks are
+  sized by work; checkpoint manifests hash arrays in streaming fashion.
+- Partial omniB response errors fail closed; prepared omniB design identity,
+  formal marker QC masks and feature seeds are bound into provenance.
+- The application-evidence exporter accepts the smooth_pc4 bootstrap method,
+  records it as `fwer_method`, and reads `driving_component` for group-unit
+  discoveries.
+
+
 ## v2.0.1 — unified omniB, evidence audit and input hardening (2026-08-29)
 
 ### Changed
@@ -219,6 +266,7 @@ strawberry AABBCCDD, oat, rice).
 ### Quality
 - 318 tests pass; ruff-clean; CPU/GPU Docker images; reproducible-by-config runs.
 
-[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.1...HEAD
+[unreleased]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Shipeng-Yang/HomoeoGWAS/compare/v1.0.2...v2.0.0

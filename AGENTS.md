@@ -109,6 +109,8 @@ scan:
   maf_min: 0.05
   call_rate_min: 0.9
   loco: {enabled: false}    # set true (+ fallback: error) for leave-one-chrom-out
+  # n_jobs: 32              # streaming scans only: parallel workers, same output;
+  #                         # ~chunk_size x n_samples x 20 bytes per worker
 plots: {enabled: true}
 outputs: {out_dir: <out_dir>, prefix: <trait>}
 ```
@@ -135,7 +137,12 @@ interact:
   trait: <trait>
   burden: {cap: 150, min_snp: 3, maf_min: 0.01, n_pc: 3}
   grm: {method: grm_from_X, maf_min: 0.01, scope: all_subgenomes}
-  calibration: {method: bootstrap, B: 2000, seed: 2026}
+  calibration:
+    method: bootstrap
+    B: 2000
+    seed: 2026
+    null_variance: smooth_pc4     # robust primary null; homoscedastic as sensitivity
+    checkpoint: {enabled: true, root: <out_dir>/checkpoints}
 outputs: {out_dir: <out_dir>, full_ranking: true}
 ```
 

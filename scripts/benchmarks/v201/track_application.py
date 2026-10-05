@@ -63,6 +63,7 @@ def _empty_row(run: RegistryRun) -> dict[str, Any]:
         "primary_unit": None,
         "calibration_method": None,
         "calibration_B": None,
+        "fwer_method": None,
         "adjusted_discovery_count": None,
         "adjusted_discoveries": None,
         "negative_result": None,
@@ -282,6 +283,12 @@ def _marker_count(
     return sum(counts)
 
 
+_CANONICAL_BOOTSTRAP_METHODS = (
+    "parametric_bootstrap_minp_plus_one",
+    "smooth_variance_parametric_bootstrap_minp_plus_one",
+)
+
+
 def _adjusted_discoveries(
     primary: Mapping[str, Any], run_id: str, audit_status: str | None = None,
 ) -> tuple[int, list[dict[str, Any]], dict[str, int]]:
@@ -321,7 +328,7 @@ def _adjusted_discoveries(
         exported.append({
             "hypothesis_id": identifier.strip(), "adjusted_p": float(adjusted),
         })
-        driver = unit.get("smallest_component")
+        driver = unit.get("smallest_component") or unit.get("driving_component")
         if isinstance(driver, str) and driver:
             drivers[driver] += 1
     return count, exported, dict(drivers)
@@ -988,7 +995,7 @@ def _validate_family_and_calibration(
             )
         if (
             method != "bootstrap"
-            or fwer.get("method") != "parametric_bootstrap_minp_plus_one"
+            or fwer.get("method") not in _CANONICAL_BOOTSTRAP_METHODS
             or provenance.get("primary_multiplicity") != "bootstrap_minp"
             or provenance.get("primary_transform") != "INT"
         ):
@@ -1314,6 +1321,8 @@ def _application_row(run: RegistryRun) -> dict[str, Any]:
         "primary_unit": unit,
         "calibration_method": method,
         "calibration_B": calibration_b,
+        "fwer_method": ((primary.get("model_diagnostics") or {}).get(
+            "bootstrap_fwer") or {}).get("method"),
         "adjusted_discovery_count": discoveries,
         "adjusted_discoveries": adjusted,
         "negative_result": discoveries == 0,

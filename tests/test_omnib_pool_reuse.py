@@ -140,7 +140,10 @@ def _reference():
 
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))
 @pytest.mark.parametrize("n_jobs", [1, 4])
-def test_pooled_scan_reproduces_9c14d6f_reference(tmp_path, scenario, n_jobs):
+def test_pooled_scan_reproduces_9c14d6f_reference(
+        tmp_path, monkeypatch, scenario, n_jobs):
+    import homoeogwas
+    monkeypatch.setattr(homoeogwas, "__version__", "2.0.1")
     reference = _reference()
     root = tmp_path / scenario
     result = run_pool_scenario(root, scenario, n_jobs=n_jobs)

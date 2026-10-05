@@ -37,8 +37,14 @@ Never ask the user to hand-write a YAML config — generate it under
    - coerce integer-like sample IDs to strings on both genotype and phenotype;
    - confirm GFF and `.bim` chromosome names match before `prep-snps`;
    - interaction mode by ploidy (2→pairwise, 3→triad, 4+→2-/3-subsets, never 4-way);
-   - use DIAMOND 2.1.x via `--diamond` (2.2.0 deadlocks).
-3. `homoeogwas validate -c …` → `fit`/`interact` → `plot`.
+   - use DIAMOND 2.1.x via `--diamond` (2.2.0 deadlocks);
+   - multi-environment traits: use an environment-adjusted line mean
+     (LS-mean of value ~ environment + line), never a raw average over
+     environments with different scales or missing records; screen extreme
+     single-environment records before averaging;
+   - group omniB: `null_variance: smooth_pc4` (with checkpointing) as the
+     primary null, `homoscedastic` as sensitivity.
+3. `homoeogwas validate -c …` → `fit`/`interact` → `audit` → `plot`.
 4. Summarize **biologically** (AGENTS.md §7): per-subgenome PVE (which
    subgenomes carry heritability), λ_GC calibration, top hits, figure paths,
    warnings, next step.
@@ -52,6 +58,6 @@ sample IDs (0 sample overlap), GFF/`.bim` chromosome-name mismatch, a missing
 ## Power users
 
 The agent generates configs, but everything maps to the plain CLI
-(`homoeogwas {fit,split,interact,prep-snps,prep-homoeologs,plot,validate,demo}`)
+(`homoeogwas {fit,split,interact,audit,prep-snps,prep-homoeologs,plot,validate,demo}`)
 and to the `homoeogwas-mcp` server (same workflow, any MCP client). See
 `docs/interact_inputs.md` for the interaction-input details.

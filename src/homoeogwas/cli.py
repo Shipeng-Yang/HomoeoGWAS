@@ -37,8 +37,10 @@ from .scan import (
     build_loco_scan_contexts,
     build_scan_context,
     lambda_gc,
+    _resolve_backend,
     scan_bed_stream,
     scan_bed_stream_loco,
+    scan_bed_stream_parallel,
     scan_snps,
     scan_snps_loco,
 )
@@ -192,9 +194,11 @@ def validate_config(cfg: dict) -> None:
     backend = _get(cfg, "scan.backend", "auto")
     if backend not in ("auto", "cpu", "gpu"):
         raise SystemExit(f"ERR: scan.backend must be auto|cpu|gpu, got {backend!r}")
-    for key, lo in (("scan.batch_size", 1), ("scan.chunk_size", 1)):
+    for key, lo in (("scan.batch_size", 1), ("scan.chunk_size", 1),
+                    ("scan.n_jobs", 1)):
         v = _get(cfg, key)
-        if v is not None and (not isinstance(v, int) or v < lo):
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)
+                              or v < lo):
             raise SystemExit(f"ERR: config {key} must be an integer >= {lo}, "
                              f"got {v!r}")
     for key in ("scan.maf_min", "scan.call_rate_min", "genotype.grm.maf_min"):
@@ -749,7 +753,11 @@ def run_scan(cfg: dict, ctx, subg: list[str], backend: str, out_dir: Path,
     cr_min = float(_get(cfg, "scan.call_rate_min", 0.9))
     is_loco = isinstance(ctx, LOCOContext)
     suffix = "_loco" if is_loco else ""
+    scan_jobs = int(_get(cfg, "scan.n_jobs", 1))
     if scan_mode == "memory":
+        if scan_jobs > 1:
+            print("  [scan] WARNING: scan.n_jobs applies to streaming scans "
+                  "only; the in-memory scan runs serially")
         batch = int(_get(cfg, "scan.batch_size", 20000))
         frames, n_in, n_kept, backend_used = [], 0, 0, None
         filt: dict = {}
@@ -779,16 +787,22 @@ def run_scan(cfg: dict, ctx, subg: list[str], backend: str, out_dir: Path,
         return {"mode": "memory", "backend_used": backend_used,
                 "sumstats": [str(ss_path)], "n_markers_input": n_in,
                 "n_markers_kept": n_kept, "filter_counts": filt,
-                "loco": is_loco}
+                "loco": is_loco, "n_jobs": 1}
     # streaming
     chunk = int(_get(cfg, "scan.chunk_size", 200_000))
     gzip_out = bool(_get(cfg, "scan.gzip", True))
+    parallel = scan_jobs > 1 and _resolve_backend(backend) == "cpu"
     paths, n_in, n_kept, backend_used = [], 0, 0, None
     filt = {}
     for sg in subg:
         ext = ".tsv.gz" if gzip_out else ".tsv"
         sg_path = out_dir / f"sumstats_{prefix}{suffix}_{sg}{ext}"
-        if is_loco:
+        if parallel:
+            summ = scan_bed_stream_parallel(
+                ctx, _scan_bed_prefix(cfg, sg), sg_path, n_jobs=scan_jobs,
+                chunk_size=chunk, maf_min=maf_min, call_rate_min=cr_min,
+                subgenome=sg, gzip_out=gzip_out)
+        elif is_loco:
             summ = scan_bed_stream_loco(
                 ctx, _scan_bed_prefix(cfg, sg), sg_path,
                 backend=backend, chunk_size=chunk,
@@ -808,7 +822,8 @@ def run_scan(cfg: dict, ctx, subg: list[str], backend: str, out_dir: Path,
         paths.append(str(sg_path))
     return {"mode": "stream", "backend_used": backend_used, "sumstats": paths,
             "n_markers_input": n_in, "n_markers_kept": n_kept,
-            "filter_counts": filt, "loco": is_loco}
+            "filter_counts": filt, "loco": is_loco,
+            "n_jobs": scan_jobs if parallel else 1}
 
 
 # scan summary (bounded memory) + plots
@@ -1114,7 +1129,8 @@ def cmd_fit(args) -> int:
                  "n_markers_input": scan_out["n_markers_input"],
                  "n_markers_kept": scan_out["n_markers_kept"],
                  "filter_counts": scan_out["filter_counts"],
-                 "loco_enabled": loco_enabled},
+                 "loco_enabled": loco_enabled,
+                 "n_jobs": scan_out.get("n_jobs", 1)},
         "loco": loco_block,
         "lambda_gc": {r["level"]: r["lambda_gc"]
                       for _, r in lam_df.iterrows()},

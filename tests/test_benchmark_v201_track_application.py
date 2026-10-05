@@ -1088,3 +1088,43 @@ def test_adjusted_discovery_identifier_and_probability_are_strict(
     assert row["status"] == "SCHEMA_INCOMPLETE"
     assert row["audit_status"] == "INTERNAL_DISCOVERY_REPLICATION_REQUIRED"
     assert row["repair_required"] is True
+
+
+def test_smooth_variance_bootstrap_method_is_exported(tmp_path):
+    root, run = _materialize_run(tmp_path)
+    result = root / "interact_flowering_time.json"
+    payload = json.loads(result.read_text())
+    payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"]["method"] = (
+        "smooth_variance_parametric_bootstrap_minp_plus_one")
+    _write_json(result, payload)
+    _write_json(root / "audit" / "homoeogwas_audit.json", _audit_payload(result, discoveries=2))
+    run = _historical_run(root, run_id="run")
+    rows = export_application_rows(_write_registry(tmp_path, [run]))
+    assert rows[0]["repair_required"] is False, rows[0]["repair_reason"]
+    assert rows[0]["fwer_method"] == "smooth_variance_parametric_bootstrap_minp_plus_one"
+
+
+def test_group_unit_driving_component_counts_as_driver(tmp_path):
+    root, run = _materialize_run(tmp_path)
+    result = root / "interact_flowering_time.json"
+    payload = json.loads(result.read_text())
+    for unit in payload["results"]["INT"]["sig"]:
+        unit["driving_component"] = unit.pop("smallest_component")
+    _write_json(result, payload)
+    _write_json(root / "audit" / "homoeogwas_audit.json", _audit_payload(result, discoveries=2))
+    run = _historical_run(root, run_id="run")
+    rows = export_application_rows(_write_registry(tmp_path, [run]))
+    assert rows[0]["repair_required"] is False, rows[0]["repair_reason"]
+    assert rows[0]["component_driver_distribution"] == {"minor_burden": 1, "kernel_hadamard": 1}
+
+
+def test_unknown_bootstrap_method_still_fails_closed(tmp_path):
+    root, run = _materialize_run(tmp_path)
+    result = root / "interact_flowering_time.json"
+    payload = json.loads(result.read_text())
+    payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"]["method"] = "naive_minp"
+    _write_json(result, payload)
+    _write_json(root / "audit" / "homoeogwas_audit.json", _audit_payload(result, discoveries=2))
+    run = _historical_run(root, run_id="run")
+    rows = export_application_rows(_write_registry(tmp_path, [run]))
+    assert rows[0]["repair_required"] is True
