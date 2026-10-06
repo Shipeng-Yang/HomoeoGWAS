@@ -13,8 +13,8 @@
 > **Current release: [v2.1.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.0).**
 > This release adds a heteroscedasticity-robust bootstrap null for group omniB
 > (`null_variance: smooth_pc4`), chunk-parallel streaming scans and MCP audit
-> and summary tools. See the [release notes](docs/releases/v2.1.0.md) and
-> [changelog](CHANGELOG.md).
+> and summary tools. See the [release notes](docs/releases/v2.1.0.md), the
+> [release history](#release-history) below and the [changelog](CHANGELOG.md).
 
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
 peanut, strawberry, …) by modelling each subgenome explicitly. A new species is added
@@ -42,37 +42,6 @@ The global `K_hom` kernel and phenotype-independent external priors remain
 optional research extensions. They are not required for the primary variance
 partition or interaction workflow and should not be treated as discovery
 evidence without a frozen benchmark.
-
-## What's new in v2.1.0
-
-- **Heteroscedasticity-robust calibration:** `interact.calibration.null_variance:
-  smooth_pc4` models residual variance as a smooth function of the leading
-  genotype principal components inside the parametric bootstrap; it restored
-  familywise calibration in the tested settings where residual variance tracks
-  population structure.
-- **Faster single-locus scans:** `scan.n_jobs` scores streaming chunks in
-  parallel worker processes with output identical to the serial scan.
-- **Agent tools:** MCP `audit_results` and `summarize_results`; agent-run
-  interaction analyses default to `smooth_pc4`.
-- **Behaviour change:** in group-unit families a homoeolog group is tested only
-  when all of its pair edges are estimable.
-
-## What's new in v2.0.1
-
-- **One interaction contract across ploidies:** pair edges are the shared
-  primitive for dyads, triads, and four-copy groups, with one experiment-wide
-  bootstrap-minP/FWER calibration.
-- **Publication-grade evidence and stability:** complete component-aware
-  rankings, `homoeogwas audit`, and material/environment deletion follow-up
-  separate discovery, localization, internal stability, and replication.
-- **Reproducible production execution:** observable process workers replace
-  the former near-single-core threading path, while exact BIM-bound marker
-  manifests prevent unverified SNP, PAV, SV, or haplotype inputs.
-
-The formal claim is encoding-robust omnibus **pairwise** interaction evidence
-within a homoeolog group. It is not a direct third- or fourth-order causal or
-physical mechanism. See the [v2.0.1 release notes](docs/releases/v2.0.1.md) for
-validation results and upgrade guidance.
 
 ## Quick start
 
@@ -214,47 +183,23 @@ Pass `--build-arg PIP_INDEX_URL=<mirror>` to build through a faster pip mirror.
 
 ## How it works
 
-One genotype file goes in; it is split by subgenome and feeds two analyses — a
-**subgenome-stratified mixed model** (whose signature output is the per-subgenome
-variance partition) and a **homoeolog-interaction test**. Their results feed one
-evidence audit.
+One genotype set goes in and is split by subgenome. It feeds two analyses:
 
-```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica, Arial, sans-serif","fontSize":"14px","lineColor":"#8A8A8A"}}}%%
-flowchart LR
-    G(["VCF / PLINK<br/>genotypes"]) --> S["split by<br/>subgenome"]
+- **Workflow 1 — subgenome-stratified mixed model.** One kinship matrix per
+  subgenome, a multi-kernel REML fit that partitions trait variance among the
+  subgenomes (PVE), and a leave-one-chromosome-out per-SNP scan.
+- **Workflow 2 — homoeolog interaction.** Homoeologous genes are grouped, every
+  pair of copies (an *edge*) is tested with omniB, which combines minor-burden,
+  PC1 and kernel-Hadamard encodings, and all edges or groups form one
+  experiment-wide bootstrap-minP family with a kinship-preserving null.
 
-    subgraph MODEL["subgenome-stratified mixed model"]
-        K["per-subgenome GRMs"] --> R["multi-kernel<br/>REML"]
-        R --> SC["per-SNP scan<br/>LOCO · CPU / GPU"]
-    end
+`homoeogwas audit` then labels every result as computationally valid, an
+internal discovery, or in need of replication.
 
-    subgraph INT["homoeolog-interaction test"]
-        I["SNP-to-gene +<br/>homoeolog groups"] --> N["pair-edge omniB<br/>burden · PC1 · kernel"]
-        N --> C["kinship-preserving<br/>bootstrap"]
-    end
-
-    S --> K
-    S --> I
-    R --> V["variance fingerprint<br/>per-subgenome PVE"]
-    SC --> O["Manhattan · QQ · λ_GC"]
-    C --> W["interaction dossier<br/>edge / group family"]
-    V --> A["evidence audit"]
-    O --> A
-    W --> A
-
-    classDef stage fill:#1F577B,stroke:#13384f,color:#ffffff;
-    classDef out   fill:#FBFAF7,stroke:#368650,color:#2A2A2A;
-    classDef star  fill:#FBEDEC,stroke:#CB3E35,color:#2A2A2A,font-weight:bold;
-    class G,S,K,R,SC,I,N,C stage;
-    class O out;
-    class V,W,A star;
-    style MODEL fill:#F6F9FB,stroke:#1F577B,color:#1F577B;
-    style INT   fill:#FCF6EE,stroke:#C0584C,color:#C0584C;
-```
-
-The red-bordered boxes — the **variance fingerprint**, **interaction dossier**
-and **evidence audit** — are HomoeoGWAS's distinctive outputs.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/how_it_works_dark.svg">
+  <img alt="HomoeoGWAS workflow: inputs are split by subgenome and feed a subgenome-stratified mixed model and a homoeolog interaction test; both end in one evidence audit" src="docs/img/how_it_works_light.svg" width="100%">
+</picture>
 
 ### One interaction contract across ploidies
 
@@ -296,8 +241,9 @@ not have a cross-subgenome homoeolog interaction.
 
 ## Tested species
 
-The framework has been run end-to-end on six crops spanning ploidy 2n–8n through
-the same code path; this list is illustrative, not a limit on supported species.
+The framework has been run end-to-end on six allopolyploid crops, from tetraploid
+to octoploid, through the same code path; this list is illustrative, not a limit
+on supported species.
 
 | Species | Subgenomes | Reference assembly |
 |---|---|---|
@@ -312,20 +258,24 @@ the same code path; this list is illustrative, not a limit on supported species.
 
 ```
 src/homoeogwas/
-├── species_config.py   # config schema (pydantic)
-├── species_split.py    # VCF -> per-subgenome genotype splitter
-├── grm.py              # per-subgenome and LOCO GRMs
-├── kernel.py           # K_pool (additive) and K_hom (homoeolog) kernels
-├── lmm.py              # multi-kernel REML mixed model
-├── gp.py               # GBLUP prediction + cross-validation
-├── scan.py             # per-SNP scan (CPU + dual-GPU, LOCO)
-├── diagnostics.py      # lambda_GC, QQ, retained-fraction checks
-├── audit.py            # result evidence/status audit
-├── calibration.py      # null-simulation type-I error
-├── sim.py              # power-vs-FDR simulation
-├── interact.py         # homoeolog-pair interaction scan
-├── cli.py              # command-line interface
-└── io.py               # genotype I/O
+├── cli.py               # command-line interface
+├── species_config.py    # species YAML schema
+├── species_split.py     # VCF -> per-subgenome genotype sets
+├── grm.py, grm_cache.py # per-subgenome and LOCO kinship matrices
+├── lmm.py               # multi-kernel REML mixed model
+├── scan.py              # per-SNP scan (streaming CPU, parallel chunks, optional GPU)
+├── gp.py                # GBLUP prediction + cross-validation
+├── prep.py              # SNP-to-gene maps and homoeolog tables
+├── interact.py          # homoeolog interaction entry point
+├── omnib_family.py      # edge/group omniB scores and bootstrap scoring
+├── group_family.py      # homoeolog groups and their pair edges
+├── parallel.py          # forked worker pool for bootstrap blocks
+├── followup.py          # stability and evidence follow-up
+├── audit.py             # evidence/status audit of finished runs
+├── run_registry.py      # multi-species production registry
+├── plots.py             # publication figures from finished runs
+├── workflow.py          # high-level orchestration used by the agent tools
+└── mcp_server.py        # MCP server for AI agents
 ```
 
 ## Testing
@@ -338,39 +288,42 @@ pytest                             # full suite incl. simulation benchmarks
 
 CI runs ruff + the CPU test suite on Python 3.10 / 3.11 / 3.12.
 
-## Reproducing the paper
-
-The manuscript analysis code, configs, source data for figures, and audit
-material are maintained separately in
-[Shipeng-Yang/HomoeoGWAS-reproducibility](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility).
-Raw inputs and large intermediate outputs are not tracked there; its README
-documents the boundary between versioned reproduction material and
-provider-hosted datasets.
-
-The repository-side validation assessment and next biological priorities are in
-[`docs/validation_inventory.md`](docs/validation_inventory.md) and
-[`docs/roadmap_biology.md`](docs/roadmap_biology.md).
-
 ## Status
 
-This is research software released alongside a manuscript in preparation
-(target *Nature Communications*). The package and its tests are stable; the
-biological associations in the paper are the subject of that manuscript and
-should be cited from it once published.
+HomoeoGWAS is research software under active development. A preprint describing
+the methods and their applications is in preparation and will be posted on
+bioRxiv; this page will link to it once it is available.
 
 ## Citation
 
+Until the preprint is available, please cite the software release you used:
+
 ```bibtex
-@unpublished{homoeogwas2026,
-  title  = {HomoeoGWAS: subgenome-aware mixed-model GWAS for allopolyploid crops},
-  author = {Yang, Shipeng},
-  year   = {2026},
-  note   = {Manuscript in preparation},
-  url    = {https://github.com/Shipeng-Yang/HomoeoGWAS},
+@software{homoeogwas,
+  author  = {Yang, Shipeng},
+  title   = {HomoeoGWAS: subgenome-aware trait architecture and homoeolog-interaction
+             analysis for allopolyploid crops},
+  year    = {2026},
+  version = {2.1.0},
+  url     = {https://github.com/Shipeng-Yang/HomoeoGWAS}
 }
 ```
 
 See [`CITATION.cff`](CITATION.cff) for machine-readable metadata.
+
+## Release history
+
+Full details are in the [changelog](CHANGELOG.md) and the
+[release notes](docs/releases/).
+
+| Version | Date | Main changes |
+|---|---|---|
+| [v2.1.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.0) | 2026-10-05 | Heteroscedasticity-robust bootstrap null for group omniB (`null_variance: smooth_pc4`, the default for agent-run analyses); `scan.n_jobs` runs streaming scan chunks in parallel with output identical to the serial scan; MCP `audit_results` and `summarize_results`; a group is tested only when all of its pair edges are estimable. |
+| [v2.0.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.0.1) | 2026-08-29 | One interaction contract across ploidies: pair edges as the shared primitive for 2-, 3- and 4-copy groups with one bootstrap-minP family; component-aware rankings, `homoeogwas audit` and `follow-up` stability checks; process-based parallel workers; BIM-bound marker manifests. |
+| [v2.0.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.0.0) | 2026-07-25 | Breaking: corrected the multiplicity of triad/clique burden scans (groups with three or more copies), non-estimable tests reported as missing instead of p = 1, strict JSON output, and exactly one alpha-spending procedure per run. |
+| [v1.0.2](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v1.0.2) | 2026-06-21 | Optional dominance adjustment for the homoeolog interaction test. |
+| [v1.0.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v1.0.1) | 2026-06-12 | First PyPI release (features as v1.0.0). |
+| [v1.0.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v1.0.0) | 2026-06-12 | First public release: subgenome-stratified mixed-model GWAS, VCF splitting, homoeolog interaction test, plotting, input-preparation tools and the agent interface (AGENTS.md, skill, MCP server). |
 
 ## License
 

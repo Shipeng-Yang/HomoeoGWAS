@@ -1,41 +1,33 @@
 cff-version: 1.2.0
-message: "If you use HomoeoGWAS, please cite it using these metadata."
-title: "HomoeoGWAS: subgenome-aware scalable LMM with DL prior conditional lift for allopolyploid GWAS"
+message: "If you use HomoeoGWAS, please cite the software release you used. A bioRxiv preprint is in preparation."
+title: "HomoeoGWAS: subgenome-aware trait architecture and homoeolog-interaction analysis for allopolyploid crops"
 abstract: >-
-  HomoeoGWAS is a GWAS framework for allopolyploid crops (wheat AABBDD,
-  cotton AADD, rapeseed AACC, oat AACCDD, strawberry octoploid). It combines
-  subgenome-partitioned random-effect LMMs with per-logical-chromosome LOCO,
-  an optional scope-conditional homoeolog Hadamard kernel, and a zero-shot
-  PlantCaduceus + AgroNT deep-learning prior that re-ranks suggestive GWAS
-  hits. A dual-GPU native scan handles up to ~10^8 markers.
+  HomoeoGWAS analyses allopolyploid crop panels by modelling each subgenome
+  explicitly. A subgenome-stratified multi-kernel mixed model partitions trait
+  variance among subgenomes and runs a leave-one-chromosome-out per-SNP scan.
+  A gene-resolution homoeolog interaction test scores every pair of homoeologous
+  copies with omniB (minor burden, PC1 and kernel-Hadamard encodings) and
+  calibrates all edges or groups as one experiment-wide bootstrap-minP family
+  with a kinship-preserving, heteroscedasticity-robust null. An evidence audit
+  labels each result, and a CLI, an MCP server and an AI-agent skill drive the
+  workflows.
 type: software
 authors:
   - family-names: Yang
     given-names: Shipeng
     email: qhyysp@gmail.com
-version: 2.0.0
-date-released: "2026-07-25"
+version: 2.1.0
+date-released: "2026-10-05"
 license: MIT
 repository-code: "https://github.com/Shipeng-Yang/HomoeoGWAS"
 keywords:
   - GWAS
   - allopolyploid
+  - polyploid
   - mixed model
-  - LMM
-  - deep learning prior
-  - PlantCaduceus
-  - AgroNT
+  - homoeolog
+  - epistasis
   - wheat
   - cotton
   - rapeseed
-  - oat
-  - strawberry
-preferred-citation:
-  type: unpublished
-  title: "HomoeoGWAS: subgenome-aware scalable LMM with DL prior conditional lift for allopolyploid GWAS"
-  authors:
-    - family-names: Yang
-      given-names: Shipeng
-      email: qhyysp@gmail.com
-  year: 2026
-  notes: "In preparation; target Nature Communications."
+  - peanut

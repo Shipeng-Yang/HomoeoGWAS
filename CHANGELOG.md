@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (unreleased draft)
+## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (2026-10-05)
 
 ### Added
 

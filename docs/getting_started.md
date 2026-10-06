@@ -3,9 +3,16 @@
 ## Install
 
 ```bash
-pip install homoeogwas            # CPU
-pip install "homoeogwas[gpu]"     # + GPU extras (per-SNP scan + DL prior), transformers pinned 4.46.3
+# CPU
+python -m pip install \
+  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
+# + GPU extras for the per-SNP scan
+python -m pip install \
+  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
 ```
+
+PyPI still serves the older v1.0.1 package; install from the tagged release
+above until v2.1.0 is published there.
 
 From a checkout (for development):
 

@@ -1,5 +1,5 @@
 site_name: HomoeoGWAS
-site_description: Subgenome-aware scalable LMM + DL prior conditional lift for allopolyploid GWAS
+site_description: Subgenome-aware trait architecture and homoeolog-interaction analysis for allopolyploid crops
 site_url: https://shipeng-yang.github.io/HomoeoGWAS/
 repo_url: https://github.com/Shipeng-Yang/HomoeoGWAS
 repo_name: Shipeng-Yang/HomoeoGWAS
