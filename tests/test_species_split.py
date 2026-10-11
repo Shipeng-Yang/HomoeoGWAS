@@ -361,3 +361,17 @@ def _cfg_to_yaml(cfg: SpeciesConfig, root: Path) -> str:
         "pheno": _path(cfg.pheno),
     }
     return yaml.safe_dump(raw)
+
+
+@pytest.mark.skipif(
+    any(__import__("shutil").which(t) is None for t in ("bcftools", "bgzip")),
+    reason="bcftools/bgzip not installed")
+def test_subset_index_handles_wheat_scale_positions(wheat_like_cfg_single, tmp_path):
+    """Wheat chromosomes exceed the 2^29 coordinate limit of tabix .tbi indexes."""
+    vcf = tmp_path / "big.vcf"
+    vcf.write_text(TINY_VCF_HEADER + "chr1A\t600000000\t.\tA\tG\t.\tPASS\tNS=3\tGT\t0|0\t0|1\t1|1\n")
+    subprocess.run(["bgzip", "-f", str(vcf)], check=True)
+    plan = plan_split(wheat_like_cfg_single, tmp_path / "out", threads=1)
+    sg = plan.subgenomes[0]
+    cmd = [str(tmp_path / "big.vcf.gz") if a == str(sg.subset_vcf) else a for a in sg.bcftools_index_cmd]
+    subprocess.run(cmd, check=True, capture_output=True)

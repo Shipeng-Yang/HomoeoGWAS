@@ -19,6 +19,10 @@
   the binding of a formal config does not downgrade it; replacing the binding
   with the unattested declaration runs the analysis as non-formal. No
   statistical code changed.
+- `homoeogwas split` indexed the per-subgenome subset VCF with a tabix `.tbi`
+  index, which cannot store positions above 2^29 (536,870,912 bp); splitting a
+  wheat VCF therefore failed for every subgenome. Subset and exported VCFs now
+  get CSI indexes (`bcftools index -c`).
 
 ## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (unreleased draft)
 

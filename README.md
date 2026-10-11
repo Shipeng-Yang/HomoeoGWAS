@@ -13,7 +13,7 @@
 > **Current release: [v2.1.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.1).**
 > A patch release: interaction analyses with the default `smooth_pc4` null now
 > run from generated configs and the MCP tools (v2.1.0 stopped them at the
-> formal-launch check). v2.1.0 added a heteroscedasticity-robust bootstrap null
+> formal-launch check), and `split` handles wheat-length chromosomes. v2.1.0 added a heteroscedasticity-robust bootstrap null
 > for group omniB, chunk-parallel streaming scans and MCP audit and summary
 > tools. See the [release notes](docs/releases/v2.1.1.md) and
 > [changelog](CHANGELOG.md).
@@ -51,6 +51,8 @@ evidence without a frozen benchmark.
   AGENTS.md template) declare `provenance: {mode: unattested}`, so they pass
   the checkpoint launch check; in v2.1.0 they stopped with "checkpointed group
   omniB requires provenance.pre_run_manifest". Statistics are unchanged.
+- **Fix:** `homoeogwas split` writes CSI indexes, so VCFs with chromosomes
+  longer than 2^29 bp (wheat) split correctly.
 
 ## What's new in v2.1.0
 
