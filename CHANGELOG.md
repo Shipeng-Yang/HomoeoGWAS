@@ -14,9 +14,11 @@
   provenance.pre_run_manifest", including on installations without a git
   checkout. Checkpointed runs may now declare `provenance: {mode: unattested}`
   (exactly this mapping; mixing it with formal fields fails); the generator and
-  the template write it. Such runs keep the non-formal evidence role. A config
-  without any provenance block still fails closed, so deleting the binding of
-  a formal config does not downgrade it. No statistical code changed.
+  the template write it. Such runs keep the non-formal (`legacy`) evidence
+  role. A config without any provenance block still fails closed, so deleting
+  the binding of a formal config does not downgrade it; replacing the binding
+  with the unattested declaration runs the analysis as non-formal. No
+  statistical code changed.
 
 ## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (unreleased draft)
 

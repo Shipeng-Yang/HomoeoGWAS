@@ -485,17 +485,18 @@ def test_declared_unattested_checkpoint_runs_without_formal_manifest(tmp_path):
     assert P.verify_formal_launch(path, cfg) is None
 
 
-@pytest.mark.parametrize("provenance", [
+@pytest.mark.parametrize("extra", [
     {"mode": "formal"},
-    {"mode": "unattested", "pre_run_manifest": "m.json"},
+    {"mode": "unattested", "pre_run_manifest": "manifest.json"},
     {"mode": "unattested", "blas_thread_policy": {}},
 ])
-def test_unattested_declaration_is_exact(tmp_path, provenance):
+def test_unattested_declaration_is_exact(tmp_path, extra):
     """Any other mode, or mixing the declaration with formal fields, fails closed."""
     from homoeogwas import formal_provenance as P
 
-    path, cfg = _checkpoint_cfg(tmp_path, provenance)
-    with pytest.raises(P.FormalLaunchError):
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    path, cfg = _checkpoint_cfg(tmp_path, extra)
+    with pytest.raises(P.FormalLaunchError, match="provenance.mode must be exactly"):
         P.verify_formal_launch(path, cfg)
 
 

@@ -150,7 +150,8 @@ provenance: {mode: unattested}   # required with checkpointing unless a formal p
 `smooth_pc4` requires checkpointing, and a checkpointed run must declare its
 provenance: `provenance: {mode: unattested}` for ordinary analyses, or a frozen
 `pre_run_manifest` for formal launches from a clean source checkout. Removing
-the provenance block from a formal config fails instead of downgrading it.
+the provenance block from a formal config fails; an unattested run is recorded
+with the non-formal (`legacy`) evidence role.
 
 `omniB` combines minor-allele burden, PC1 and kernel-Hadamard interaction
 evidence. The combined p is primary; component p-values localize the evidence
