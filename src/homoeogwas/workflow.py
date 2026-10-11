@@ -228,6 +228,8 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
             **({"full_ranking": True} if is_canonical_omnib else {}),
         },
     }
+    if "checkpoint" in calibration:
+        cfg["provenance"] = {"mode": "unattested"}
     if is_canonical_omnib:
         cfg["interact"]["burden"].update({"maf_min": 0.01, "n_pc": 3})
         cfg["interact"].update({

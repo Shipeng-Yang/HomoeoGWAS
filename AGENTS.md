@@ -144,7 +144,13 @@ interact:
     null_variance: smooth_pc4     # robust primary null; homoscedastic as sensitivity
     checkpoint: {enabled: true, root: <out_dir>/checkpoints}
 outputs: {out_dir: <out_dir>, full_ranking: true}
+provenance: {mode: unattested}   # required with checkpointing unless a formal pre-run manifest is bound
 ```
+
+`smooth_pc4` requires checkpointing, and a checkpointed run must declare its
+provenance: `provenance: {mode: unattested}` for ordinary analyses, or a frozen
+`pre_run_manifest` for formal launches from a clean source checkout. Removing
+the provenance block from a formal config fails instead of downgrading it.
 
 `omniB` combines minor-allele burden, PC1 and kernel-Hadamard interaction
 evidence. The combined p is primary; component p-values localize the evidence

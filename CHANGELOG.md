@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v2.1.1 — smooth_pc4 interaction runs from generated configs
+
+### Fixed
+
+- Canonical group omniB with `null_variance: smooth_pc4` requires bootstrap
+  checkpointing, and every checkpointed omniB run was treated as a formal
+  launch that needs a git-bound `provenance.pre_run_manifest`. Configs from
+  `workflow.build_interact_config` / MCP `run_interaction` and the AGENTS.md
+  template therefore stopped with "checkpointed group omniB requires
+  provenance.pre_run_manifest", including on installations without a git
+  checkout. Checkpointed runs may now declare `provenance: {mode: unattested}`
+  (exactly this mapping; mixing it with formal fields fails); the generator and
+  the template write it. Such runs keep the non-formal evidence role. A config
+  without any provenance block still fails closed, so deleting the binding of
+  a formal config does not downgrade it. No statistical code changed.
+
 ## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (unreleased draft)
 
 ### Added
