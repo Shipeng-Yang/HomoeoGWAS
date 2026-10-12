@@ -147,6 +147,11 @@ outputs: {out_dir: <out_dir>, full_ranking: true}
 provenance: {mode: unattested}   # required with checkpointing unless a formal pre-run manifest is bound
 ```
 
+The homoscedastic null draws its bootstrap phenotypes from a different random
+stream with and without checkpointing, so the same seed gives slightly different
+Monte Carlo p-values in the two modes (both valid). Report the mode with the
+result. `smooth_pc4` always checkpoints.
+
 `smooth_pc4` requires checkpointing, and a checkpointed run must declare its
 provenance: `provenance: {mode: unattested}` for ordinary analyses, or a frozen
 `pre_run_manifest` for formal launches from a clean source checkout. Removing
@@ -187,6 +192,16 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
    pseudo-markers require an exact `variant_id,marker_type` manifest. Binary
    absence/presence is encoded 0/2, not 0/1. Refuse raw/multi-allelic CNV as a
    diploid SNP surrogate.
+9. **Check flagged phenotype values.** `validate_inputs`, `fit` and `interact`
+   list analysed values beyond 5 SD of the mean (WARN; audit flag
+   `PHENOTYPE_EXTREME_VALUES`); beyond 10 SD the audit requires review
+   (`PHENOTYPE_OUTLIER`). Nothing is removed. Report the flagged samples and
+   ask whether they are data-entry, unit or trial errors before interpreting
+   results.
+10. **Homoeolog tables are one-to-one.** A gene repeated across groups within
+    one subgenome (paralog contamination) stops `interact` at preflight. Rebuild
+    the table; `interact.allow_duplicate_genes: true` runs anyway and the audit
+    flags `DUPLICATED_GROUP_GENES`.
 
 ---
 

@@ -5,18 +5,19 @@
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-2.1.2-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
 <!-- DOI badge added after the first Zenodo release:
 [![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
 
-> **Current release: [v2.1.1](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.1).**
-> A patch release: interaction analyses with the default `smooth_pc4` null now
-> run from generated configs and the MCP tools (v2.1.0 stopped them at the
-> formal-launch check), and `split` handles wheat-length chromosomes. v2.1.0 added a heteroscedasticity-robust bootstrap null
-> for group omniB, chunk-parallel streaming scans and MCP audit and summary
-> tools. See the [release notes](docs/releases/v2.1.1.md) and
-> [changelog](CHANGELOG.md).
+> **Current release: [v2.1.2](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.2).**
+> A patch release: extreme phenotype values are listed and flagged by the
+> audit, and homoeolog tables that repeat a gene across groups stop at
+> preflight. v2.1.1 let `smooth_pc4` interaction analyses run from generated
+> configs and the MCP tools, and fixed `split` for wheat-length chromosomes.
+> v2.1.0 added a heteroscedasticity-robust bootstrap null for group omniB,
+> chunk-parallel streaming scans and MCP audit and summary tools. See the
+> [release notes](docs/releases/v2.1.2.md) and [changelog](CHANGELOG.md).
 
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
 peanut, strawberry, …) by modelling each subgenome explicitly. A new species is added
@@ -44,6 +45,15 @@ The global `K_hom` kernel and phenotype-independent external priors remain
 optional research extensions. They are not required for the primary variance
 partition or interaction workflow and should not be treated as discovery
 evidence without a frozen benchmark.
+
+## What's new in v2.1.2
+
+- **Phenotype screen:** analysed values beyond 5 SD of the mean are listed by
+  `validate_inputs`, `fit` and `interact` and flagged by `audit` (review beyond
+  10 SD). Nothing is removed.
+- **One-to-one homoeolog tables:** a gene repeated across groups stops
+  `interact` at preflight (`interact.allow_duplicate_genes: true` overrides and
+  is flagged). Statistics are unchanged.
 
 ## What's new in v2.1.1
 
@@ -88,9 +98,9 @@ validation results and upgrade guidance.
 ## Quick start
 
 ```bash
-# 1. Install the current v2.1.1 release (CPU)
+# 1. Install the current v2.1.2 release (CPU)
 python -m pip install \
-  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.1.tar.gz"
+  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.2.tar.gz"
 # Contributors may instead use: python -m pip install -e ".[dev]"
 
 # 2. Verify the install end-to-end (~2 s): synthesise a tiny dataset + run a fit
@@ -103,10 +113,10 @@ homoeogwas audit results/my_run       # validity, uncertainty and evidence limit
 
 # (Optional) GPU extras for the per-SNP scan
 python -m pip install \
-  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.1.tar.gz"
+  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.2.tar.gz"
 ```
 
-PyPI currently serves the older v1.0.1 package. Until v2.1.1 is published
+PyPI currently serves the older v1.0.1 package. Until v2.1.2 is published
 there, use the versioned GitHub command above for new analyses; an unpinned
 `pip install homoeogwas` will not install the algorithms described here.
 
@@ -172,7 +182,7 @@ to connect, pick whichever matches the agent you already use:
 # ── Option B · Any MCP client (Cursor, Cline, Windsurf, Claude Desktop, …) ─────
 # Install the current release with the MCP dependency:
 python -m pip install \
-  "homoeogwas[mcp] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.1.tar.gz"
+  "homoeogwas[mcp] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.2.tar.gz"
 homoeogwas mcp                    # starts the MCP server (stdio)
 # Then register this server in your client's MCP config. Minimal entry:
 #   {"mcpServers": {"homoeogwas": {"command": "homoeogwas", "args": ["mcp"]}}}

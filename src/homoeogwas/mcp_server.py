@@ -69,8 +69,11 @@ def build_server():
     @mcp.tool()
     def validate_inputs(phenotype: str, sample_col: str, trait: str) -> dict:
         """Check phenotype inputs before a run: confirms the trait/sample columns
-        exist and reports whether sample IDs look integer-like. The analysis
-        reader preserves that column as strings before joining to BED IIDs."""
+        exist, reports whether sample IDs look integer-like (the analysis reader
+        keeps them as strings) and lists trait values beyond 5 SD of the mean
+        over all phenotyped samples (``phenotype_qc``; fit/interact repeat the
+        screen on the analysed samples, and beyond 10 SD the audit requires
+        review). Report flagged samples to the user; nothing is removed."""
         return _safe(workflow.check_phenotype_inputs, phenotype=phenotype,
                      sample_col=sample_col, trait=trait)
 

@@ -57,11 +57,29 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
         return {"ok": False, "reason": f"phenotype {phenotype!r} has no usable "
                 f"rows in sample column {sample_col!r}"}
     integer_like = bool(len(col) and col.astype(str).str.fullmatch(r"-?\d+").all())
-    return {"ok": True, "integer_like": integer_like,
-            "advice": ("sample ids look integer-like — HomoeoGWAS will preserve "
-                       "the phenotype sample column as strings before joining to "
-                       ".fam IIDs" if integer_like else
-                       "sample ids are non-numeric strings (fine)")}
+    advice = ("sample ids look integer-like — HomoeoGWAS will preserve "
+              "the phenotype sample column as strings before joining to "
+              ".fam IIDs" if integer_like else
+              "sample ids are non-numeric strings (fine)")
+    out = {"ok": True, "integer_like": integer_like}
+    if trait is not None:
+        import pandas as pd
+
+        from .input_qc import phenotype_message, screen_phenotype
+        full = read_delimited(phenotype, usecols=[sample_col, trait],
+                              dtype={sample_col: "string"})
+        full = full.loc[full[sample_col].notna()].copy()
+        full[trait] = pd.to_numeric(full[trait], errors="coerce")
+        per_sample = full.groupby(full[sample_col].astype(str))[trait].mean()
+        qc = screen_phenotype(per_sample.index.tolist(), per_sample.to_numpy())
+        qc["scope"] = ("all phenotyped samples (repeated rows averaged); fit/interact "
+                       "screen the analysed samples after the genotype join")
+        out["phenotype_qc"] = qc
+        msg = phenotype_message(qc, trait)
+        if msg:
+            advice = f"{advice}; WARNING: {msg}"
+    out["advice"] = advice
+    return out
 
 
 def check_sample_ids(phenotype: str, sample_col: str) -> dict:

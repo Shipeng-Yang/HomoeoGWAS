@@ -55,6 +55,12 @@ from .group_family import (
     expand_pair_edges,
     load_master_group_family,
 )
+from .input_qc import (
+    duplicate_message,
+    duplicated_genes,
+    phenotype_message,
+    screen_phenotype,
+)
 from .interaction_config import normalize_interact_config
 
 
@@ -3440,6 +3446,8 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit("ERR: interact.subgenomes must be a non-empty list")
     if len(set(subs)) != len(subs):
         raise SystemExit(f"ERR: interact.subgenomes has duplicates: {subs}")
+    if not isinstance(ic.get("allow_duplicate_genes", False), bool):
+        raise SystemExit("ERR: interact.allow_duplicate_genes must be true or false")
     mode = str(ic.get("mode", "pairwise")).lower()
     expected_n = {"pairwise": 2, "triad": 3}
     statistic_requested = str(ic.get("statistic", "omniB")).lower()
@@ -3819,21 +3827,28 @@ def preflight_interact(cfg: dict, *, master_family=None) -> list[str]:
         problems.append(f"interact.{table_key} is required")
         return problems
     table = Path(table_value)
+    table_rows = None
     if mode == "group" and master_family is not None:
         if tuple(master_family.subgenomes) != tuple(subs):
             problems.append(
                 "groups table invalid: preloaded master-family subgenomes "
                 f"{list(master_family.subgenomes)} do not match {subs}")
+        else:
+            table_rows = master_family.genes
     elif not table.exists():
         problems.append(f"{table_key} table missing: {table}")
     else:
         try:
             if mode == "group":
-                load_master_group_family(table, subs)
+                table_rows = load_master_group_family(table, subs).genes
             else:
-                _load_pairs(str(table), subs)
+                table_rows = _load_pairs(str(table), subs)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{table_key} table invalid: {exc}")
+    if table_rows is not None and not ic.get("allow_duplicate_genes", False):
+        dup = duplicated_genes(table_rows, subs)
+        if dup:
+            problems.append(f"{table_key} table: {duplicate_message(dup)}")
     weights = ic.get("weights")
     if weights:
         weights_path = Path(weights)
@@ -3915,7 +3930,8 @@ def _build_cov_arg(cov_cfg, valid: list):
     return dict(n_pcs=n_pcs, extra=extra), label
 
 
-def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
+def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0,
+                    group_table_qc=None) -> int:
     """Multi-trait (pleiotropy) CLI path: complete-case across a frozen trait set, ACAT-across-traits.
 
     The trait set is frozen before any association; missing traits raise rather than silently drop,
@@ -3940,6 +3956,11 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
         return 1
     sample_idx = np.array([samples.index(s) for s in valid])
     y_by_trait = {t: np.array([float(ph.loc[s, t]) for s in valid]) for t in tlist}
+    phenotype_qc = {t: screen_phenotype(valid, y_by_trait[t]) for t in tlist}
+    for t in tlist:
+        qc_msg = phenotype_message(phenotype_qc[t], t)
+        if qc_msg:
+            print(f"  WARN: {qc_msg}", flush=True)
     per_trait_present = {t: int(sum((s in ph.index) and pd.notna(ph.loc[s, t]) for s in samples))
                          for t in tlist}
 
@@ -4003,7 +4024,8 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0) -> int:
                   "yields exactly one ACAT-combined p across the frozen trait family. No trait "
                   "selection occurs inside the scan; missing traits raise rather than silently drop."))
     payload = dict(tool="homoeogwas", command="interact", mode="pairwise", multi_trait=True,
-                   subgenomes=subs, traits=tlist, provenance=provenance, results=results)
+                   subgenomes=subs, traits=tlist, provenance=provenance, results=results,
+                   input_qc={"phenotype_by_trait": phenotype_qc, "group_table": group_table_qc})
     fp = out_dir / f"interact_multitrait_{trait_set.digest}.json"
     fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact (multi-trait) -> {fp} ({time.time()-t0:.1f}s)")
@@ -4188,6 +4210,17 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
         for problem in problems:
             print(f"  - {problem}")
         return 1
+    group_table_qc = {"allow_duplicate_genes": bool(ic.get("allow_duplicate_genes", False)),
+                      "duplicated_genes": {}}
+    if group_table_qc["allow_duplicate_genes"]:
+        table_key = ("groups" if mode == "group"
+                     else ("pairs" if mode == "pairwise" else "triads"))
+        rows = (master_family.genes if master_family is not None
+                else _load_pairs(str(ic[table_key]), subs))
+        group_table_qc["duplicated_genes"] = duplicated_genes(rows, subs)
+        if group_table_qc["duplicated_genes"]:
+            print(f"  WARN: {duplicate_message(group_table_qc['duplicated_genes'])}",
+                  flush=True)
     grm_cache = None
     if (ic.get("grm") or {}).get("cache_dir") is not None:
         try:
@@ -4244,7 +4277,8 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
         if mode != "pairwise":
             print(f"ERROR: interact: multi_trait is pairwise-only; mode={mode} not supported (future).")
             return 1
-        return _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0)
+        return _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0,
+                               group_table_qc=group_table_qc)
 
     trait = ic["trait"]
     valid = [s for s in samples if s in ph.index and pd.notna(ph.loc[s, trait])]
@@ -4254,6 +4288,10 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
         return 1
     sample_idx = np.array([samples.index(s) for s in valid])
     y_raw = np.array([float(ph.loc[s, trait]) for s in valid])
+    phenotype_qc = screen_phenotype(valid, y_raw)
+    qc_msg = phenotype_message(phenotype_qc, trait)
+    if qc_msg:
+        print(f"  WARN: {qc_msg}", flush=True)
 
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
@@ -4754,7 +4792,8 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
             **canonical_family_provenance,
         })
     payload = dict(tool="homoeogwas", command="interact", mode=mode, subgenomes=subs, trait=trait,
-                   provenance=provenance, results=results)
+                   provenance=provenance, results=results,
+                   input_qc={"phenotype": phenotype_qc, "group_table": group_table_qc})
     fp = out_dir / f"interact_{trait}.json"
     fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")

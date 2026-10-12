@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## v2.1.2 — input screens for extreme phenotype values and duplicated homoeolog genes
+
+### Added
+
+- Phenotype screen on the analysed samples (SD from the mean). Values beyond
+  5 SD are listed by `workflow.check_phenotype_inputs` / MCP `validate_inputs`,
+  printed as WARN by `fit` and `interact`, recorded in `input_qc.phenotype` of
+  the result JSON and flagged `PHENOTYPE_EXTREME_VALUES` (info) by `audit`;
+  beyond 10 SD `audit` adds `PHENOTYPE_OUTLIER` (review). No value is removed.
+- `interact` preflight refuses a group/pair/triad table in which a gene occurs
+  in more than one row of a subgenome column (paralog contamination). The new
+  `interact.allow_duplicate_genes: true` runs such a table; the genes are
+  recorded in `input_qc.group_table` and `audit` flags
+  `DUPLICATED_GROUP_GENES` (review).
+
+### Documented
+
+- The homoscedastic bootstrap null draws a different random stream with and
+  without checkpointing (same seed, slightly different Monte Carlo p-values).
+
+No statistical code changed: estimates, p-values and decisions are identical to
+v2.1.1; result JSONs gain the `input_qc` block.
+
 ## v2.1.1 — smooth_pc4 interaction runs from generated configs
 
 ### Fixed

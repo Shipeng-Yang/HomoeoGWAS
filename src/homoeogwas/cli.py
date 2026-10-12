@@ -27,6 +27,7 @@ import pandas as pd
 
 from . import __version__
 from .grm import GRMPart, compute_grm, compute_loco_grm_parts, loco_grm_from_parts
+from .input_qc import phenotype_message, screen_phenotype
 from .io import load_bed_hardcall, plink_path, read_delimited
 from .jsonutil import dump_strict, dumps_strict
 from .kernel import build_homoeolog_kernel, normalize_kernel
@@ -966,6 +967,10 @@ def cmd_fit(args) -> int:
     analysis, y, X = join_samples(cfg)
     n = len(analysis)
     print(f"\n[1] analysis set: n={n}  var(y)={np.var(y, ddof=1):.4g}")
+    phenotype_qc = screen_phenotype(analysis, y)
+    qc_msg = phenotype_message(phenotype_qc, trait)
+    if qc_msg:
+        print(f"  WARN: {qc_msg}", flush=True)
     pd.DataFrame({"sample": analysis}).to_csv(
         out_dir / "analysis_samples.tsv", sep="\t", index=False)
 
@@ -1142,6 +1147,7 @@ def cmd_fit(args) -> int:
                     "analysis_samples": str(out_dir / "analysis_samples.tsv"),
                     "resolved_config": str(out_dir / "resolved_config.yaml")},
         "acceptance": acceptance, "acceptance_all_passed": all_passed,
+        "input_qc": {"phenotype": phenotype_qc},
     }
     summary_path = out_dir / f"summary_{prefix}.json"
     with open(summary_path, "w") as fh:
