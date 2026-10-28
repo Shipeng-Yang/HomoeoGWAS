@@ -227,9 +227,14 @@ homoeogwas prep-homoeologs --mode triad --subgenomes A,B,C \
   homoeologs.
 - DIAMOND RBH is a convenience baseline; for publication, prefer a dedicated
   orthology/synteny workflow and feed it via `--from-table`.
-- Protein sequences must not contain `.`/`*` (stop/gap) characters — strip them
-  first (DIAMOND errors otherwise). Some DIAMOND builds (e.g. 2.2.0) deadlock on
-  `makedb`; 2.1.x works — pass a known-good binary with `--diamond`.
+- Protein sequences must contain amino-acid letters only — strip `.`/`*`
+  (stop/gap) characters first. With such characters `makedb` can hang (seen
+  with DIAMOND 2.2.0; earlier versions of this guide blamed the 2.2.0 build,
+  but 2.2.0, 2.2.1 and 2.2.8 give identical pairs on clean input). Since
+  v2.1.3 `prep-homoeologs` refuses FASTAs with such characters or with fewer
+  than 90% of headers matching `genes_<S>.tsv`, kills any DIAMOND command
+  (and its children) after `--diamond-timeout` seconds (default 7200), refuses
+  a run with no reciprocal pairs, and prints the DIAMOND version.
 
 **Output**: `triads.tsv` with columns `gene_A, gene_B, gene_C` (or `gene_A,
 gene_B` for `--mode pairwise`). These gene ids match the NPZ exactly.
@@ -406,3 +411,6 @@ status.
 - **Autopolyploids** often carry several chromosome copies per subgenome per
   base chromosome — set `base_group` and use `--restrict-base-group`.
 - DIAMOND results depend on the binary/version and thresholds; record them.
+- **Duplicated genes stop `interact`.** A gene in more than one group of the same
+  subgenome is refused at preflight and nothing is run. Rebuild the table
+  one-to-one or report it to the data owner.

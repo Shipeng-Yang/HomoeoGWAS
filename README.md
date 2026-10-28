@@ -52,8 +52,7 @@ evidence without a frozen benchmark.
   `validate_inputs`, `fit` and `interact` and flagged by `audit` (review beyond
   10 SD). Nothing is removed.
 - **One-to-one homoeolog tables:** a gene repeated across groups stops
-  `interact` at preflight (`interact.allow_duplicate_genes: true` overrides and
-  is flagged). Statistics are unchanged.
+  `interact` at preflight. Statistics are unchanged.
 
 ## What's new in v2.1.1
 

@@ -27,7 +27,14 @@ import pandas as pd
 
 from . import __version__
 from .grm import GRMPart, compute_grm, compute_loco_grm_parts, loco_grm_from_parts
-from .input_qc import phenotype_message, screen_phenotype
+from .input_qc import (
+    phenotype_message,
+    raw_trial_average,
+    raw_trial_average_message,
+    sample_join,
+    sample_join_message,
+    screen_phenotype,
+)
 from .io import load_bed_hardcall, plink_path, read_delimited
 from .jsonutil import dump_strict, dumps_strict
 from .kernel import build_homoeolog_kernel, normalize_kernel
@@ -306,18 +313,24 @@ def preflight(cfg: dict) -> list[str]:
     if not pheno.exists():
         problems.append(f"phenotype.path missing: {pheno}")
     for sg in subg:
-        bed = plink_path(_scan_bed_prefix(cfg, sg), ".bed")
-        if not bed.exists():
-            problems.append(f"scan BED missing for subgenome {sg}: {bed}")
+        missing = [str(plink_path(_scan_bed_prefix(cfg, sg), ext))
+                   for ext in (".bed", ".bim", ".fam")
+                   if not plink_path(_scan_bed_prefix(cfg, sg), ext).exists()]
+        if missing:
+            problems.append(f"scan PLINK files missing for subgenome {sg}: {missing} "
+                            "(.bed, .bim and .fam must come from the same PLINK export; "
+                            "do not create a .fam by hand)")
     if _get(cfg, "genotype.grm.source", "bed") == "npz":
         npz = Path(_get(cfg, "genotype.grm.npz_path", ""))
         if not npz.exists():
             problems.append(f"genotype.grm.npz_path missing: {npz}")
     else:
         for sg in subg:
-            bed = plink_path(_grm_bed_prefix(cfg, sg), ".bed")
-            if not bed.exists():
-                problems.append(f"GRM BED missing for subgenome {sg}: {bed}")
+            missing = [str(plink_path(_grm_bed_prefix(cfg, sg), ext))
+                       for ext in (".bed", ".bim", ".fam")
+                       if not plink_path(_grm_bed_prefix(cfg, sg), ext).exists()]
+            if missing:
+                problems.append(f"GRM PLINK files missing for subgenome {sg}: {missing}")
     marker_problems, _ = validate_marker_contract(
         subgenomes=subg,
         bed_prefix=lambda sg: _scan_bed_prefix(cfg, sg),
@@ -381,11 +394,12 @@ def _grm_source_samples(cfg: dict, subg: list[str]) -> dict[str, np.ndarray]:
     return out
 
 
-def join_samples(cfg: dict):
+def join_samples(cfg: dict, return_join: bool = False):
     """Inner-join GRM samples (all subgenomes) with non-missing phenotype.
 
-    Returns (analysis_samples, y, X). Canonical order = first subgenome's
-    GRM-source sample order.
+    Returns (analysis_samples, y, X), plus the sample-join record when
+    ``return_join``. Canonical order = first subgenome's GRM-source sample order.
+    Refuses (SystemExit) when IDs match only after normalisation (input_qc.sample_join).
     """
     subg = _get(cfg, "panel.subgenomes")
     sample_col = _get(cfg, "phenotype.sample_col", "sample")
@@ -413,12 +427,22 @@ def join_samples(cfg: dict):
     for sg in subg[1:]:
         in_all_grm &= {str(s) for s in grm_samp[sg]}
     analysis = [s for s in canonical if s in in_all_grm and s in ph.index]
+    join = sample_join(ph.index, in_all_grm, analysis)
+    join_msg = sample_join_message(join)
+    if join["status"] == "refuse":
+        raise SystemExit(f"ERR: {join_msg}")
+    print(f"  sample join: phenotyped {join['n_phenotyped']}, genotyped {join['n_genotyped']}, "
+          f"analysed {join['n_analysis']}, dropped {join['n_dropped']}", flush=True)
+    if join_msg:
+        print(f"  WARN: {join_msg}", flush=True)
     if len(analysis) < 20:
         raise SystemExit(
             f"ERR: only {len(analysis)} samples overlap GRM ∩ phenotype "
             f"(trait {trait!r}); need >= 20")
     y = ph.loc[analysis].to_numpy(dtype=np.float64)
     X = np.ones((len(analysis), 1), dtype=np.float64)
+    if return_join:
+        return np.array(analysis, dtype=object), y, X, join
     return np.array(analysis, dtype=object), y, X
 
 
@@ -964,13 +988,16 @@ def cmd_fit(args) -> int:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {msg}" if msg else ""))
 
     # samples + phenotype
-    analysis, y, X = join_samples(cfg)
+    analysis, y, X, sample_join_record = join_samples(cfg, return_join=True)
     n = len(analysis)
     print(f"\n[1] analysis set: n={n}  var(y)={np.var(y, ddof=1):.4g}")
     phenotype_qc = screen_phenotype(analysis, y)
     qc_msg = phenotype_message(phenotype_qc, trait)
     if qc_msg:
         print(f"  WARN: {qc_msg}", flush=True)
+    trial_avg = _raw_trial_average_for(cfg)
+    if trial_avg:
+        print(f"  WARN: {raw_trial_average_message(trial_avg, trait)}", flush=True)
     pd.DataFrame({"sample": analysis}).to_csv(
         out_dir / "analysis_samples.tsv", sep="\t", index=False)
 
@@ -1147,12 +1174,15 @@ def cmd_fit(args) -> int:
                     "analysis_samples": str(out_dir / "analysis_samples.tsv"),
                     "resolved_config": str(out_dir / "resolved_config.yaml")},
         "acceptance": acceptance, "acceptance_all_passed": all_passed,
-        "input_qc": {"phenotype": phenotype_qc},
+        "input_qc": {"phenotype": phenotype_qc, "sample_join": sample_join_record,
+                     "raw_trial_average": trial_avg},
     }
     summary_path = out_dir / f"summary_{prefix}.json"
     with open(summary_path, "w") as fh:
         dump_strict(summary, fh, indent=2)
     print(f"\nwrote {summary_path}")
+    from .report_card import try_write_report_card
+    try_write_report_card(summary_path)
     n_pass = sum(c["passed"] for c in acceptance)
     print(f"acceptance: {n_pass}/{len(acceptance)} checks passed  "
           f"(runtime {summary['runtime_sec']}s)")
@@ -1788,6 +1818,14 @@ def cmd_validate(args) -> int:
         validate_interact_config(cfg)
         print(f"[validate] interaction schema OK: {args.config}")
         problems = preflight_interact(cfg)
+        ic = cfg["interact"]
+        if not problems and ic.get("trait"):
+            from .workflow import check_phenotype_inputs
+            pq = check_phenotype_inputs(ic["phenotype"], ic.get("sample_col", "sample"), ic["trait"])
+            if not pq.get("ok"):
+                problems.append(pq.get("reason"))
+            elif "WARNING" in pq.get("advice", ""):
+                print(f"  WARN: {pq['advice'].split('WARNING: ', 1)[1]}")
         if not problems:
             print("[validate] interaction input preflight: OK")
             return 0
@@ -1801,12 +1839,36 @@ def cmd_validate(args) -> int:
         print(f"  panel_manifest: {cfg['_panel_manifest_resolved']}")
     problems = preflight(cfg)
     if not problems:
+        problems = _validate_phenotype(cfg)
+    if not problems:
         print("[validate] input preflight: OK")
         return 0
     print(f"[validate] input preflight: {len(problems)} problem(s):")
     for p in problems:
         print(f"  - {p}")
     return 1
+
+
+def _validate_phenotype(cfg: dict) -> list[str]:
+    """The phenotype checks fit applies, without computing: sample/trait columns, the
+    phenotype screen on the analysed samples and the sample join."""
+    try:
+        analysis, y, _, join = join_samples(cfg, return_join=True)
+    except SystemExit as exc:
+        return [str(exc).removeprefix("ERR: ")]
+    qc_msg = phenotype_message(screen_phenotype(analysis, y), _get(cfg, "phenotype.trait"))
+    if qc_msg:
+        print(f"  WARN: {qc_msg}")
+    tmsg = raw_trial_average_message(_raw_trial_average_for(cfg), _get(cfg, "phenotype.trait"))
+    if tmsg:
+        print(f"  WARN: {tmsg}")
+    return []
+
+
+def _raw_trial_average_for(cfg: dict) -> dict | None:
+    sample_col = _get(cfg, "phenotype.sample_col", "sample")
+    df = read_delimited(_get(cfg, "phenotype.path"), dtype={sample_col: "string"})
+    return raw_trial_average(df, sample_col, _get(cfg, "phenotype.trait"))
 
 
 def cmd_demo(args) -> int:

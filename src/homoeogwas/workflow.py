@@ -57,10 +57,12 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
         return {"ok": False, "reason": f"phenotype {phenotype!r} has no usable "
                 f"rows in sample column {sample_col!r}"}
     integer_like = bool(len(col) and col.astype(str).str.fullmatch(r"-?\d+").all())
-    advice = ("sample ids look integer-like — HomoeoGWAS will preserve "
-              "the phenotype sample column as strings before joining to "
-              ".fam IIDs" if integer_like else
-              "sample ids are non-numeric strings (fine)")
+    advice = ("sample ids look integer-like; they must equal the .fam IIDs exactly, "
+              "including leading zeros (spreadsheets often drop them). This check cannot "
+              "see the genotypes: fit and interact report the sample join and refuse IDs "
+              "that match only after normalisation" if integer_like else
+              "sample ids are non-numeric strings; they must equal the .fam IIDs exactly. "
+              "This check cannot see the genotypes: fit and interact report the sample join")
     out = {"ok": True, "integer_like": integer_like}
     if trait is not None:
         import pandas as pd
@@ -78,6 +80,13 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
         msg = phenotype_message(qc, trait)
         if msg:
             advice = f"{advice}; WARNING: {msg}"
+        from .input_qc import raw_trial_average, raw_trial_average_message
+        trials = raw_trial_average(read_delimited(phenotype, dtype={sample_col: "string"}),
+                                   sample_col, trait)
+        out["raw_trial_average"] = trials
+        tmsg = raw_trial_average_message(trials, trait)
+        if tmsg:
+            advice = f"{advice}; WARNING: {tmsg}"
     out["advice"] = advice
     return out
 

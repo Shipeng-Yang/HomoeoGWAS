@@ -58,8 +58,14 @@ from .group_family import (
 from .input_qc import (
     duplicate_message,
     duplicated_genes,
+    file_sha256,
     phenotype_message,
+    raw_trial_average,
+    raw_trial_average_message,
+    sample_join,
+    sample_join_message,
     screen_phenotype,
+    waiver_problem,
 )
 from .interaction_config import normalize_interact_config
 
@@ -3446,8 +3452,13 @@ def validate_interact_config(cfg: dict) -> None:
         raise SystemExit("ERR: interact.subgenomes must be a non-empty list")
     if len(set(subs)) != len(subs):
         raise SystemExit(f"ERR: interact.subgenomes has duplicates: {subs}")
-    if not isinstance(ic.get("allow_duplicate_genes", False), bool):
-        raise SystemExit("ERR: interact.allow_duplicate_genes must be true or false")
+    if "allow_duplicate_genes" in ic:
+        raise SystemExit("ERR: interact.allow_duplicate_genes was removed in v2.1.3; "
+                         "rebuild the homoeolog table one-to-one")
+    if ic.get("duplicate_gene_waiver") is not None:
+        waiver_err = waiver_problem(ic["duplicate_gene_waiver"])
+        if waiver_err:
+            raise SystemExit(f"ERR: interact.duplicate_gene_waiver {waiver_err}")
     mode = str(ic.get("mode", "pairwise")).lower()
     expected_n = {"pairwise": 2, "triad": 3}
     statistic_requested = str(ic.get("statistic", "omniB")).lower()
@@ -3845,10 +3856,17 @@ def preflight_interact(cfg: dict, *, master_family=None) -> list[str]:
                 table_rows = _load_pairs(str(table), subs)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{table_key} table invalid: {exc}")
-    if table_rows is not None and not ic.get("allow_duplicate_genes", False):
+    if table_rows is not None:
         dup = duplicated_genes(table_rows, subs)
-        if dup:
+        waiver = ic.get("duplicate_gene_waiver")
+        if dup and waiver is None:
             problems.append(f"{table_key} table: {duplicate_message(dup)}")
+        elif dup and not table.exists():
+            problems.append(f"{table_key} table: {duplicate_message(dup)} "
+                            "(duplicate_gene_waiver needs the table file on disk to verify table_sha256)")
+        elif dup and waiver.get("table_sha256") != file_sha256(table):
+            problems.append(f"{table_key} table: {duplicate_message(dup)} "
+                            "(duplicate_gene_waiver table_sha256 does not match this table)")
     weights = ic.get("weights")
     if weights:
         weights_path = Path(weights)
@@ -3877,6 +3895,11 @@ def preflight_interact(cfg: dict, *, master_family=None) -> list[str]:
                 ids = set(ph[sample_col].dropna().astype(str))
                 first = next((s for s in subs if s in sample_orders), None)
                 overlap = len(ids.intersection(sample_orders[first])) if first else 0
+                if first:
+                    pre_join = sample_join(ids, sample_orders[first],
+                                           ids.intersection(sample_orders[first]))
+                    if pre_join["status"] == "refuse":
+                        problems.append(sample_join_message(pre_join))
                 if overlap < 10:
                     problems.append(
                         f"only {overlap} samples overlap genotype and phenotype; need >= 10")
@@ -3950,6 +3973,9 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0,
 
     # complete-case: rows non-NA across all frozen traits (one shared sample set)
     valid = [s for s in samples if s in ph.index and bool(ph.loc[s, tlist].notna().all())]
+    sample_join_record = sample_join(ph.index[ph[tlist].notna().all(axis=1)], samples, valid)
+    if not _report_sample_join(sample_join_record):
+        return 1
     if len(valid) < 10:
         print(f"ERROR: interact multi_trait: only {len(valid)} complete-case samples across "
               f"{len(tlist)} traits (need >=10)")
@@ -4025,10 +4051,13 @@ def _run_multitrait(args, ic, subs, out_dir, subdata, samples, ph, t0,
                   "selection occurs inside the scan; missing traits raise rather than silently drop."))
     payload = dict(tool="homoeogwas", command="interact", mode="pairwise", multi_trait=True,
                    subgenomes=subs, traits=tlist, provenance=provenance, results=results,
-                   input_qc={"phenotype_by_trait": phenotype_qc, "group_table": group_table_qc})
+                   input_qc={"phenotype_by_trait": phenotype_qc, "group_table": group_table_qc,
+                             "sample_join": sample_join_record})
     fp = out_dir / f"interact_multitrait_{trait_set.digest}.json"
     fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact (multi-trait) -> {fp} ({time.time()-t0:.1f}s)")
+    from .report_card import try_write_report_card
+    try_write_report_card(fp)
     return 0
 
 
@@ -4165,6 +4194,19 @@ class InteractPanelState:
         return tuple(key)
 
 
+def _report_sample_join(join: dict) -> bool:
+    """Print the sample-join record; False (caller returns 1) when the join is refused."""
+    msg = sample_join_message(join)
+    if join["status"] == "refuse":
+        print(f"ERROR: {msg}")
+        return False
+    print(f"  sample join: phenotyped {join['n_phenotyped']}, genotyped {join['n_genotyped']}, "
+          f"analysed {join['n_analysis']}, dropped {join['n_dropped']}", flush=True)
+    if msg:
+        print(f"  WARN: {msg}", flush=True)
+    return True
+
+
 def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
     import yaml
 
@@ -4210,17 +4252,18 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
         for problem in problems:
             print(f"  - {problem}")
         return 1
-    group_table_qc = {"allow_duplicate_genes": bool(ic.get("allow_duplicate_genes", False)),
-                      "duplicated_genes": {}}
-    if group_table_qc["allow_duplicate_genes"]:
+    group_table_qc = {"waiver": ic.get("duplicate_gene_waiver"), "duplicated_genes": {}}
+    if group_table_qc["waiver"] is not None:
         table_key = ("groups" if mode == "group"
                      else ("pairs" if mode == "pairwise" else "triads"))
         rows = (master_family.genes if master_family is not None
                 else _load_pairs(str(ic[table_key]), subs))
         group_table_qc["duplicated_genes"] = duplicated_genes(rows, subs)
         if group_table_qc["duplicated_genes"]:
-            print(f"  WARN: {duplicate_message(group_table_qc['duplicated_genes'])}",
-                  flush=True)
+            w = group_table_qc["waiver"]
+            print("  WARN: input check OVERRIDDEN by duplicate_gene_waiver "
+                  f"(approver: {w['approver']}; reason: {w['reason']}): "
+                  f"{duplicate_message(group_table_qc['duplicated_genes'])}", flush=True)
     grm_cache = None
     if (ic.get("grm") or {}).get("cache_dir") is not None:
         try:
@@ -4282,6 +4325,9 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
 
     trait = ic["trait"]
     valid = [s for s in samples if s in ph.index and pd.notna(ph.loc[s, trait])]
+    sample_join_record = sample_join(ph.index[ph[trait].notna()], samples, valid)
+    if not _report_sample_join(sample_join_record):
+        return 1
     if len(valid) < 10:
         print(f"ERROR: interact: only {len(valid)} samples overlap genotype and "
               "non-missing phenotype for {trait!r}; need >= 10")
@@ -4292,6 +4338,9 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
     qc_msg = phenotype_message(phenotype_qc, trait)
     if qc_msg:
         print(f"  WARN: {qc_msg}", flush=True)
+    trial_avg = raw_trial_average(ph_raw, sample_col, trait)
+    if trial_avg:
+        print(f"  WARN: {raw_trial_average_message(trial_avg, trait)}", flush=True)
 
     burden = ic.get("burden", {})
     cap = int(burden.get("cap", 150))
@@ -4793,10 +4842,14 @@ def cmd_interact(args, panel_state: InteractPanelState | None = None) -> int:
         })
     payload = dict(tool="homoeogwas", command="interact", mode=mode, subgenomes=subs, trait=trait,
                    provenance=provenance, results=results,
-                   input_qc={"phenotype": phenotype_qc, "group_table": group_table_qc})
+                   input_qc={"phenotype": phenotype_qc, "group_table": group_table_qc,
+                             "sample_join": sample_join_record,
+                             "raw_trial_average": trial_avg})
     fp = out_dir / f"interact_{trait}.json"
     fp.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False))
     print(f"homoeogwas interact -> {fp} ({time.time()-t0:.1f}s)")
+    from .report_card import try_write_report_card
+    try_write_report_card(fp)
     # best-effort: auto-generate the distinctive interaction figures into the run
     # dir (like `fit`). R is optional and this never fails the stats run; opt out
     # with outputs.plots: false.

@@ -844,9 +844,10 @@ def test_audit_fit_does_not_treat_point_pve_as_uncertainty(tmp_path):
     })
     record = audit_result(path)
     assert record.command == "fit"
-    assert record.status == "INTERNAL_RESULT_REVIEW_REQUIRED"
-    assert "PVE_UNCERTAINTY_NOT_ASSESSED" in {
-        flag.code for flag in record.flags}
+    # v2.1.3 item 8: a missing PVE interval is information, not a reason for review, so
+    # REVIEW_REQUIRED keeps its meaning (it used to be raised by every fit).
+    assert record.status == "INTERNAL_RESULT_COMPLETE"
+    assert {flag.code: flag.severity for flag in record.flags}["PVE_UNCERTAINTY_NOT_ASSESSED"] == "info"
 
 
 def test_run_audit_writes_json_tsv_and_markdown(tmp_path):

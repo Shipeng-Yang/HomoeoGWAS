@@ -121,12 +121,32 @@ def _input_qc_flags(flags: list[AuditFlag], payload: dict) -> None:
         elif pheno.get("status") == "warn":
             _add(flags, "PHENOTYPE_EXTREME_VALUES", "info",
                  f"{label}Phenotype values beyond {pheno.get('warn_sd')} SD of the mean: {listed}.")
-    dup = (qc.get("group_table") or {}).get("duplicated_genes") or {}
+    trials = qc.get("raw_trial_average")
+    if trials:
+        _add(flags, "PHENOTYPE_RAW_TRIAL_AVERAGE", "review",
+             f"The trait equals the raw average of {trials.get('columns')} (means differ by "
+             f"{float(trials.get('mean_range_sd') or float('nan')):.1f} pooled SD); if these are "
+             "trials or environments, their effects are in the phenotype. Prefer adjusted means.")
+    join = qc.get("sample_join") or {}
+    if join.get("status") == "warn":
+        _add(flags, "SAMPLE_JOIN_LOSS", "review",
+             f"{join.get('n_dropped')} of {join.get('n_phenotyped')} phenotyped samples were not "
+             f"analysed (no genotype), e.g. {join.get('examples_unmatched_phenotype')}; check the IDs.")
+    table_qc = qc.get("group_table") or {}
+    dup = table_qc.get("duplicated_genes") or {}
     if dup:
         shown = "; ".join(f"{s}: {', '.join(g[:5])}" for s, g in dup.items())
-        _add(flags, "DUPLICATED_GROUP_GENES", "review",
-             "The run was allowed with genes repeated across homoeolog groups "
-             f"({shown}); check the homoeolog table for paralogs.")
+        waiver = table_qc.get("waiver")
+        if isinstance(waiver, dict):
+            _add(flags, "OVERRIDDEN_INPUT_CHECK", "review",
+                 "Input check overridden: genes are repeated across homoeolog groups "
+                 f"({shown}); run approved by {waiver.get('approver')} with the reason "
+                 f"\"{waiver.get('reason')}\". Any report must state this override; groups "
+                 "containing these genes may reflect paralog signal.")
+        else:  # results written by v2.1.2 (allow_duplicate_genes)
+            _add(flags, "DUPLICATED_GROUP_GENES", "review",
+                 "The run was allowed with genes repeated across homoeolog groups "
+                 f"({shown}); check the homoeolog table for paralogs.")
 
 
 def _fit_record(path: Path, payload: dict) -> AuditRecord:
@@ -154,7 +174,7 @@ def _fit_record(path: Path, payload: dict) -> AuditRecord:
     if not pve:
         _add(flags, "PVE_MISSING", "error", "No REML PVE partition was recorded.")
     if not reml.get("pve_uncertainty") and not reml.get("pve_ci"):
-        _add(flags, "PVE_UNCERTAINTY_NOT_ASSESSED", "review",
+        _add(flags, "PVE_UNCERTAINTY_NOT_ASSESSED", "info",
              "Point PVE estimates are present without confidence intervals or bootstrap stability.")
     boundary = reml.get("boundary_components") or []
     if boundary:

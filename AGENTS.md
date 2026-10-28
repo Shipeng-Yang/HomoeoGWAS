@@ -178,8 +178,11 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
    they differ (e.g. an NCBI accession in the GFF vs `1A` in the `.bim`), rename
    one side first; stop and say so.
 3. **subgenome map** columns are `chrom, subgenome[, base_group]`.
-4. **DIAMOND 2.2.0 deadlocks** on `makedb`; use a 2.1.x binary via `--diamond`.
-   Protein FASTAs must have `.`/`*` stop/gap characters stripped.
+4. **Protein FASTAs for DIAMOND** must contain amino-acid letters only (strip
+   `.`/`*` stop/gap symbols) and headers equal to the gene ids; `prep-homoeologs`
+   refuses other input before calling DIAMOND, stops any DIAMOND command after
+   `--diamond-timeout` seconds and refuses an empty result. Do not work around a
+   refusal; fix the FASTA.
 5. **Never run a 4-way interaction.** A four-copy group omniB aggregates its
    six pair edges. Never run AB/AD/BD (or other directions) as independent
    alpha families and then multiply adjusted p-values after the run.
@@ -199,9 +202,20 @@ where `chrom` is the name as it appears in **both** the GFF and the `.bim`.
    ask whether they are data-entry, unit or trial errors before interpreting
    results.
 10. **Homoeolog tables are one-to-one.** A gene repeated across groups within
-    one subgenome (paralog contamination) stops `interact` at preflight. Rebuild
-    the table; `interact.allow_duplicate_genes: true` runs anyway and the audit
-    flags `DUPLICATED_GROUP_GENES`.
+    one subgenome (paralog contamination) stops `interact` at preflight and
+    nothing is run. Rebuild the table one-to-one or report it to the data owner;
+    do not work around the refusal.
+11. **Sample IDs must match exactly.** `fit` and `interact` print the sample
+    join (phenotyped, genotyped, analysed, dropped) and refuse IDs that match
+    only after normalisation (lost leading zeros, case, spaces, `.0`). Restore
+    the IDs from the source; never rename samples to make them match. More than
+    5% dropped is flagged `SAMPLE_JOIN_LOSS`; report it.
+12. **Raw trial averages.** A trait that equals the raw mean of trials on
+    different scales is flagged `PHENOTYPE_RAW_TRIAL_AVERAGE`; say so and
+    recommend adjusted means instead of averaging trials yourself.
+13. **Quote from the report card.** Each `fit`/`interact` result has a
+    `report_card_<result>.json`: take numbers from `numbers`, list every flag
+    with its severity, and include every `must_state` sentence in the report.
 
 ---
 

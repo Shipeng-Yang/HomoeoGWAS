@@ -212,7 +212,7 @@ def test_group_diamond_requires_consistent_all_pair_clique(tmp_path, monkeypatch
     def fake_which(_):
         return "/fake/diamond"
 
-    def fake_rbh(faa_a, faa_b, diamond, threads, tmp):
+    def fake_rbh(faa_a, faa_b, diamond, threads, tmp, timeout=None):  # v2.1.3: timeout arg
         a = Path(faa_a).stem
         b = Path(faa_b).stem
         mapping = {f"g{a}1": f"g{b}1", f"g{a}2": f"g{b}2"}
@@ -395,3 +395,160 @@ def test_cli_prep_snps_dispatch(tmp_path):
                "--bed", f"C={bed_by_sub['C']}", "--out-dir", str(out)])
     assert rc == 0
     assert (out / "snp_to_gene_B.npz").exists()
+
+
+# --- v2.1.3 item 3: DIAMOND input checks, timeout with process-group kill, zero-pair refusal, version ---
+
+_FAKE_DIAMOND = r'''#!/bin/bash
+# fake diamond for tests: makedb stores the input path; blastp maps query gX<n> -> subject gY<n>
+cmd=$1; shift
+[ "$cmd" = version ] && { echo "diamond version 2.2.0"; exit 0; }
+while [ $# -gt 0 ]; do case "$1" in --in) IN=$2; shift;; -d) DB=$2; shift;; -q) Q=$2; shift;; -o) O=$2; shift;; esac; shift; done
+if [ "$cmd" = makedb ]; then
+  [ -n "$FAKE_HANG" ] && { bash -c "exec -a fakehang_$FAKE_HANG sleep 600" & wait; }
+  echo "$IN" > "$DB"; exit 0
+fi
+if [ "$cmd" = blastp ]; then
+  : > "$O"; [ -n "$FAKE_EMPTY" ] && exit 0
+  S=$(cat "$DB")
+  for q in $(grep '^>' "$Q" | cut -c2- | cut -d' ' -f1); do
+    for s in $(grep '^>' "$S" | cut -c2- | cut -d' ' -f1); do
+      [ "${q:2}" = "${s:2}" ] && printf '%s\t%s\t100\n' "$q" "$s" >> "$O"
+    done
+  done
+fi
+'''
+
+
+def _fake_diamond(tmp_path):
+    p = tmp_path / "diamond"
+    p.write_text(_FAKE_DIAMOND)
+    p.chmod(0o755)
+    return str(p)
+
+
+def _faas(tmp_path, body=None, header=lambda s, i: f"g{s}{i}"):
+    seq = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQV"
+    out = {}
+    for s in SUBS:
+        p = tmp_path / f"prot_{s}.faa"
+        p.write_text("".join(f">{header(s, i)}\n{body or seq}\n" for i in (1, 2)))
+        out[s] = str(p)
+    return out
+
+
+def test_diamond_rbh_records_version_with_fake_binary(tmp_path):
+    uni = _genes_universe(tmp_path)
+    df = prep.homoeologs_diamond(_faas(tmp_path), SUBS, uni, diamond=_fake_diamond(tmp_path),
+                                 threads=1, mode="triad")
+    assert ("gA1", "gB1", "gC1") in {tuple(r) for r in df.itertuples(index=False, name=None)}
+    assert df.attrs["diamond_version"] == "diamond version 2.2.0"
+
+
+def test_protein_fasta_with_stop_characters_refused_before_diamond(tmp_path):
+    uni = _genes_universe(tmp_path)
+    with pytest.raises(SystemExit, match="characters DIAMOND does not accept"):
+        prep.homoeologs_diamond(_faas(tmp_path, body="MKTAY*IAKQ.RQ"), SUBS, uni,
+                                diamond=_fake_diamond(tmp_path), mode="triad")
+
+
+def test_protein_fasta_headers_must_match_gene_ids(tmp_path):
+    uni = _genes_universe(tmp_path)
+    faas = _faas(tmp_path, header=lambda s, i: f"TraesCS{s}{i}.1")
+    with pytest.raises(SystemExit, match="match the gene ids"):
+        prep.homoeologs_diamond(faas, SUBS, uni, diamond=_fake_diamond(tmp_path), mode="triad")
+
+
+def test_diamond_timeout_kills_process_group(tmp_path, monkeypatch):
+    import subprocess as sp
+    uni = _genes_universe(tmp_path)
+    token = f"t{tmp_path.name}"
+    monkeypatch.setenv("FAKE_HANG", token)
+    with pytest.raises(SystemExit, match="timed out after 2 s"):
+        prep.homoeologs_diamond(_faas(tmp_path), SUBS, uni, diamond=_fake_diamond(tmp_path),
+                                mode="triad", timeout=2)
+    left = sp.run(["pgrep", "-f", f"fakehang_{token}"], capture_output=True, text=True)
+    assert left.stdout.strip() == ""
+
+
+def test_zero_reciprocal_pairs_refused(tmp_path, monkeypatch):
+    uni = _genes_universe(tmp_path)
+    monkeypatch.setenv("FAKE_EMPTY", "1")
+    with pytest.raises(SystemExit, match="no reciprocal best hits"):
+        prep.homoeologs_diamond(_faas(tmp_path), SUBS, uni, diamond=_fake_diamond(tmp_path),
+                                mode="triad")
+
+
+# --- v2.1.3 item 6: refuse zero genes / zero SNPs in genes and list the chromosome sets ---
+
+def test_prep_snps_refuses_gff_chromosomes_absent_from_bim(tmp_path):
+    gff, sgmap, bed_by_sub = _fixture(tmp_path)
+    gff.write_text(gff.read_text().replace("chrA\t", "NC_0001.1\t").replace("chrB\t", "NC_0002.1\t")
+                   .replace("chrC\t", "NC_0003.1\t"))
+    sg = prep.load_subgenome_map(str(sgmap))
+    sg["chrom"] = ["NC_0001.1", "NC_0002.1", "NC_0003.1"]               # map follows the GFF names
+    out = tmp_path / "prep"
+    with pytest.raises(SystemExit, match="no SNP of the .bim lies on a gene chromosome") as e:
+        prep.build_snp_to_gene(str(gff), bed_by_sub, sg, out_dir=str(out))
+    assert "NC_0001.1" in str(e.value) and "chrA" in str(e.value)
+    assert not list(out.glob("snp_to_gene_*.npz"))
+
+
+def test_prep_snps_refuses_zero_genes_for_a_subgenome(tmp_path):
+    gff, sgmap, bed_by_sub = _fixture(tmp_path)
+    gff.write_text(gff.read_text().replace("chrC\t", "Chr3\t"))       # GFF name not in the map
+    sg = prep.load_subgenome_map(str(sgmap))
+    out = tmp_path / "prep"
+    with pytest.raises(SystemExit, match="0 genes for subgenome C") as e:
+        prep.build_snp_to_gene(str(gff), bed_by_sub, sg, out_dir=str(out))
+    assert "Chr3" in str(e.value)
+    assert not list(out.glob("snp_to_gene_*.npz"))
+
+
+# --- v2.1.3 review fixes (#3, #8, #9) ---
+
+def test_terminal_stop_codon_is_accepted_but_internal_stop_refused(tmp_path):
+    uni = _genes_universe(tmp_path)
+    seq = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQV"
+    df = prep.homoeologs_diamond(_faas(tmp_path, body=seq + "*"), SUBS, uni,
+                                 diamond=_fake_diamond(tmp_path), mode="triad")
+    assert len(df) == 2
+    with pytest.raises(SystemExit, match="characters DIAMOND does not accept"):
+        prep.homoeologs_diamond(_faas(tmp_path, body="MKTAY*IAKQ*"), SUBS, uni,
+                                diamond=_fake_diamond(tmp_path), mode="triad")
+
+
+def test_run_bounded_kills_group_when_parent_is_interrupted(tmp_path, monkeypatch):
+    import subprocess as sp
+    token = f"int{tmp_path.name}"
+    script = tmp_path / "hang.sh"
+    script.write_text(f'#!/bin/bash\nbash -c "exec -a hold_{token} sleep 600" & wait\n')
+    script.chmod(0o755)
+    real_wait = sp.Popen.wait
+    calls = []
+
+    def interrupted(self, timeout=None):     # Ctrl-C arrives during the first (bounded) wait only
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real_wait(self, timeout=timeout)
+    monkeypatch.setattr(sp.Popen, "wait", interrupted, raising=True)
+    with pytest.raises(KeyboardInterrupt):
+        prep._run_bounded([str(script)], 30, "makedb")
+    monkeypatch.setattr(sp.Popen, "wait", real_wait, raising=True)
+    import time
+    time.sleep(0.5)
+    ps = sp.run(["ps", "-eo", "pid,stat,args"], capture_output=True, text=True).stdout
+    left = [line for line in ps.splitlines() if f"hold_{token}" in line and "Z" not in line.split()[1]]
+    assert left == []
+
+
+def test_prep_snps_refuses_zero_snps_inside_genes(tmp_path):
+    gff, sgmap, bed_by_sub = _fixture(tmp_path)
+    # same chromosome names, but genes moved far away from every SNP
+    gff.write_text(gff.read_text().replace("\t100\t200\t", "\t100000\t100100\t").replace("\t300\t400\t", "\t200000\t200100\t"))
+    sg = prep.load_subgenome_map(str(sgmap))
+    out = tmp_path / "prep"
+    with pytest.raises(SystemExit, match="0 SNPs inside genes"):
+        prep.build_snp_to_gene(str(gff), bed_by_sub, sg, out_dir=str(out))
+    assert not list(out.glob("snp_to_gene_*.npz")) and not list(out.glob("genes_*.tsv"))
