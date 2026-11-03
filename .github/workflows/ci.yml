@@ -43,6 +43,13 @@ jobs:
         run: pytest -m "not gpu and not slow" --maxfail=3
         env:
           PYTHONHASHSEED: "0"
+          # Single-threaded BLAS, as the installed console command sets before NumPy/SciPy import:
+          # the parallel-runtime guard refuses oversubscribed pools, and serial/parallel byte-identity
+          # tests need deterministic BLAS reductions.
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          NUMEXPR_NUM_THREADS: "1"
 
   build:
     name: Build sdist + wheel
