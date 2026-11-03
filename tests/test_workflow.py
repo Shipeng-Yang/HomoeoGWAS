@@ -437,3 +437,27 @@ def test_audit_and_summarize_results(tmp_path, monkeypatch):
         "outputs": {"sumstats": []}}))
     s = workflow.summarize_results(out_dir=str(out), trait="t")
     assert s["ok"] and s["kind"] == "fit" and s["pve"]["A"] == 0.3
+
+
+def test_generated_smooth_pc4_config_passes_formal_launch_gate(tmp_path):
+    """The breeder/MCP route must launch without a git-bound formal manifest."""
+    import yaml
+
+    from homoeogwas.formal_provenance import verify_formal_launch
+    cfg = workflow.build_interact_config(
+        subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+        snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+        sample_col="sample", trait="t", out_dir=str(tmp_path / "o"), groups="g.tsv")
+    assert cfg["provenance"] == {"mode": "unattested"}
+    path = tmp_path / "interact.generated.group.omnib.yaml"
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert verify_formal_launch(path, cfg) is None
+
+
+def test_homoscedastic_generated_config_has_no_provenance_block(tmp_path):
+    cfg = workflow.build_interact_config(
+        subgenomes=["A", "D"], bed_prefixes={"A": "a", "D": "d"},
+        snp_to_gene={"A": "a.npz", "D": "d.npz"}, phenotype="p.tsv",
+        sample_col="sample", trait="t", out_dir="o", groups="g.tsv",
+        null_variance="homoscedastic")
+    assert "provenance" not in cfg

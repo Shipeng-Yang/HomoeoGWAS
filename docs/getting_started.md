@@ -4,15 +4,13 @@
 
 ```bash
 # CPU
-python -m pip install \
-  "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
+python -m pip install "homoeogwas==2.1.3"
 # + GPU extras for the per-SNP scan
-python -m pip install \
-  "homoeogwas[gpu] @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.0.tar.gz"
+python -m pip install "homoeogwas[gpu]==2.1.3"
 ```
 
-PyPI still serves the older v1.0.1 package; install from the tagged release
-above until v2.1.0 is published there.
+The same release can be installed from GitHub:
+`python -m pip install "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.3.tar.gz"`.
 
 From a checkout (for development):
 

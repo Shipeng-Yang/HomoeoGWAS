@@ -653,8 +653,8 @@ def scan_bed_stream_parallel(
     worker that dies (e.g. out of memory) raises ``BrokenProcessPool``.
     """
     import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor
     import time as _time
+    from concurrent.futures import ProcessPoolExecutor
 
     from bed_reader import open_bed
 

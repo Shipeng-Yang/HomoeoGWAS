@@ -33,6 +33,7 @@ BLAS_THREAD_VARIABLES = (
     "NUMEXPR_NUM_THREADS",
 )
 FORMAL_BLAS_THREAD_POLICY = {name: "1" for name in BLAS_THREAD_VARIABLES}
+UNATTESTED_MODE = "unattested"
 
 
 class FormalLaunchError(ValueError):
@@ -198,12 +199,19 @@ def verify_formal_launch(
     if not isinstance(raw_config, dict):
         return None
     provenance = raw_config.get("provenance")
+    if isinstance(provenance, dict) and "mode" in provenance:
+        if provenance != {"mode": UNATTESTED_MODE}:
+            raise FormalLaunchError(
+                f"provenance.mode must be exactly {UNATTESTED_MODE!r} with no other "
+                "provenance fields; a formal launch declares pre_run_manifest instead")
+        return None
     if not isinstance(provenance, dict) or not provenance.get("pre_run_manifest"):
         if _formal_checkpoint_requested(raw_config):
             raise FormalLaunchError(
                 "checkpointed group omniB requires "
                 "provenance.pre_run_manifest; regenerate the formal config "
-                "instead of removing its provenance binding")
+                "instead of removing its provenance binding, or declare "
+                f"provenance: {{mode: {UNATTESTED_MODE}}} for a non-formal run")
         return None
 
     config_path = Path(config_path).resolve(strict=True)

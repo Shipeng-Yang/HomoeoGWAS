@@ -22,7 +22,9 @@ validates against. See ``docs/interact_inputs.md`` for the full format spec.
 """
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from bisect import bisect_left
@@ -129,6 +131,53 @@ def _read_bim(bed_prefix: str) -> tuple[np.ndarray, np.ndarray]:
 # ----------------------------------------------------------------------
 
 
+def _gff_seqids(gff: str, limit: int = 2_000_000) -> list[str]:
+    import gzip
+    seen: dict[str, None] = {}
+    opener = gzip.open if str(gff).endswith(".gz") else open
+    with opener(gff, "rt") as fh:
+        for n, line in enumerate(fh):
+            if n >= limit:
+                break
+            if line.startswith("#") or not line.strip():
+                continue
+            seen.setdefault(line.split("\t", 1)[0], None)
+    return list(seen)
+
+
+def _show(names, k: int = 8) -> str:
+    names = sorted(names)
+    return ", ".join(names[:k]) + (f" (+{len(names) - k} more)" if len(names) > k else "")
+
+
+def _check_chromosome_names(gff: str, bed_by_sub: dict[str, str], sgmap: pd.DataFrame,
+                            by_sub: dict[str, list[dict]]) -> None:
+    """Refuse before writing anything when the GFF, the subgenome map and the .bim do not
+    share chromosome names: a subgenome with 0 genes, or genes on no .bim chromosome
+    (which would silently produce empty maps)."""
+    subs = list(bed_by_sub)
+    map_chroms = {s: set(sgmap.loc[sgmap["subgenome"] == s, "chrom"].astype(str)) for s in subs}
+    gff_chroms = None
+    for s in subs:
+        if by_sub.get(s):
+            continue
+        gff_chroms = gff_chroms if gff_chroms is not None else _gff_seqids(gff)
+        raise SystemExit(
+            f"ERR: prep-snps found 0 genes for subgenome {s}: the subgenome map names "
+            f"{_show(map_chroms[s])} but the GFF chromosomes are {_show(gff_chroms)}. Make the "
+            "names identical (rename one side). Nothing was written.")
+    for s in subs:
+        bim_chrom, _ = _read_bim(bed_by_sub[s])
+        bim_set = {str(c) for c in set(bim_chrom.tolist())}
+        gene_chroms = {str(g["chrom"]) for g in by_sub[s]}
+        if not gene_chroms & bim_set:
+            raise SystemExit(
+                f"ERR: prep-snps subgenome {s}: no SNP of the .bim lies on a gene chromosome; "
+                f"GFF/subgenome-map chromosomes {_show(gene_chroms)} vs .bim chromosomes "
+                f"{_show(bim_set)}. Make the names identical (rename one side). Nothing was "
+                "written.")
+
+
 def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
                       sgmap: pd.DataFrame, *, feature: str = "gene",
                       id_attr: str = "ID", flank_bp: int = 0,
@@ -159,7 +208,9 @@ def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
     for g in genes_all:
         by_sub[chrom_to_sub[g["chrom"]]].append(g)
 
+    _check_chromosome_names(gff, bed_by_sub, sgmap, by_sub)
     summary: dict = {"subgenomes": {}}
+    pending = []          # writes deferred until every subgenome has SNPs inside genes
     for sub, prefix in bed_by_sub.items():
         bim_chrom, bim_pos = _read_bim(prefix)
         # per-chrom sorted gene intervals for this subgenome
@@ -213,8 +264,7 @@ def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
         # Bind the row-index mapping to the exact BIM that defined it. Without
         # this fingerprint, reusing an NPZ with a reordered BED silently maps
         # genes to the wrong variants while all array shapes still look valid.
-        np.savez(
-            npz_path,
+        npz_arrays = dict(
             gene_ids=gene_ids,
             snp_idx=snp_idx,
             bim_sha256=np.asarray(plink_bim_sha256(prefix)),
@@ -230,16 +280,25 @@ def build_snp_to_gene(gff: str, bed_by_sub: dict[str, str],
                      "callable": int(len(gene_snp.get(gid, ())) >= min_snp)}
                     for gid in all_gids]
         genes_tsv = out / f"genes_{sub}.tsv"
-        pd.DataFrame(rows_tsv, columns=["gene_id", "subgenome", "chrom",
-                                        "start", "end", "strand",
-                                        "n_snp", "callable"]).to_csv(
-            genes_tsv, sep="\t", index=False)
+        pending.append((sub, n_assigned, npz_path, npz_arrays, genes_tsv, rows_tsv))
         summary["subgenomes"][sub] = {
             "n_snp_bim": int(bim_chrom.size), "n_snp_in_genes": int(n_assigned),
             "n_genes_total": int(len(by_sub.get(sub, []))),
             "n_genes_with_snp": int(len(kept)),
             "min_snp": int(min_snp),
             "npz": str(npz_path), "genes_tsv": str(genes_tsv)}
+    empty = [sub for sub, n_in, *_ in pending if n_in == 0]
+    if empty:
+        raise SystemExit(
+            f"ERR: prep-snps subgenome(s) {empty}: 0 SNPs inside genes although chromosome names "
+            "match; check gene coordinates vs .bim positions (assembly version, 0/1-based, units). "
+            "Nothing was written.")
+    for _sub, _n, npz_path, npz_arrays, genes_tsv, rows_tsv in pending:
+        np.savez(npz_path, **npz_arrays)
+        pd.DataFrame(rows_tsv, columns=["gene_id", "subgenome", "chrom",
+                                        "start", "end", "strand",
+                                        "n_snp", "callable"]).to_csv(
+            genes_tsv, sep="\t", index=False)
     return summary
 
 
@@ -417,18 +476,87 @@ def _assemble_rows(groups: dict, subs: list[str], uni: dict[str, dict], *,
     return out
 
 
+DIAMOND_TIMEOUT = 7200          # seconds per DIAMOND command
+MIN_FASTA_ID_MATCH = 0.90
+_AMINO = "ACDEFGHIKLMNPQRSTVWYBXZJUOacdefghiklmnpqrstvwybxzjuo"
+
+
+def check_protein_fasta(faa: str, gene_ids, label: str) -> None:
+    """Refuse a protein FASTA DIAMOND cannot use: characters outside the amino-acid
+    alphabet (e.g. '.'/'*' stop or gap symbols, which make some DIAMOND builds hang),
+    or headers that do not match the gene ids of genes_<S>.tsv (an empty result)."""
+    ids, seqs = [], []
+    with open(faa) as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith(">"):
+                ids.append(line[1:].split()[0] if line[1:].split() else "")
+                seqs.append([])
+            elif line and seqs:
+                seqs[-1].append(line)
+    ok = set(_AMINO)
+    bad, bad_chars = [], set()
+    for rid, parts in zip(ids, seqs, strict=False):
+        seq = "".join(parts)
+        seq = seq[:-1] if seq.endswith("*") else seq          # one terminal stop is accepted
+        extra = set(seq) - ok
+        if extra:
+            bad.append(rid)
+            bad_chars |= extra
+    if bad:
+        raise SystemExit(
+            f"ERR: {label} {faa}: {len(bad)} sequences contain characters DIAMOND does not "
+            f"accept ({''.join(sorted(bad_chars))!r}, e.g. in {bad[:3]}); remove stop/gap "
+            "symbols (e.g. sed '/^>/!s/[.*]//g') and rerun. Nothing was run.")
+    genes = set(gene_ids)
+    frac = (sum(i in genes for i in ids) / len(ids)) if ids else 0.0
+    if frac < MIN_FASTA_ID_MATCH:
+        raise SystemExit(
+            f"ERR: {label} {faa}: only {frac:.0%} of {len(ids)} FASTA headers match the gene "
+            f"ids of genes_{label}.tsv (e.g. {ids[:3]}); rename headers to gene ids (longest "
+            "protein per gene). Nothing was run.")
+
+
+def _run_bounded(cmd: list[str], timeout: float, what: str) -> None:
+    """Run a DIAMOND command in its own process group; kill the whole group on timeout."""
+    proc = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"ERR: diamond {what} timed out after {timeout:g} s and was killed "
+                         "(with its child processes); check the protein FASTA "
+                         "(stop/gap symbols) and the DIAMOND binary") from None
+    finally:                     # timeout, Ctrl-C or SIGTERM of the parent: never leave DIAMOND running
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+    if rc != 0:
+        raise SystemExit(f"ERR: diamond {what} failed (exit {rc})")
+
+
+def diamond_version(diamond: str) -> str:
+    try:
+        out = subprocess.run([diamond, "version"], capture_output=True, text=True, timeout=60)
+        return (out.stdout or out.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"unknown ({exc})"
+
+
 def _diamond_rbh(faa_a: str, faa_b: str, diamond: str, threads: int,
-                 tmp: Path) -> dict[str, str]:
+                 tmp: Path, timeout: float = DIAMOND_TIMEOUT) -> dict[str, str]:
     """Reciprocal best hits A↔B by bitscore → {gene_a: gene_b} (mutual only)."""
     def _run(db_faa, q_faa, tag):
         db = tmp / f"{tag}.dmnd"
-        subprocess.run([diamond, "makedb", "--in", db_faa, "-d", str(db),
-                        "--quiet"], check=True)
+        _run_bounded([diamond, "makedb", "--in", db_faa, "-d", str(db),
+                      "--quiet"], timeout, "makedb")
         out = tmp / f"{tag}.m8"
-        subprocess.run([diamond, "blastp", "-q", q_faa, "-d", str(db),
-                        "-o", str(out), "-p", str(threads), "--quiet",
-                        "-k", "1", "--outfmt", "6", "qseqid", "sseqid",
-                        "bitscore"], check=True)
+        _run_bounded([diamond, "blastp", "-q", q_faa, "-d", str(db),
+                      "-o", str(out), "-p", str(threads), "--quiet",
+                      "-k", "1", "--outfmt", "6", "qseqid", "sseqid",
+                      "bitscore"], timeout, "blastp")
         best: dict[str, tuple[str, float]] = {}
         with open(out) as fh:
             for line in fh:
@@ -446,9 +574,14 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
                        uni: dict[str, dict], *, diamond: str | None = None,
                        threads: int = 8, mode: str = "triad",
                        min_snp_pair: int = 1, callable_map: dict | None = None,
-                       gene_base_group: dict[str, str] | None = None
+                       gene_base_group: dict[str, str] | None = None,
+                       timeout: float = DIAMOND_TIMEOUT
                        ) -> pd.DataFrame:
     """Build pair/triad/group rows from DIAMOND reciprocal best hits.
+
+    Inputs are checked first (``check_protein_fasta``); each DIAMOND command runs
+    in its own process group and is killed after ``timeout`` seconds; zero
+    reciprocal pairs is refused; the DIAMOND version is recorded in ``out.attrs``.
 
     Pairwise = the RBH set of the two subgenomes. Triad = genes linked by RBH
     across all three subgenome pairs consistently (A↔B, B↔C, A↔C agree). When
@@ -465,6 +598,10 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
     diamond = diamond or shutil.which("diamond")
     if not diamond or not shutil.which(diamond):
         raise SystemExit("ERR: diamond not found; install it or use --from-table")
+    for s in subs:
+        check_protein_fasta(proteins[s], uni[s].keys(), s)
+    version = diamond_version(diamond)
+    print(f"  DIAMOND: {diamond} ({version}); timeout {timeout:g} s per command", flush=True)
     g2s = _gene_to_sub(uni)
     bg = gene_base_group or {}
     _NA = {None, "", "nan", "NaN", "NA", "na"}
@@ -485,6 +622,11 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
         """``true_rows`` = list of dicts {gene_<S>} that are valid homoeolog
         groups (RBH-consistent, same base group, all genes exist). Apply the
         callability gate (drop, never substitute) and record an audit."""
+        if not true_rows:
+            raise SystemExit(
+                "ERR: DIAMOND found no reciprocal best hits that map to the gene ids of "
+                "genes_<S>.tsv; check that FASTA headers are gene ids and the proteomes are "
+                "complete. Nothing was written.")
         rows, audit, n_uncall = [], [], 0
         for r in true_rows:
             uncall = [s for s in sub_order if not _callable(s, r[f"gene_{s}"])]
@@ -506,13 +648,15 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
         out.attrs["n_incomplete_group"] = 0
         out.attrs["n_ambiguous_groups"] = 0
         out.attrs["audit"] = pd.DataFrame(audit)
+        out.attrs["diamond_version"] = version
+        out.attrs["diamond_path"] = diamond
         return out
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         if mode == "pairwise":
             sx, sy = subs
-            rbh = _diamond_rbh(proteins[sx], proteins[sy], diamond, threads, tmp)
+            rbh = _diamond_rbh(proteins[sx], proteins[sy], diamond, threads, tmp, timeout)
             true_rows = [{f"gene_{sx}": a, f"gene_{sy}": b}
                          for a, b in rbh.items()
                          if a in uni[sx] and b in uni[sy] and g2s.get(a) == sx
@@ -523,7 +667,7 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
             for left_index, left in enumerate(subs):
                 for right in subs[left_index + 1:]:
                     pair_maps[(left, right)] = _diamond_rbh(
-                        proteins[left], proteins[right], diamond, threads, tmp)
+                        proteins[left], proteins[right], diamond, threads, tmp, timeout)
             anchor = subs[0]
             true_rows = []
             first_map = pair_maps[(anchor, subs[1])]
@@ -555,9 +699,9 @@ def homoeologs_diamond(proteins: dict[str, str], subs: list[str],
         if mode != "triad":
             raise SystemExit(f"ERR: unknown homoeolog mode {mode!r}")
         a, b, c = subs
-        ab = _diamond_rbh(proteins[a], proteins[b], diamond, threads, tmp)
-        bc = _diamond_rbh(proteins[b], proteins[c], diamond, threads, tmp)
-        ac = _diamond_rbh(proteins[a], proteins[c], diamond, threads, tmp)
+        ab = _diamond_rbh(proteins[a], proteins[b], diamond, threads, tmp, timeout)
+        bc = _diamond_rbh(proteins[b], proteins[c], diamond, threads, tmp, timeout)
+        ac = _diamond_rbh(proteins[a], proteins[c], diamond, threads, tmp, timeout)
         true_rows = []
         for ga, gb in ab.items():
             gc = bc.get(gb)
@@ -621,6 +765,9 @@ def add_prep_subparsers(sub) -> None:
                     "(the whole proteome, NOT a SNP-callable subset — homology "
                     "must be genotype-independent); repeat")
     ph.add_argument("--diamond", default=None, help="path to diamond binary")
+    ph.add_argument("--diamond-timeout", type=float, default=DIAMOND_TIMEOUT,
+                    help="seconds per DIAMOND command before it and its children are "
+                         f"killed (default {DIAMOND_TIMEOUT})")
     ph.add_argument("--threads", type=int, default=8)
     ph.add_argument("--restrict-base-group", action="store_true",
                     help="only pair genes sharing a base chromosome group "
@@ -700,8 +847,10 @@ def cmd_prep_homoeologs(args) -> int:
                                 threads=args.threads, mode=args.mode,
                                 min_snp_pair=min_snp_pair,
                                 callable_map=callable_map,
-                                gene_base_group=gene_bg)
-        src = "diamond-rbh" + ("+base_group" if gene_bg else "")
+                                gene_base_group=gene_bg,
+                                timeout=args.diamond_timeout)
+        src = ("diamond-rbh" + ("+base_group" if gene_bg else "")
+               + f" [{df.attrs.get('diamond_version', 'unknown')}]")
     else:
         raise SystemExit("ERR: provide --from-table or --method diamond-rbh")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

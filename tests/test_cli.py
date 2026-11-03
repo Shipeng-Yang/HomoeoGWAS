@@ -257,6 +257,8 @@ def _assert_fit_outputs(out: Path, prefix: str):
     assert (out / f"manhattan_{prefix}.png").exists()
     assert (out / "resolved_config.yaml").exists()
     assert np.isfinite(summary["lambda_gc"]["all"])
+    card = json.loads((out / f"report_card_summary_{prefix}.json").read_text())   # v2.1.3 item 9
+    assert card["command"] == "fit" and card["numbers"]["n"] == summary.get("n", summary.get("n_samples"))
     return summary
 
 
@@ -447,3 +449,74 @@ def test_fit_loco_flag_budget_unchanged(tmp_path):
                       if a.option_strings and a.dest != "help"]
     # config, out-dir, backend, dry-run, force = 5 flags
     assert len(optional_flags) == 5
+
+
+def _padded_panel(tmp_path, n_ok=30, n_pad=10):
+    rng = np.random.default_rng(7)
+    samples = [f"{i:04d}" for i in range(1000, 1000 + n_ok)] + [f"{i:04d}" for i in range(n_pad)]
+    prefix = tmp_path / "panel"
+    _write_bed(prefix, rng.integers(0, 3, size=(len(samples), 20)).astype(np.float32),
+               samples, ["1A"] * 20, np.arange(1, 21))
+    phenotype = tmp_path / "phenotype.csv"
+    ids = list(range(1000, 1000 + n_ok)) + list(range(n_pad))          # integers: leading zeros lost
+    pd.DataFrame({"sample": ids, "trait": rng.normal(size=len(ids))}).to_csv(phenotype, index=False)
+    return {"panel": {"subgenomes": ["A"]},
+            "phenotype": {"path": str(phenotype), "sample_col": "sample", "trait": "trait"},
+            "genotype": {"scan_bed_prefix_template": str(prefix),
+                         "grm": {"source": "bed", "bed_prefix_template": str(prefix)}}}
+
+
+def test_join_refuses_ids_that_match_only_after_normalisation(tmp_path):
+    cfg = _padded_panel(tmp_path)
+    with pytest.raises(SystemExit, match="match only after normalisation"):
+        cli.join_samples(cfg)
+
+
+def test_join_records_sample_join(tmp_path):
+    cfg = _padded_panel(tmp_path, n_pad=0)
+    joined, y, _, join = cli.join_samples(cfg, return_join=True)
+    assert join["status"] == "ok" and join["n_analysis"] == len(joined) == 30
+
+
+@pytest.mark.parametrize("ext", [".fam", ".bim"])
+def test_fit_preflight_reports_missing_fam_or_bim(tmp_path, capsys, ext):
+    geno_dir, pheno = _make_panel(tmp_path, ["A", "C"])
+    cfg_path = _write_config(tmp_path, geno_dir, pheno, ["A", "C"])
+    (geno_dir / "C" / f"all{ext}").unlink()
+    rc = cli.main(["fit", "--config", str(cfg_path), "--dry-run"])
+    assert rc == 1 and f"all{ext}" in capsys.readouterr().out
+    import subprocess
+    proc = subprocess.run([sys.executable, "-m", "homoeogwas", "fit", "--config", str(cfg_path)],
+                          capture_output=True, text=True)
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and f"all{ext}" in text and "Traceback" not in text
+
+
+# --- v2.1.3 item 7: `homoeogwas validate` runs the phenotype checks of fit ---
+
+def test_validate_reports_missing_trait_column(tmp_path, capsys):
+    geno_dir, pheno = _make_panel(tmp_path, ["A", "C"])
+    cfg_path = _write_config(tmp_path, geno_dir, pheno, ["A", "C"], trait="height")
+    rc = cli.main(["validate", "--config", str(cfg_path)])
+    out = capsys.readouterr().out
+    assert rc == 1 and "height" in out
+
+
+def test_validate_reports_phenotype_outliers_and_sample_join(tmp_path, capsys):
+    geno_dir, pheno = _make_panel(tmp_path, ["A", "C"])
+    df = pd.read_csv(pheno, sep="\t")
+    df.loc[0, "trait"] = df["trait"].mean() + 40 * df["trait"].std()
+    df.to_csv(pheno, sep="\t", index=False)
+    cfg_path = _write_config(tmp_path, geno_dir, pheno, ["A", "C"])
+    rc = cli.main(["validate", "--config", str(cfg_path)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "SD of the mean" in out and "S000" in out
+    assert "sample join: phenotyped 60, genotyped 60, analysed 60" in out
+
+
+def test_validate_refuses_normalisable_ids(tmp_path, capsys):
+    cfg = _padded_panel(tmp_path)
+    cfg_path = tmp_path / "padded.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    rc = cli.main(["validate", "--config", str(cfg_path)])
+    assert rc == 1 and "match only after normalisation" in capsys.readouterr().out

@@ -2,6 +2,107 @@
 
 ## Unreleased
 
+## v2.1.3 — deterministic input guards for common analysis traps (2026-11-03)
+
+### Changed
+
+- Duplicated homoeolog genes: the preflight refusal no longer names any way to
+  override it ("Rebuild the table one-to-one ... nothing was run").
+  `interact.allow_duplicate_genes` is removed (an error if present). Only the
+  data owner can waive the check (docs/data_owner_waivers.md; written reason,
+  named approver, bound to the table hash; not exposed via MCP); a waived run is
+  recorded in the result JSON and flagged `OVERRIDDEN_INPUT_CHECK` (review).
+- Sample join: `fit` and `interact` print and record `input_qc.sample_join`
+  {n_phenotyped, n_genotyped, n_analysis, n_dropped, examples}. They refuse to
+  run when unmatched phenotype IDs match genotype IDs after normalisation
+  (leading zeros, case, whitespace, trailing `.0`), and warn (`audit`
+  `SAMPLE_JOIN_LOSS`, review) when more than 5% of phenotyped samples are not
+  analysed. `validate_inputs` no longer says integer-like IDs are fine; it
+  states that the check cannot see the genotypes.
+- `prep-homoeologs --method diamond-rbh`: refuses protein FASTAs with
+  characters outside the amino-acid alphabet (e.g. `.`/`*`) or with < 90% of
+  headers matching `genes_<S>.tsv`, before calling DIAMOND; each DIAMOND
+  command runs in its own process group and is killed after
+  `--diamond-timeout` s (default 7200); zero reciprocal pairs is an error, not
+  an empty table with exit 0; the DIAMOND version is printed and kept in the
+  table attributes. Documentation no longer claims DIAMOND 2.2.0 deadlocks (the
+  cause was the stop/gap characters).
+- `fit` preflight checks `.bed`, `.bim` and `.fam` for every subgenome (scan and
+  GRM inputs) and stops with the missing files listed instead of failing later
+  with a traceback.
+- `prep-snps` refuses, before writing any file, a subgenome with 0 genes or
+  with genes on no `.bim` chromosome, and lists the GFF / subgenome-map / `.bim`
+  chromosome names (it used to exit 0 with empty maps).
+- `homoeogwas validate` on a fit config runs fit's phenotype checks without
+  computing: sample/trait columns, the sample join (including the
+  normalisation refusal) and the phenotype screen; on an interaction config it
+  adds the phenotype screen to the preflight.
+- `audit`: `PVE_UNCERTAINTY_NOT_ASSESSED` is now `info`, so a fit without
+  other problems is `INTERNAL_RESULT_COMPLETE` and `REVIEW_REQUIRED` again
+  means something needs a look.
+- Phenotype screen: when the trait equals the row mean of >= 2 other numeric
+  columns (trials) whose means differ by more than 3 pooled SD, `fit`,
+  `interact`, `validate` and `validate_inputs` warn that a raw average carries
+  trial effects into the phenotype; recorded as `input_qc.raw_trial_average`
+  and flagged `PHENOTYPE_RAW_TRIAL_AVERAGE` (review). Nothing is changed.
+
+### Added
+
+- `report_card_<result>.json` next to every `fit` summary and `interact`
+  result: the numbers to quote (n, PVE and intervals, lambda_GC, family-wise
+  threshold, empirical P, rejected groups, null-variance model), the audit flags
+  with severity, and the statements a report must carry (`must_state`). It is
+  built from the result and `audit`; no statistic is recomputed.
+
+No statistical code changed in v2.1.3: estimates, p-values and decisions are
+identical to v2.1.2; the changes are refusals, warnings, audit flags, recorded
+fields and messages.
+
+## v2.1.2 — input screens for extreme phenotype values and duplicated homoeolog genes (2026-10-13)
+
+### Added
+
+- Phenotype screen on the analysed samples (SD from the mean). Values beyond
+  5 SD are listed by `workflow.check_phenotype_inputs` / MCP `validate_inputs`,
+  printed as WARN by `fit` and `interact`, recorded in `input_qc.phenotype` of
+  the result JSON and flagged `PHENOTYPE_EXTREME_VALUES` (info) by `audit`;
+  beyond 10 SD `audit` adds `PHENOTYPE_OUTLIER` (review). No value is removed.
+- `interact` preflight refuses a group/pair/triad table in which a gene occurs
+  in more than one row of a subgenome column (paralog contamination). The new
+  `interact.allow_duplicate_genes: true` (removed in v2.1.3) ran such a table; the genes are
+  recorded in `input_qc.group_table` and `audit` flags
+  `DUPLICATED_GROUP_GENES` (review).
+
+### Documented
+
+- The homoscedastic bootstrap null draws a different random stream with and
+  without checkpointing (same seed, slightly different Monte Carlo p-values).
+
+No statistical code changed: estimates, p-values and decisions are identical to
+v2.1.1; result JSONs gain the `input_qc` block.
+
+## v2.1.1 — smooth_pc4 interaction runs from generated configs (2026-10-13)
+
+### Fixed
+
+- Canonical group omniB with `null_variance: smooth_pc4` requires bootstrap
+  checkpointing, and every checkpointed omniB run was treated as a formal
+  launch that needs a git-bound `provenance.pre_run_manifest`. Configs from
+  `workflow.build_interact_config` / MCP `run_interaction` and the AGENTS.md
+  template therefore stopped with "checkpointed group omniB requires
+  provenance.pre_run_manifest", including on installations without a git
+  checkout. Checkpointed runs may now declare `provenance: {mode: unattested}`
+  (exactly this mapping; mixing it with formal fields fails); the generator and
+  the template write it. Such runs keep the non-formal (`legacy`) evidence
+  role. A config without any provenance block still fails closed, so deleting
+  the binding of a formal config does not downgrade it; replacing the binding
+  with the unattested declaration runs the analysis as non-formal. No
+  statistical code changed.
+- `homoeogwas split` indexed the per-subgenome subset VCF with a tabix `.tbi`
+  index, which cannot store positions above 2^29 (536,870,912 bp); splitting a
+  wheat VCF therefore failed for every subgenome. Subset and exported VCFs now
+  get CSI indexes (`bcftools index -c`).
+
 ## v2.1.0 — heteroscedasticity-robust bootstrap null, parallel scans and agent tools (2026-10-05)
 
 ### Added

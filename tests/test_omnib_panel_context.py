@@ -94,7 +94,7 @@ def test_shared_context_is_byte_identical_across_order(tmp_path):
     reference = [
         identity(run(subdata, family, y, sample_idx, tmp_path / f"ref{i}", seed=seed),
                  tmp_path / f"ref{i}", seed)
-        for i, (y, seed) in enumerate(zip(responses, seeds))
+        for i, (y, seed) in enumerate(zip(responses, seeds, strict=False))
     ]
     assert reference[0]["diagnostics"] != reference[1]["diagnostics"]
     assert reference[0]["null_p"] != reference[1]["null_p"]

@@ -36,7 +36,7 @@ def test_weighted_draws_scale_the_same_stream():
         {"A": np.eye(n)}, np.zeros(n), C, indices=range(5), base_seed=11, null_fit=fit,
         variance_weights=w)
     mean = C @ fit[2]
-    for a, b, c in zip(plain, ones, weighted):
+    for a, b, c in zip(plain, ones, weighted, strict=False):
         np.testing.assert_array_equal(a, b)
         np.testing.assert_allclose(c - mean, np.sqrt(w) * (a - mean), rtol=1e-12, atol=1e-14)
 

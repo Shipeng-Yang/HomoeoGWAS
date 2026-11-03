@@ -14,7 +14,7 @@ Pipeline per subgenome (j ∈ {A, B, D, …}):
         bcftools concat --threads N -Oz <chr_files_j> \\
             > <out>/<j>/all.subset.vcf.gz
     (common tail)
-        bcftools index -t <out>/<j>/all.subset.vcf.gz
+        bcftools index -c <out>/<j>/all.subset.vcf.gz
         plink2 --vcf <subset> --maf <qc.maf_min> --geno <qc.missingness_max> \\
                [--hwe <qc.hwe_min_p>] --max-alleles 2 --snps-only \\
                --set-all-var-ids @:# --new-id-max-allele-len 200 missing \\
@@ -24,7 +24,7 @@ Pipeline per subgenome (j ∈ {A, B, D, …}):
 Output per subgenome:
     <out>/<j>/all.pgen,pvar,psam  (always)
     <out>/<j>/all.bed,bim,fam     (always; GRM/LOCO pipelines consume BED)
-    <out>/<j>/all.vcf.gz[.tbi]    (only when --keep-vcf or not --no-vcf)
+    <out>/<j>/all.vcf.gz[.csi]    (only when --keep-vcf or not --no-vcf)
     <out>/<j>/split_log.json      (provenance for reproducibility)
 """
 from __future__ import annotations
@@ -59,7 +59,7 @@ class SubgenomeWork:
     bed_prefix: Path
     out_vcf: Path | None
     bcftools_cmd: list[str]            # bcftools view/concat → subset_vcf
-    bcftools_index_cmd: list[str]      # bcftools index -t subset_vcf
+    bcftools_index_cmd: list[str]      # bcftools index -c subset_vcf (CSI: chromosomes > 2^29 bp)
     plink2_cmd: list[str]              # plink2 import → pgen (or bed if --skip-pgen)
     plink2_bed_cmd: list[str] | None = None        # plink2 pgen → bed
     plink2_export_vcf_cmd: list[str] | None = None  # only when keep_vcf
@@ -168,7 +168,7 @@ def plan_split(
         else:  # pragma: no cover - schema enforces
             raise ValueError(f"unknown layout: {cfg.geno.layout}")
 
-        bcftools_index_cmd = ["bcftools", "index", "-t", "-f", str(subset_vcf)]
+        bcftools_index_cmd = ["bcftools", "index", "-c", "-f", str(subset_vcf)]
 
         # plink2 import → pgen + bed in one pass
         plink2_cmd = ["plink2", "--vcf", str(subset_vcf)]
@@ -301,7 +301,7 @@ def execute_plan(
             if sg.plink2_export_vcf_cmd is not None:
                 _run_cmd(sg.plink2_export_vcf_cmd, log_file=log_file)
                 # plink2's export-bgz writes to <prefix>.vcf.gz already; ensure index
-                _run_cmd(["bcftools", "index", "-t", "-f", str(sg.out_vcf)], log_file=log_file)
+                _run_cmd(["bcftools", "index", "-c", "-f", str(sg.out_vcf)], log_file=log_file)
             missing_outputs = [str(path) for path in bed_components if not path.exists()]
             if missing_outputs:
                 raise RuntimeError(
@@ -310,7 +310,7 @@ def execute_plan(
             # Tidy: remove subset.vcf once pgen exists (it's an intermediate)
             if (sg.subset_vcf).exists():
                 sg.subset_vcf.unlink()
-                (sg_dir / "all.subset.vcf.gz.tbi").unlink(missing_ok=True)
+                (sg_dir / "all.subset.vcf.gz.csi").unlink(missing_ok=True)
         except (subprocess.CalledProcessError, RuntimeError) as exc:
             sg_summary["status"] = "ERROR"
             stderr = getattr(exc, "stderr", None)

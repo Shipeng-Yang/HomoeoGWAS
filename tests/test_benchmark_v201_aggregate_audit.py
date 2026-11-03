@@ -68,7 +68,6 @@ from scripts.benchmarks.v201.track_scaling import (
 )
 
 
-
 @pytest.fixture(autouse=True)
 def _v201_release_target(monkeypatch):
     import homoeogwas

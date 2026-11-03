@@ -458,6 +458,48 @@ def test_formal_checkpoint_without_pre_run_manifest_fails_closed(tmp_path):
         P.verify_formal_launch(config_path, cfg)
 
 
+def _checkpoint_cfg(tmp_path, provenance=None):
+    cfg = {
+        "interact": {
+            "mode": "group",
+            "statistic": "omniB",
+            "calibration": {
+                "method": "bootstrap",
+                "B": 2000,
+                "checkpoint": {"enabled": True, "root": str(tmp_path / "checkpoint")},
+            },
+        },
+    }
+    if provenance is not None:
+        cfg["provenance"] = provenance
+    path = tmp_path / "checkpoint.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return path, cfg
+
+
+def test_declared_unattested_checkpoint_runs_without_formal_manifest(tmp_path):
+    """An explicit unattested declaration is the non-formal checkpoint route."""
+    from homoeogwas import formal_provenance as P
+
+    path, cfg = _checkpoint_cfg(tmp_path, {"mode": "unattested"})
+    assert P.verify_formal_launch(path, cfg) is None
+
+
+@pytest.mark.parametrize("extra", [
+    {"mode": "formal"},
+    {"mode": "unattested", "pre_run_manifest": "manifest.json"},
+    {"mode": "unattested", "blas_thread_policy": {}},
+])
+def test_unattested_declaration_is_exact(tmp_path, extra):
+    """Any other mode, or mixing the declaration with formal fields, fails closed."""
+    from homoeogwas import formal_provenance as P
+
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    path, cfg = _checkpoint_cfg(tmp_path, extra)
+    with pytest.raises(P.FormalLaunchError, match="provenance.mode must be exactly"):
+        P.verify_formal_launch(path, cfg)
+
+
 def test_checkpointed_benchmark_qa_does_not_require_formal_manifest(tmp_path):
     """QA-only benchmark checkpoints must retain the benchmark_qa route."""
     from homoeogwas import formal_provenance as P

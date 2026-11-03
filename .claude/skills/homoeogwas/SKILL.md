@@ -42,8 +42,13 @@ Never ask the user to hand-write a YAML config — generate it under
      (LS-mean of value ~ environment + line), never a raw average over
      environments with different scales or missing records; screen extreme
      single-environment records before averaging;
-   - group omniB: `null_variance: smooth_pc4` (with checkpointing) as the
-     primary null, `homoscedastic` as sensitivity.
+   - group omniB: `null_variance: smooth_pc4` (with checkpointing and
+     top-level `provenance: {mode: unattested}`) as the primary null,
+     `homoscedastic` as sensitivity;
+   - report phenotype values flagged beyond 5 SD (WARN / audit flags) and ask
+     about them before interpreting results; nothing is removed;
+   - homoeolog tables must be one-to-one: a gene repeated across groups stops
+     `interact`; rebuild the table rather than overriding.
 3. `homoeogwas validate -c …` → `fit`/`interact` → `audit` → `plot`.
 4. Summarize **biologically** (AGENTS.md §7): per-subgenome PVE (which
    subgenomes carry heritability), λ_GC calibration, top hits, figure paths,

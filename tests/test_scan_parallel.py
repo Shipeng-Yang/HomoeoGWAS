@@ -9,6 +9,7 @@ import pytest
 from bed_reader import to_bed
 
 from homoeogwas.grm import compute_loco_grm_parts, loco_grm_from_parts
+from homoeogwas.io import GenoChunk
 from homoeogwas.kernel import normalize_kernel
 from homoeogwas.scan import (
     build_loco_scan_contexts,
@@ -17,7 +18,6 @@ from homoeogwas.scan import (
     scan_bed_stream_loco,
     scan_bed_stream_parallel,
 )
-from homoeogwas.io import GenoChunk
 
 
 def _chunk(n=90, m_per_chrom=55, chroms=("cA", "cB", "cC"), seed=11):

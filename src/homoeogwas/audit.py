@@ -107,6 +107,48 @@ def _load_json(path: Path) -> dict:
     return value
 
 
+def _input_qc_flags(flags: list[AuditFlag], payload: dict) -> None:
+    qc = payload.get("input_qc") or {}
+    screens = ({"": qc["phenotype"]} if qc.get("phenotype") else {})
+    screens.update({f"{t}: ": v for t, v in (qc.get("phenotype_by_trait") or {}).items() if v})
+    for label, pheno in screens.items():
+        listed = ", ".join(
+            f"{item.get('sample')} ({item.get('z')} SD)" for item in (pheno.get("flagged") or [])[:5])
+        if pheno.get("status") == "review":
+            _add(flags, "PHENOTYPE_OUTLIER", "review",
+                 f"{label}Phenotype values beyond {pheno.get('review_sd')} SD of the mean: "
+                 f"{listed}. Check these records before interpreting the run.")
+        elif pheno.get("status") == "warn":
+            _add(flags, "PHENOTYPE_EXTREME_VALUES", "info",
+                 f"{label}Phenotype values beyond {pheno.get('warn_sd')} SD of the mean: {listed}.")
+    trials = qc.get("raw_trial_average")
+    if trials:
+        _add(flags, "PHENOTYPE_RAW_TRIAL_AVERAGE", "review",
+             f"The trait equals the raw average of {trials.get('columns')} (means differ by "
+             f"{float(trials.get('mean_range_sd') or float('nan')):.1f} pooled SD); if these are "
+             "trials or environments, their effects are in the phenotype. Prefer adjusted means.")
+    join = qc.get("sample_join") or {}
+    if join.get("status") == "warn":
+        _add(flags, "SAMPLE_JOIN_LOSS", "review",
+             f"{join.get('n_dropped')} of {join.get('n_phenotyped')} phenotyped samples were not "
+             f"analysed (no genotype), e.g. {join.get('examples_unmatched_phenotype')}; check the IDs.")
+    table_qc = qc.get("group_table") or {}
+    dup = table_qc.get("duplicated_genes") or {}
+    if dup:
+        shown = "; ".join(f"{s}: {', '.join(g[:5])}" for s, g in dup.items())
+        waiver = table_qc.get("waiver")
+        if isinstance(waiver, dict):
+            _add(flags, "OVERRIDDEN_INPUT_CHECK", "review",
+                 "Input check overridden: genes are repeated across homoeolog groups "
+                 f"({shown}); run approved by {waiver.get('approver')} with the reason "
+                 f"\"{waiver.get('reason')}\". Any report must state this override; groups "
+                 "containing these genes may reflect paralog signal.")
+        else:  # results written by v2.1.2 (allow_duplicate_genes)
+            _add(flags, "DUPLICATED_GROUP_GENES", "review",
+                 "The run was allowed with genes repeated across homoeolog groups "
+                 f"({shown}); check the homoeolog table for paralogs.")
+
+
 def _fit_record(path: Path, payload: dict) -> AuditRecord:
     flags: list[AuditFlag] = []
     reml = payload.get("reml") or {}
@@ -132,12 +174,13 @@ def _fit_record(path: Path, payload: dict) -> AuditRecord:
     if not pve:
         _add(flags, "PVE_MISSING", "error", "No REML PVE partition was recorded.")
     if not reml.get("pve_uncertainty") and not reml.get("pve_ci"):
-        _add(flags, "PVE_UNCERTAINTY_NOT_ASSESSED", "review",
+        _add(flags, "PVE_UNCERTAINTY_NOT_ASSESSED", "info",
              "Point PVE estimates are present without confidence intervals or bootstrap stability.")
     boundary = reml.get("boundary_components") or []
     if boundary:
         _add(flags, "BOUNDARY_COMPONENT", "review",
              f"REML placed {len(boundary)} component(s) on the boundary: {boundary}.")
+    _input_qc_flags(flags, payload)
 
     if any(flag.severity == "error" for flag in flags):
         status = "ANALYSIS_INVALID"
@@ -757,6 +800,7 @@ def _interact_record(path: Path, payload: dict) -> AuditRecord:
     if discovery and not replication:
         _add(flags, "REPLICATION_REQUIRED", "review",
              "An internal familywise discovery is present but no replication manifest is attached.")
+    _input_qc_flags(flags, payload)
 
     if any(flag.severity == "error" for flag in flags):
         status = "ANALYSIS_INVALID"

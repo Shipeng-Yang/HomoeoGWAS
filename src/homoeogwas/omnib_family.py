@@ -690,7 +690,7 @@ def _gamma_log_variance(
     coef[0] = np.log(np.mean(r2))
     iterations = 0
     converged = False
-    for iterations in range(1, SMOOTH_VARIANCE_MAX_ITERATIONS + 1):
+    for iterations in range(1, SMOOTH_VARIANCE_MAX_ITERATIONS + 1):  # noqa: B007 (reported after the loop)
         mu = np.exp(X @ coef)
         new = np.linalg.lstsq(X, X @ coef + (r2 - mu) / mu, rcond=None)[0]
         converged = np.max(np.abs(new - coef)) < 1e-10
@@ -2123,7 +2123,7 @@ def _subgenome_manifest_identity(subdata, family) -> dict:
     subgenome_identity = {}
     with ThreadPoolExecutor(max_workers=len(family.subgenomes)) as pool:
         dosage = dict(zip(family.subgenomes, pool.map(
-            lambda sub: _array_identity(subdata[sub].X), family.subgenomes)))
+            lambda sub: _array_identity(subdata[sub].X), family.subgenomes), strict=False))
     for sub in family.subgenomes:
         data = subdata[sub]
         gene_map = [

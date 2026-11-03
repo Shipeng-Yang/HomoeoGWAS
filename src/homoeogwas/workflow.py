@@ -57,11 +57,38 @@ def check_phenotype_inputs(phenotype: str, sample_col: str,
         return {"ok": False, "reason": f"phenotype {phenotype!r} has no usable "
                 f"rows in sample column {sample_col!r}"}
     integer_like = bool(len(col) and col.astype(str).str.fullmatch(r"-?\d+").all())
-    return {"ok": True, "integer_like": integer_like,
-            "advice": ("sample ids look integer-like — HomoeoGWAS will preserve "
-                       "the phenotype sample column as strings before joining to "
-                       ".fam IIDs" if integer_like else
-                       "sample ids are non-numeric strings (fine)")}
+    advice = ("sample ids look integer-like; they must equal the .fam IIDs exactly, "
+              "including leading zeros (spreadsheets often drop them). This check cannot "
+              "see the genotypes: fit and interact report the sample join and refuse IDs "
+              "that match only after normalisation" if integer_like else
+              "sample ids are non-numeric strings; they must equal the .fam IIDs exactly. "
+              "This check cannot see the genotypes: fit and interact report the sample join")
+    out = {"ok": True, "integer_like": integer_like}
+    if trait is not None:
+        import pandas as pd
+
+        from .input_qc import phenotype_message, screen_phenotype
+        full = read_delimited(phenotype, usecols=[sample_col, trait],
+                              dtype={sample_col: "string"})
+        full = full.loc[full[sample_col].notna()].copy()
+        full[trait] = pd.to_numeric(full[trait], errors="coerce")
+        per_sample = full.groupby(full[sample_col].astype(str))[trait].mean()
+        qc = screen_phenotype(per_sample.index.tolist(), per_sample.to_numpy())
+        qc["scope"] = ("all phenotyped samples (repeated rows averaged); fit/interact "
+                       "screen the analysed samples after the genotype join")
+        out["phenotype_qc"] = qc
+        msg = phenotype_message(qc, trait)
+        if msg:
+            advice = f"{advice}; WARNING: {msg}"
+        from .input_qc import raw_trial_average, raw_trial_average_message
+        trials = raw_trial_average(read_delimited(phenotype, dtype={sample_col: "string"}),
+                                   sample_col, trait)
+        out["raw_trial_average"] = trials
+        tmsg = raw_trial_average_message(trials, trait)
+        if tmsg:
+            advice = f"{advice}; WARNING: {tmsg}"
+    out["advice"] = advice
+    return out
 
 
 def check_sample_ids(phenotype: str, sample_col: str) -> dict:
@@ -228,6 +255,8 @@ def build_interact_config(*, subgenomes: Sequence[str], bed_prefixes: Mapping[st
             **({"full_ranking": True} if is_canonical_omnib else {}),
         },
     }
+    if "checkpoint" in calibration:
+        cfg["provenance"] = {"mode": "unattested"}
     if is_canonical_omnib:
         cfg["interact"]["burden"].update({"maf_min": 0.01, "n_pc": 3})
         cfg["interact"].update({
