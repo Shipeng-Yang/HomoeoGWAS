@@ -251,9 +251,9 @@ def validate_config(cfg: dict) -> None:
                 f"ERR: scan.loco.fallback must be error|emmax, got {fallback!r}")
         if fallback == "emmax":
             raise SystemExit(
-                "ERR: scan.loco.fallback=emmax is reserved but not implemented in "
-                "Phase 3 M3.1; Phase 3 acceptance requires fallback=error so an "
-                "unknown chrom or degenerate K_(-c) fails the run loudly")
+                "ERR: scan.loco.fallback=emmax is reserved but not implemented; "
+                "use fallback=error so an unknown chrom or degenerate K_(-c) "
+                "fails the run loudly")
         mdf = _get(cfg, "scan.loco.min_denominator_fraction", 1.0e-6)
         if not (isinstance(mdf, (int, float))
                 and 0.0 < float(mdf) <= 1.0):

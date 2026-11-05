@@ -1,4 +1,4 @@
-"""v2.1.3 item 9: report_card JSON written next to fit/interact results."""
+"""report_card JSON written next to fit/interact results."""
 import json
 
 from homoeogwas.report_card import build_report_card, write_report_card

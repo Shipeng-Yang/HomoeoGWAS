@@ -219,7 +219,7 @@ def test_audit_multitrait_phenotype_flags(tmp_path):
     assert len(flags) == 1 and flags[0].message.startswith("t2: ")
 
 
-# --- v2.1.3 item 2: sample join record, normalisable ID mismatch refusal, join-loss warning ---
+# --- sample join record, normalisable ID mismatch refusal, join-loss warning ---
 
 def test_sample_join_refuses_ids_matching_only_after_normalisation():
     from homoeogwas.input_qc import sample_join
@@ -275,7 +275,7 @@ def test_audit_flags_sample_join_loss(tmp_path):
     assert {f.code: f.severity for f in record.flags}["SAMPLE_JOIN_LOSS"] == "review"
 
 
-# --- v2.1.3 item 5: trait computed as the raw average of trials on different scales ---
+# --- trait computed as the raw average of trials on different scales ---
 
 def _trials(shift=(0.0, 8.0, 18.0), n=80, seed=3):
     rng = np.random.default_rng(seed)
@@ -317,7 +317,7 @@ def test_audit_flags_raw_trial_average(tmp_path):
     assert {f.code: f.severity for f in record.flags}["PHENOTYPE_RAW_TRIAL_AVERAGE"] == "review"
 
 
-# --- v2.1.3 review fixes (REVIEW-sonnet-20261028 #4, #5, #7) ---
+# --- input checks: edge cases ---
 
 def test_raw_trial_average_finds_trials_beyond_twelfth_column_quickly():
     import time

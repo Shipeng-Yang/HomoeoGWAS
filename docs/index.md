@@ -3,7 +3,7 @@
 Subgenome-aware trait architecture and homoeolog-interaction analysis for
 **allopolyploid crops**. Current release: **v2.1.3** (2026-11-03; `pip install homoeogwas`).
 
-![How HomoeoGWAS works](img/how_it_works_light.svg)
+![HomoeoGWAS workflow: inputs, the additive model, the homoeolog-group interaction test with experiment-wide error control, and the audited output](img/homoeogwas_workflow.png)
 
 1. **Subgenome-stratified mixed model** — `y = Xβ + u_A + u_B [+ u_D ...] + ε`,
    one kinship matrix per subgenome, a multi-kernel REML variance partition

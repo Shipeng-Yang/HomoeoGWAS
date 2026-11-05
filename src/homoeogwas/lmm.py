@@ -1,4 +1,4 @@
-"""Linear mixed model with single random-effect kernel (HomoeoGWAS M2.3).
+"""Linear mixed model with single random-effect kernel.
 
 Model
 -----

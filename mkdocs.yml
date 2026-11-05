@@ -42,8 +42,6 @@ nav:
   - API Reference: api.md
 
 docs_dir: docs
-exclude_docs: |
-  superpowers/
 
 markdown_extensions:
   - admonition

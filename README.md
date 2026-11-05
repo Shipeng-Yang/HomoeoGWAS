@@ -7,8 +7,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
 [![Version](https://img.shields.io/badge/version-2.1.3-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
-<!-- DOI badge added after the first Zenodo release:
-[![DOI](https://zenodo.org/badge/DOI/<10.5281/zenodo.XXXXXXX>.svg)](https://doi.org/<10.5281/zenodo.XXXXXXX>) -->
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20668367.svg)](https://doi.org/10.5281/zenodo.20668367)
 
 > **Current release: [v2.1.3](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.3), on [PyPI](https://pypi.org/project/homoeogwas/2.1.3/).**
 > A patch release: common analysis traps (duplicated homoeolog genes, sample-ID
@@ -194,10 +193,7 @@ One genotype set goes in and is split by subgenome. It feeds two analyses:
 `homoeogwas audit` then labels every result as computationally valid, an
 internal discovery, or in need of replication.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/how_it_works_dark.svg">
-  <img alt="HomoeoGWAS workflow: inputs are split by subgenome and feed a subgenome-stratified mixed model and a homoeolog interaction test; both end in one evidence audit" src="docs/img/how_it_works_light.svg" width="100%">
-</picture>
+<img alt="HomoeoGWAS workflow: inputs, the additive model, the homoeolog-group interaction test with experiment-wide error control, and the audited output" src="docs/img/homoeogwas_workflow.png" width="100%">
 
 ### One interaction contract across ploidies
 

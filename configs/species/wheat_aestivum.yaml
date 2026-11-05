@@ -1,7 +1,6 @@
 # HomoeoGWAS species config — Triticum aestivum (bread wheat, AABBDD hexaploid)
 #
-# Replaces hardcoded paths in src/homoeogwas/io.py & scripts/phase3 for wheat.
-# Phase 5a Hybrid schema: 10 required + dosage_model/loco_unit/dl_window optional with default.
+# Ten required fields; dosage_model, loco_unit and dl_window are optional with defaults.
 
 id: wheat_aestivum
 latin: Triticum aestivum
@@ -23,7 +22,7 @@ subgenomes:
     donor: Aegilops tauschii
     chroms: [chr1D, chr2D, chr3D, chr4D, chr5D, chr6D, chr7D]
 
-fasta: /mnt/nvme/wheat_ref/iwgsc_refseqv1.0_all_chromosomes/iwgsc_refseqv1.0_all_chromosomes.fa
+fasta: data/external/wheat_ref/iwgsc_refseqv1.0_all_chromosomes/iwgsc_refseqv1.0_all_chromosomes.fa
 gff: data/reference/wheat/iwgsc_refseqv1.1_HC.gff3   # IWGSC v1.1 HC annotation
 chrom_map: data/reference/wheat/chrom_map_identity.tsv   # IWGSC v1.0 BIM chrom == fasta chrom
 

@@ -1,4 +1,4 @@
-"""Unit tests for sim.py — Phase 2 M2.6 simulation benchmark utilities.
+"""Unit tests for sim.py — simulation benchmark utilities.
 
 All tests use toy arrays — no Horvath data, no GEMMA/regenie binaries.
 """

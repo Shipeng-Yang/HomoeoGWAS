@@ -1,4 +1,4 @@
-"""Species configuration schema for HomoeoGWAS v2 (Phase 5a).
+"""Species configuration schema for HomoeoGWAS.
 
 Replaces the v1 hardcoded per-species paths (wheat/cotton/rapeseed) with
 ``configs/species/<species>.yaml`` configs that the framework reads to
@@ -143,7 +143,7 @@ class SpeciesConfig(BaseModel):
     provenance: Provenance | None = None
 
     # ---------------------------------------------------------------------
-    # Structural cross-field validation (Tier 2 in the dual-plan validator)
+    # Structural cross-field validation
     # ---------------------------------------------------------------------
 
     @model_validator(mode="after")

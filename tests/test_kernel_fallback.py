@@ -1,4 +1,4 @@
-"""Tests for Phase 5a Step 3: n-sub K_hom fallback + REML auto-fallback."""
+"""Tests for the n-subgenome K_hom fallback and the REML auto-fallback."""
 from __future__ import annotations
 
 import numpy as np

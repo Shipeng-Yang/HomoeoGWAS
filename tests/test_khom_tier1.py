@@ -145,8 +145,7 @@ def test_simulate_rejects_unnormalized_by_default():
 def test_placeholder_spike_in_grid_removed():
     """The fabricated spike-in power grid (PLACEHOLDER REML) was removed (2026-06-02).
     Guard that the fake public symbols are gone so no caller can resurrect fake numbers;
-    the simulator (simulate_additive_plus_epistasis) stays. Real power = Phase 7
-    scripts/phase7/d2_khom_recoverability.py + diagnostics.boundary_lrt."""
+    the simulator (simulate_additive_plus_epistasis) stays."""
     import homoeogwas.khom_tier1 as kt
 
     assert not hasattr(kt, "spike_in_power_grid")

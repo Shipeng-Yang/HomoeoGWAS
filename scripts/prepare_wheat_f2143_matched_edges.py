@@ -54,9 +54,9 @@ MANIFEST_SCHEMA = PRE_RUN_MANIFEST_SCHEMA
 CONFIG_SCHEMA = "homoeogwas-canonical-group-omnib-v1"
 
 GENOTYPE_PREFIXES = {
-    "A": "/mnt/nvme/wheat_genomewide/gw_A_flank",
-    "B": "/mnt/nvme/wheat_genomewide/gw_B_flank",
-    "D": "/mnt/nvme/wheat_genomewide/gw_D_flank",
+    "A": "data/processed/wheat/genotypes/gw_A_flank",
+    "B": "data/processed/wheat/genotypes/gw_B_flank",
+    "D": "data/processed/wheat/genotypes/gw_D_flank",
 }
 SNP_TO_GENE = {
     "A": "data/processed/wheat/scanT/verified_mapping/snp_to_gene_A.npz",

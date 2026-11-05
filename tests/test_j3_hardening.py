@@ -1,8 +1,8 @@
-"""J=3 hardening tests — Phase 2 M2.4.4 (Hadamard kernel inclusion).
+"""J=3 hardening tests (Hadamard kernel inclusion).
 
-The M2.4.1-M2.4.3 engine (fit_multi_reml / compare_nested_reml / boundary_lrt /
+The multi-kernel engine (fit_multi_reml / compare_nested_reml / boundary_lrt /
 bootstrap_lrt_table / pve_sensitivity_grid) is written J-agnostic but was only
-exercised at J=2. M2.4.4 adds a third kernel (the homoeolog Hadamard kernel),
+exercised at J=2. These tests add a third kernel (the homoeolog Hadamard kernel),
 so these tests lock down the J=3 behaviour.
 """
 from __future__ import annotations
@@ -122,7 +122,7 @@ def test_hadamard_normalize_equivalence():
 
     Hadamard of c1·A and c2·C scales the product by c1·c2; trace-normalisation
     cancels any positive scalar, so the canonical hom kernel is the same either
-    way. M2.4.4 builds hom from raw GRMs; this confirms that is well-defined.
+    way. The hom kernel is built from raw GRMs; this confirms that is well-defined.
     """
     n = 80
     G_A = _toy_psd(n, 15, seed=10) * 7.3       # arbitrary scales
@@ -146,11 +146,11 @@ def test_fit_multi_reml_j3_near_collinear_does_not_crash():
     assert isinstance(res.boundary_components, list)
 
 
-# --- J=4 (wheat A/B/D + hom, M2.4.5) ---------------------------------
+# --- J=4 (wheat A/B/D + hom) ---------------------------------
 
 def _toy_4kernel(n: int, seed: int):
     """y from A+B+D+e; hom = trace-norm Hadamard(A,B,D). Models the wheat
-    A/B/D additive + homoeolog Hadamard 4-kernel set used by M2.4.5."""
+    A/B/D additive + homoeolog Hadamard 4-kernel set."""
     rng = np.random.default_rng(seed)
     K_A = _toy_psd(n, 20, seed=seed)
     K_B = _toy_psd(n, 22, seed=seed + 1)

@@ -1,4 +1,4 @@
-"""Tests for Phase 5a Step 2: generalized subgenome split."""
+"""Tests for the generalized subgenome split."""
 from __future__ import annotations
 
 import json

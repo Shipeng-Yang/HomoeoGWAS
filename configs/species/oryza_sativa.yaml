@@ -20,8 +20,8 @@ subgenomes:
     donor: Oryza sativa (Nipponbare reference)
     chroms: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
 
-fasta: /mnt/nvme/rice_ref/Oryza_sativa.IRGSP-1.0.dna.toplevel.fa
-gff: /mnt/nvme/rice_ref/Oryza_sativa.IRGSP-1.0.57.gff3.gz   # RAP-DB gene models
+fasta: data/external/rice_ref/Oryza_sativa.IRGSP-1.0.dna.toplevel.fa
+gff: data/external/rice_ref/Oryza_sativa.IRGSP-1.0.57.gff3.gz   # RAP-DB gene models
 chrom_map: data/reference/rice/chrom_map_rice.tsv           # identity 1..12 (BIM chrom == fasta chrom)
 
 geno:

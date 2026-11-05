@@ -1,4 +1,4 @@
-"""Unit tests for src/homoeogwas/kernel.py — M2.2 scaffold acceptance."""
+"""Unit tests for src/homoeogwas/kernel.py."""
 from __future__ import annotations
 
 import numpy as np

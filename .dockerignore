@@ -16,9 +16,6 @@ logs
 .venv
 venv
 envs
-CLAUDE.md
-codex_isolated.sh
-.codex_state
 .claude
 demo_run
 demo_data

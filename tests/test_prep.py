@@ -212,7 +212,7 @@ def test_group_diamond_requires_consistent_all_pair_clique(tmp_path, monkeypatch
     def fake_which(_):
         return "/fake/diamond"
 
-    def fake_rbh(faa_a, faa_b, diamond, threads, tmp, timeout=None):  # v2.1.3: timeout arg
+    def fake_rbh(faa_a, faa_b, diamond, threads, tmp, timeout=None):
         a = Path(faa_a).stem
         b = Path(faa_b).stem
         mapping = {f"g{a}1": f"g{b}1", f"g{a}2": f"g{b}2"}
@@ -397,7 +397,7 @@ def test_cli_prep_snps_dispatch(tmp_path):
     assert (out / "snp_to_gene_B.npz").exists()
 
 
-# --- v2.1.3 item 3: DIAMOND input checks, timeout with process-group kill, zero-pair refusal, version ---
+# --- DIAMOND input checks, timeout with process-group kill, zero-pair refusal, version ---
 
 _FAKE_DIAMOND = r'''#!/bin/bash
 # fake diamond for tests: makedb stores the input path; blastp maps query gX<n> -> subject gY<n>
@@ -479,7 +479,7 @@ def test_zero_reciprocal_pairs_refused(tmp_path, monkeypatch):
                                 mode="triad")
 
 
-# --- v2.1.3 item 6: refuse zero genes / zero SNPs in genes and list the chromosome sets ---
+# --- refuse zero genes / zero SNPs in genes and list the chromosome sets ---
 
 def test_prep_snps_refuses_gff_chromosomes_absent_from_bim(tmp_path):
     gff, sgmap, bed_by_sub = _fixture(tmp_path)
@@ -505,7 +505,7 @@ def test_prep_snps_refuses_zero_genes_for_a_subgenome(tmp_path):
     assert not list(out.glob("snp_to_gene_*.npz"))
 
 
-# --- v2.1.3 review fixes (#3, #8, #9) ---
+# --- input guards: edge cases ---
 
 def test_terminal_stop_codon_is_accepted_but_internal_stop_refused(tmp_path):
     uni = _genes_universe(tmp_path)

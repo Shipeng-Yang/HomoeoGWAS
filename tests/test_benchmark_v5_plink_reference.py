@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from scipy.stats import chi2, f
 from homoeogwas.interact import _batch_nested_f
 from scripts.benchmarks.v201.comparators import _nested_snp_product_design
 
-PLINK = Path("/home/yys05/.local/share/mamba/envs/baseline_ext/bin/plink")
+PLINK = Path(os.environ.get("HOMOEOGWAS_PLINK19", "plink1.9-reference-not-set"))
 PLINK_SHA256 = "4674107b608b0125f37f6c3d7ef47759dd0ffdb5b639ebc5b1dadb6530ecf01a"
 
 
@@ -21,7 +22,7 @@ def _alleles(dosage: int) -> str:
 
 def test_raw_nested_f_matches_pinned_plink19_interaction_statistic(tmp_path):
     if not PLINK.is_file():
-        pytest.skip("pinned PLINK 1.9 numeric-reference binary is unavailable")
+        pytest.skip("set HOMOEOGWAS_PLINK19 to the pinned PLINK 1.9 reference binary")
     assert hashlib.sha256(PLINK.read_bytes()).hexdigest() == PLINK_SHA256
 
     rng = np.random.default_rng(92_070_001)

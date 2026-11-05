@@ -2971,9 +2971,9 @@ def run_pair_scan_omnib(
     primary_multiplicity = str(primary_multiplicity).lower()
     if primary_multiplicity != "bonferroni":
         raise ValueError(
-            "Task 3 pairwise omniB compatibility supports only "
-            "primary_multiplicity='bonferroni'; bootstrap_minp becomes a "
-            "formal discovery layer in Task 4")
+            "the pairwise omniB compatibility wrapper supports only "
+            "primary_multiplicity='bonferroni'; use mode 'group' for the "
+            "bootstrap_minp discovery family")
     sx, sy = pair_subs
     family = MasterGroupFamily(
         (sx, sy), tuple(f"pair_{i}" for i in range(len(pairs))),

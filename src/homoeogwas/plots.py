@@ -41,7 +41,7 @@ ALL_FIGURES: tuple[str, ...] = ("pve", "manhattan", "qq", "lambda")
 # omicverse-inspired muted palette (sc_color / blue_color family), assigned to
 # subgenomes by position. Chosen for a polished, desaturated look while staying
 # as distinguishable as practical (it is no longer the strictly colourblind-safe
-# Okabe-Ito set; the previous default was kept in git history if needed).
+# Okabe-Ito set).
 _SUBG_PALETTE = ["#1F577B", "#E07370", "#368650", "#FCBC10", "#5E4D9A",
                  "#01A0A7", "#D48F3E", "#941456"]
 _HOM_COLOR = "#A56BA7"      # homoeolog Hadamard kernel (omicverse muted purple)

@@ -15,11 +15,11 @@ from homoeogwas import species_config, species_split, grm, kernel, lmm, gp, scan
 | `grm` | Per-subgenome GRM construction; LOCO partial-GRM utilities |
 | `kernel` | `hadamard_kernel`, `pairwise_mean_kernel`, `build_homoeolog_kernel` (auto-fallback), `sum_kernel`, `normalize_kernel` |
 | `lmm` | REML multi-kernel LMM, score test for per-SNP association |
-| `gp` | GBLUP (Phase 5c): `fit_gblup`, `stratified_cv`, `paired_bootstrap_ci` |
+| `gp` | GBLUP: `fit_gblup`, `stratified_cv`, `paired_bootstrap_ci` |
 | `scan` | Per-SNP scan (CPU + dual-GPU), LOCO context builder, EMMAX backend |
 | `diagnostics` | λ_GC, QQ plot, retained-fraction warning, top-hit cluster collapse |
 | `calibration` | Null-simulation type-I error |
-| `sim` | Power-vs-FDR simulation benchmark (Phase 2 M2.6) |
+| `sim` | Power-vs-FDR simulation benchmark |
 | `cli` | `homoeogwas fit` / `homoeogwas split` entrypoint |
 | `io` | bed-reader + plink2 + bcftools wrappers |
 

@@ -1,6 +1,6 @@
 # HomoeoGWAS species config — Gossypium hirsutum (upland cotton, AADD tetraploid)
 #
-# hebau panel + HBAU NDM8 ASM1899796v1 reference assembly (M3.4 v2 setup).
+# hebau panel + HBAU NDM8 ASM1899796v1 reference assembly.
 
 id: gossypium_hirsutum
 latin: Gossypium hirsutum
@@ -18,8 +18,8 @@ subgenomes:
     donor: Gossypium raimondii
     chroms: [D01, D02, D03, D04, D05, D06, D07, D08, D09, D10, D11, D12, D13]
 
-fasta: /mnt/nvme/cotton_hbau/GCA_018997965.1_ASM1899796v1_genomic.fa
-gff: /mnt/nvme/cotton_hbau/cottongen/NDM8.gff3.gz       # cottongen HEAU official
+fasta: data/external/cotton_hbau/GCA_018997965.1_ASM1899796v1_genomic.fa
+gff: data/external/cotton_hbau/cottongen/NDM8.gff3.gz       # cottongen HEAU official
 chrom_map: data/reference/cotton/chrom_map_hebau_to_ncbi.tsv  # A01 → CM032202.1 etc.
 
 geno:
@@ -38,7 +38,7 @@ qc:
   hwe_min_p: ~
   missingness_max: 0.1
 
-known_qtl_tsv: data/reference/cotton/known_qtl_cotton.tsv  # M3.4 v2 NDM8 coords + paper_grade
+known_qtl_tsv: data/reference/cotton/known_qtl_cotton.tsv  # NDM8 coordinates
 homoeolog_map: ~
 
 provenance:

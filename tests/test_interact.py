@@ -37,10 +37,10 @@ from homoeogwas.interact import (
     run_multitrait_pair_scan,
     run_pair_scan,
     run_pair_scan_omnib,
-    run_triad3_scan,  # noqa: F401 - exercised by legacy-route tests outside Task 5
+    run_triad3_scan,  # noqa: F401 - exercised by the legacy-route tests
     run_triad_scan,
-    threeway_design_mask,  # noqa: F401 - exercised by legacy-route tests outside Task 5
-    threeway_pvals,  # noqa: F401 - exercised by legacy-route tests outside Task 5
+    threeway_design_mask,  # noqa: F401 - exercised by the legacy-route tests
+    threeway_pvals,  # noqa: F401 - exercised by the legacy-route tests
 )
 from homoeogwas.interaction_config import normalize_interact_config
 from homoeogwas.omnib_family import OmniBFamilyScores
@@ -99,7 +99,7 @@ def test_gene_pc_scores_invariant_to_ref_alt_flip():
     Xf[:, flip] = 2 - Xf[:, flip]
     s1 = gene_pc_scores(Xf, idx, 150, rng, n_pc=3)
     assert np.allclose(s0, s1, atol=1e-9)
-    # the burden is NOT invariant under a partial flip (the estimand the reviewer flagged)
+    # the burden is NOT invariant under a partial flip (a sign-dependent estimand)
     b0 = block_burden_capped(X, idx, 150, rng)
     b1 = block_burden_capped(Xf, idx, 150, rng)
     assert not np.allclose(b0, b1, atol=1e-6)

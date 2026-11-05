@@ -10,10 +10,9 @@ from homoeogwas.followup import load_followup_inputs, run_followup
 from homoeogwas.run_registry import load_registry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAPESEED_RESULT = Path(
-    "/mnt/7302share/fast_ysp/U7_GWAS/results/experimental/"
-    "rapeseed_flowering_group_omnib_f17404_v1"
-)
+_RAPESEED_ENV = os.environ.get("HOMOEOGWAS_RAPESEED_RESULT", "").strip()
+RAPESEED_RESULT = Path(_RAPESEED_ENV) if _RAPESEED_ENV else None
+HAVE_RAPESEED = RAPESEED_RESULT is not None and RAPESEED_RESULT.exists()
 RAPESEED_EVIDENCE = (
     PROJECT_ROOT / "analyses/evidence/rapeseed_flowering.evidence.yaml"
 )
@@ -23,7 +22,7 @@ RUN_LOCAL_REGRESSION = os.environ.get(
 
 
 @pytest.mark.skipif(
-    not RAPESEED_RESULT.exists(), reason="local formal rapeseed result unavailable")
+    not HAVE_RAPESEED, reason="set HOMOEOGWAS_RAPESEED_RESULT to the formal rapeseed result")
 def test_rapeseed_full_family_and_discoveries_are_provenance_bound():
     inputs = load_followup_inputs(RAPESEED_RESULT)
 
@@ -57,7 +56,7 @@ def test_cross_species_inventory_keeps_unmigrated_runs_historical():
 
 @pytest.mark.slow
 @pytest.mark.skipif(
-    not RUN_LOCAL_REGRESSION or not RAPESEED_RESULT.exists(),
+    not RUN_LOCAL_REGRESSION or not HAVE_RAPESEED,
     reason=(
         "set HOMOEOGWAS_RUN_LOCAL_REGRESSION=1 on the project machine "
         "to replay the frozen rapeseed result"),

@@ -1,4 +1,4 @@
-"""Unit tests for scan.py — Phase 2 M2.5 per-SNP association scan."""
+"""Unit tests for scan.py — per-SNP association scan."""
 from __future__ import annotations
 
 import numpy as np
@@ -243,7 +243,7 @@ def test_scan_result_lambda_gc_property():
 
 
 # ---------------------------------------------------------------------
-# M2.5-v2a — streaming BED scan
+# Streaming BED scan
 # ---------------------------------------------------------------------
 
 def _write_toy_bed(path_prefix, geno):

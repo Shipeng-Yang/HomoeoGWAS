@@ -4,16 +4,14 @@
 #   - 21 chromosomes labelled 1A..7A / 1C..7C / 1D..7D
 #   - Allohexaploid 2n=6x=42; cultivated since ~Neolithic
 #
-# Phase 5d blind-run panel: Rahman et al. 2025 G3 "Oat Landrace Diversity (OLD)"
+# Panel: Rahman et al. 2025 G3 "Oat Landrace Diversity (OLD)"
 #   - 737 post-QC sample × 393,962 SNP (Beagle-imputed, diploid-called GBS via
 #     DeepVariant + GLNexus). Ag Data Commons / figshare 27095383.
 #   - CHROM in VCF uses segment format: 1A_0, 1A_1 (each logical chrom split
 #     into two pseudomolecule segments). chrom_map_oat.tsv carries the
 #     segment → logical_chrom (1A_0 + 1A_1 → 1A) mapping for LOCO grouping.
 #
-# Phase 5d Step 0 verified: Phase 5a is generic — no A/B/D hardcoding in
-# kernel.py / species_config.py / grm.py / lmm.py / scan.py / cli.py (only
-# docstring example in grm.py:371). K_hom n=3 → 3-way Hadamard auto-fallback.
+# Three subgenomes: K_hom is the 3-way Hadamard product.
 
 id: avena_sativa
 latin: Avena sativa
@@ -41,14 +39,14 @@ subgenomes:
 # WITHOUT subgenome mapping AND shipped no GFF. Ensembl release-62 uses the
 # canonical 1A/1C/1D nomenclature (Kamal 2022 Nat Genet) and ships GFF +
 # matching fasta. ~2.9 GB gz fasta + 46 MB gz GFF.
-fasta: /mnt/nvme/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
-gff: /mnt/nvme/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
+fasta: data/external/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
+gff: data/external/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
 chrom_map: data/reference/oat/chrom_map_oat.tsv   # fasta_chrom col filled with 1A/1C/1D
 
 geno:
   # Step 3 (post ref unzip): bcftools reheader (no ##contig in raw VCF) +
   # plink2 --vcf --make-pgen --maf 0.01 --geno 0.1 → split into A/C/D pgens.
-  vcf: /mnt/nvme/oat_raw/figshare/nsgc.gdv.gln.cohort.clean.maf01maxmiss75diploid.beagle_sorted_filt.gt.vcf.gz
+  vcf: data/external/oat_raw/figshare/nsgc.gdv.gln.cohort.clean.maf01maxmiss75diploid.beagle_sorted_filt.gt.vcf.gz
   layout: single
 
 pheno: data/processed/oat/pheno_clean.tsv

@@ -1,106 +1,108 @@
 # Algorithm
 
-This page summarizes the statistical model and the design choices. Manuscript
-analysis records and the frozen claim hierarchy are maintained in the separate
-[HomoeoGWAS reproducibility repository](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility).
+HomoeoGWAS has two analyses: a subgenome-partitioned mixed model for additive
+effects, and an interaction test whose unit is the homoeolog group. Both start
+from genotypes split by subgenome.
 
-## 1. Subgenome-partitioned LMM (main claim)
+## 1. Subgenome-partitioned mixed model (`homoeogwas fit`)
 
-For an allopolyploid panel with subgenomes `S = {A, B, D, ...}`, the working model is
-
-```
-y = X β + Σ_{s ∈ S} u_s + ε
-u_s ~ N(0, σ²_s · K_s)
-ε   ~ N(0, σ²_ε · I)
-```
-
-where:
-- `K_s` = per-subgenome additive GRM, computed from the SNP set assigned to subgenome `s` via `species_config.chrom_map`
-- variance components `{σ²_s : s ∈ S} ∪ {σ²_ε}` fit by REML (`src/homoeogwas/lmm.py`)
-- per-SNP association = score test against the residualised `y` under the null mixed model
-
-**Why this is not "new LMM framework"**: per-subgenome random effects appear in Voss-Fels 2017 (wheat) and Mascher 2021 (barley). Our contribution is the operational implementation — generic schema-driven (`configs/species/*.yaml`), cross-ploidy unified, dual-GPU scalable, and shipped as a tested package.
-
-### LOCO option
-
-When `loco_unit: chrom` is set, the per-SNP scan recomputes the kinship excluding the SNPs on the chromosome of the test SNP — the classic Leave-One-Chromosome-Out correction for proximal contamination. We confirmed this helps:
-
-- Wheat Watkins days_to_emerg: per-chrom λ_GC improved (B sub 0.872 → 1.075 = +0.20, A 1.078 → 1.106, D 1.027 → 1.059), with cost +0% on 2-GPU runtime
-- Horvath2020 plant_height: λ_GC 0.9636 → 0.9941
-
-LOCO benefit scales with per-chrom polygenic contribution — consistent with BOLT-LOCO theory.
-
-## 2. Homoeolog Hadamard kernel K_hom (scope-conditional, supplementary)
-
-`K_hom = K_A ⊙ K_B [⊙ K_D ⊙ ...]` would, in principle, capture cross-subgenome co-association beyond additive structure. Phase 5c tested this directly: a GBLUP REML paired bootstrap on 4 panels (wheat / cotton / rapeseed / strawberry), one additive-polygenic primary trait each, n_repeats=20.
-
-**Result**: `σ²_h` boundary-collapsed in all 4 panels; Δr² range \|0.004–0.019\| **statistically detectable but direction-unstable**:
-
-| Panel | n | Δr²(K_pool + K_hom vs K_pool) | sig 95% |
-|---|---|---|---|
-| Wheat Watkins | 827 | **−0.004** | ✓ (neg) |
-| Cotton hebau | 419 | **+0.019** | ✓ (pos) |
-| Rapeseed Horvath2020 | 297 | **−0.015** | ✓ (neg) |
-| Strawberry Pincot 2018 | 564 | **+0.018** | ✓ (pos) |
-
-**Interpretation** (verbatim from charter §2.1):
-
-> Across four panels and paired bootstrap GBLUP-REML tests, the global K_hom showed statistically detectable but direction-unstable Δr² and boundary variance estimates, so it is not interpretable as a robust cross-panel positive variance component.
-
-### Tier 1 / Tier 2 revival paths (Phase 4/5)
-
-If you are extending this project, the charter lists three Tier-2 revival paths:
-
-- **C + G**: synteny-aware **local K_hom** — Hadamard within syntenic ortholog blocks instead of global GRM; requires building `homoeolog_map`
-- **B**: epistasis-rich trait class re-test — wheat heading date (Ppd × Vrn known digenic), cotton lint × fiber joint, disease R-gene panels
-- See the project charter §2.1 for the 5-item hard gate that revival must satisfy before K_hom can be promoted to main claim
-
-### n-subgenome auto-fallback
-
-`build_homoeolog_kernel` in `src/homoeogwas/kernel.py`:
-- `n_sub = 1` → `None` (degenerate; LMM falls back to additive-only)
-- `n_sub ∈ {2, 3}` → full Hadamard
-- `n_sub ≥ 4` (strawberry 8n × 4 sub) → pairwise-mean `(1/C(n,2)) · Σ_{i<j} K_i ⊙ K_j` (PSD by Schur + sum-of-PSD; avoids 4-way Hadamard sparse collapse)
-
-## 3. DL prior conditional lift (v1.5 extension)
-
-After running per-SNP LMM, we score the suggestive-hit SNPs (typically `p < 5e-5`) plus their LD partners (`r² ≥ 0.2` within ±1 Mb) with two pretrained plant DNA language models:
-
-- **PlantCaduceus** (225 M params, Caduceus architecture with mamba-ssm, ~5 plant species pretraining): SNP-position masked LLR over 512 bp window
-- **AgroNT** (1 B params, NT architecture, ~70 plant species pretraining): 6144 bp window, 6-phase shifted median LLR
-
-The two scores correlate moderately (Spearman 0.61 on wheat 31k SNPs), so they are combined as an equal-weight ensemble `mean(z(LLR_pc), z(LLR_agront))` then fused with GWAS:
+For subgenomes `s ∈ {A, B, D, …}`:
 
 ```
-fusion_score = z(-log10 p) + β · z(|LLR_ensemble|)
+y = Xβ + Σ_s u_s + e,   u_s ~ N(0, σ²_s K_s),   e ~ N(0, σ²_e I)
 ```
 
-`β` is chosen per-panel by **LOQO grid search** over `{0.25, 0.5, 1, 2, 5}`. We pre-specify the LOQO procedure rather than the resulting β value — this is reported transparently in paper Methods.
+- `K_s` is the genomic relationship matrix of subgenome `s`,
+  `K_s = Z_s Z_sᵀ / Σ_j 2p_sj(1 − p_sj)`, built from mean-imputed dosages
+  centred by twice the allele frequency (variants with MAF ≥ 0.01) and scaled
+  to trace `n`.
+- The variance components are fitted jointly by restricted maximum likelihood
+  (REML) from several starting points; the fit with the highest likelihood is
+  kept. Components below 10⁻³ of the phenotypic variance are flagged as
+  boundary estimates.
+- The proportion of phenotypic variance explained by subgenome `s` is
+  `PVE_s = σ²_s / (Σ σ² + σ²_e)`. A parametric bootstrap (refits on phenotypes
+  drawn from the fitted model) gives percentile intervals and the probability
+  that each subgenome ranks first.
+- Markers are tested with the one-degree-of-freedom generalized-least-squares
+  statistic `χ² = U²/I`, with the variance components fixed at the genome-wide
+  fit.
+- With leave-one-chromosome-out (LOCO) enabled, the kernel of the subgenome
+  that carries the tested chromosome is rebuilt without that chromosome's
+  markers, so a marker is not tested against a kinship that already contains it.
+- The genomic inflation factor is `λ_GC = median(χ²) / 0.4549`.
 
-**Cross-panel result** (Phase 3.3 / 3.4):
+## 2. Homoeolog-group interaction test (`homoeogwas interact`)
 
-| Panel | Trait | β | recall@100 GWAS → fused | best single rank flip |
-|---|---|---|---|---|
-| Horvath2020 | bloom_50pct | 2 | 0.10 → **0.80** | *BnaC03.GA20ox* 221 → 2 |
-| Horvath2020 | plant_height | 0.25 | 0.60 → 0.90 | *BnaC09.FLC* 148 → 72 |
-| Cotton hebau | fiber_length | 5 | 0.00 → 0.20 | *GhMYB25* 763 → 44 |
-| Cotton hebau | lint_percentage | 5 | 0.00 → 0.20 | *GhMYB25* 951 → 34 |
-| Wheat Watkins (ref) | days_to_emerg | 0.25 | n/a | 0 (power-saturated) |
+**Unit.** A homoeolog group holds one gene copy per subgenome. A group of two,
+three or four copies contributes one, three or six pairwise *edges*; no
+higher-order coefficient is fitted. Each gene copy is represented by the SNPs
+assigned to it (gene body ± flank), mean-imputed and standardized.
 
-**Framing**: DL prior lift is **panel-size-dependent** — lift is largest where GWAS marginal power is most limited. Wheat 31k suggestive at n=827 is already power-saturated and shows no recall lift; this is a supplementary panel-size scaling story, not a failure.
+**Encodings.** Each edge between copies X and Y is tested with three encodings:
 
-## 4. Engineering: dual-GPU scan
+| encoding | interaction columns | main effects in the null |
+|---|---|---|
+| minor-allele burden | product of the two minor-allele burdens | both burdens |
+| PC1 | product of the first principal-component scores of the two gene blocks | both PC1 scores |
+| kernel | up to nine cross-products of the first three principal components of each copy (a low-rank form of the Hadamard product of the two gene kernels) | the top PCs of both copies |
 
-The per-SNP scan in `src/homoeogwas/scan.py` runs on 2× RTX 3080 20 GB with no NVLink (`NCCL_P2P_DISABLE=1`). The wheat Watkins LOCO scan (83.3M markers × 827 samples × 21 chromosomes) completes in **~90 minutes** wall-clock. EMMAX backend is 0% slower than naive panmictic LMM at the same marker count.
+**Test.** The phenotype is inverse-normal transformed. A null model with one
+relationship matrix per subgenome is fitted by REML and used to whiten the
+data, `W = V̂^{-1/2}`. Each encoding is a whitened nested F-test of its
+interaction columns, conditional on the covariates and on the main effects of
+both copies.
 
-This is the engineering contribution (Methods, not main scientific claim — per charter §2.3).
+**Combination.** The encoding P values of an edge, and then the edge P values
+of a group, are combined with the equal-weight Cauchy combination
 
-## References (selected)
+```
+T = (1/m) Σ_j tan{(0.5 − p_j) π},    P = 0.5 − arctan(T) / π
+```
 
-- Voss-Fels K. et al. 2017 — per-subgenome kinship LMM in wheat
-- Mascher M. et al. 2021 — barley reference + LMM
-- Schur product theorem — elementwise product of PSD matrices is PSD (justifies K_hom validity)
-- Self & Liang 1987 — boundary mixture χ² for variance component testing (Tier 1 A in charter §2.1)
-- BOLT-LMM / BOLT-LOCO — Loh et al. 2015 (LOCO benefit ∝ per-chrom polygenic contribution)
-- PlantCaduceus — Caduceus architecture + plant pretraining (charter §2.2)
-- AgroNT — Nucleotide Transformer + plant pretraining (charter §2.2)
+giving one group P value (group-omniB). The encoding and edge P values are
+reported to show which copy pair and which encoding carry the evidence; they
+are not part of the discovery family.
+
+## 3. Experiment-wide error control
+
+All groups of a declared analysis form one family, so the multiplicity
+correction covers every tested group.
+
+- **Parametric bootstrap.** Null phenotypes `y*_b = Cβ̂ + V̂^{1/2} z_b`,
+  `z_b ~ N(0, I)`, `b = 1, …, B`, are drawn from the fitted null model and
+  scored with the same whitening matrix. The minimum P value over the family is
+  recorded for each replicate.
+- **Adjusted P value.** `p_adj(g) = (1 + #{b : min_h p*_hb ≤ p_g}) / (B + 1)`.
+  Groups whose P value falls below the ⌊α(B + 1)⌋-th smallest null minimum are
+  rejected at family-wise level α (single-step minimum P). Replicates with a
+  non-finite statistic contribute a minimum of zero, which is conservative.
+- **Structure-aware null (`smooth_pc4`).** Residual variance in
+  diversity panels often follows population structure. The squared whitened
+  residuals of the null fit are regressed on the top four eigenvectors of the
+  mean subgenome relationship matrix (gamma GLM, log link); the fitted
+  variances `w`, normalized to mean one, rescale the bootstrap draws:
+  `y*_b = Cβ̂ + w^{1/2} ∘ (V̂^{1/2} z_b)`. The observed statistics are
+  unchanged. Enable it with `calibration.null_variance: smooth_pc4` (group
+  omniB; requires `checkpoint.enabled: true`). Configs generated by the
+  workflow and the AI-assistant interface use it by default; a config that does
+  not set it uses the homoscedastic null (`w = 1`), which also serves as the
+  sensitivity analysis.
+
+Typical settings are B = 2,000 and α = 0.05.
+
+## 4. Reading a significant group
+
+A significant group reports interaction evidence for that homoeolog group and
+its genomic neighbourhood. Identifying the interacting partner and the causal
+genes calls for follow-up (`homoeogwas follow-up`, allele-specific expression,
+near-isogenic lines or homoeolog-specific editing), and replication in an
+independent population.
+
+## 5. Optional extension: global homoeolog kernel
+
+`fit` can add a global homoeolog kernel `K_hom = K_A ⊙ K_B [⊙ …]` to the
+additive model (`kernels.include_hadamard`). With four or more subgenomes it
+falls back to the mean of the pairwise products to avoid rank collapse. This
+kernel estimates an aggregate variance component; it does not test which
+homoeolog groups interact, and it is not used by `interact`.

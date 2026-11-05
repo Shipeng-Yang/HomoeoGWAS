@@ -1,8 +1,16 @@
 # Inputs & outputs
 
-This page is the I/O contract for `homoeogwas fit`: what you provide, and what
-you get back. The fastest way to see it concretely is `homoeogwas demo --keep`
-(see [Getting Started](getting_started.md)).
+HomoeoGWAS has two analysis workflows that share the same genotypes and phenotypes:
+
+| workflow | command | question it answers | main result |
+|---|---|---|---|
+| Additive | `homoeogwas fit` | Which markers are associated with the trait, and how much phenotypic variance does each subgenome explain? | per-marker association table, subgenome PVE |
+| Interaction | `homoeogwas interact` | Which homoeolog groups (one gene copy per subgenome) carry a genetic interaction, with the error rate controlled over all groups of the experiment? | ranked group table with experiment-wide adjusted P values |
+
+The fastest way to see the additive workflow concretely is `homoeogwas demo --keep`
+(see [Getting Started](getting_started.md)); every file listed below for `fit` is
+produced by the demo. Interaction inputs are prepared with `prep-snps` and
+`prep-homoeologs` ([Interaction Inputs](interact_inputs.md)).
 
 ## Inputs
 
@@ -121,21 +129,70 @@ homoeogwas validate -c your_config.yaml     # schema + path preflight, no comput
 See `examples/minimal/demo.yaml` for a complete minimal config, and
 `configs/species/*.yaml` for species templates.
 
-## Outputs (`outputs.out_dir`)
+### 4. Interaction inputs — gene blocks and homoeolog groups
+
+`homoeogwas interact` uses the same per-subgenome genotypes and phenotype table,
+plus two prepared inputs (step-by-step guide: [Interaction Inputs](interact_inputs.md)):
+
+| input | made by | contents |
+|---|---|---|
+| `snp_to_gene_<S>.npz` + `genes_<S>.tsv` | `homoeogwas prep-snps` | for each subgenome `<S>`, which SNPs belong to which gene (gene body ± flank); `genes_<S>.tsv` lists `gene_id, subgenome, chrom, start, end, strand, n_snp`. The NPZ is bound to its genotype file by SHA-256. |
+| groups table (`pairs.tsv`, `triads.tsv`, …) | `homoeogwas prep-homoeologs` | one row per homoeolog group, one column per subgenome copy (`gene_A`, `gene_B`, …); two to four copies per group. Built from reciprocal best protein hits or from an existing orthology table. |
+
+Every group in the table is one hypothesis of the experiment-wide family, so the
+table should be fixed before any phenotype is analysed.
+
+## Outputs
+
+All files are written to `outputs.out_dir`; `<prefix>` is `outputs.prefix` and
+`<trait>` the analysed phenotype column. Figures are written as PDF (vector), SVG
+and PNG.
+
+### `homoeogwas fit` — additive workflow
 
 | file | contents |
 |---|---|
-| `sumstats_<prefix>.tsv` | per-SNP association: subgenome, chrom, pos, allele, beta, se, chi2, **p** (calibrated), maf, call-rate |
-| `summary_<prefix>.json` | REML σ²/PVE per subgenome, λ_GC, acceptance checks, runtime, resolved settings |
-| `lambda_gc_<prefix>.tsv` | genomic-control λ (overall and per subgenome) |
-| `manhattan_<prefix>.png`, `qq_<prefix>.png` | diagnostic plots |
-| `resolved_config.yaml` | the fully resolved config actually used (provenance) |
-| `analysis_samples.tsv` | samples retained after the phenotype↔genotype join |
+| `sumstats_<prefix>.tsv` | one row per tested marker: `snp_id`, `subgenome`, `chrom`, `pos`, `beta` (effect of one allele copy on the analysed phenotype scale), `se`, `chi2` (1-d.f. GLS statistic), `p`, `n_obs`, `maf`, `call_rate` |
+| `summary_<prefix>.json` | the run record: REML variance components (`reml.sigma2`), subgenome PVE (`reml.pve`, and `reml.pve_uncertainty` when a bootstrap was requested), log-likelihood and optimizer status, boundary components, marker filtering counts (`scan.filter_counts`), LOCO setting, λ_GC, resolved settings, software version, runtime and every acceptance check (`acceptance`, `acceptance_all_passed`) |
+| `lambda_gc_<prefix>.tsv` | genomic inflation factor overall and per subgenome (`scope`, `level`, `n_markers`, `lambda_gc`) |
+| `report_card_summary_<prefix>.json` | the numbers to quote (n, PVE, λ_GC), audit flags with severity, and the statements a report must carry |
+| `analysis_samples.tsv` | the samples retained after joining phenotype and genotypes |
+| `resolved_config.yaml` | the fully resolved configuration actually used |
+| `manhattan_<prefix>.{pdf,svg,png}` | Manhattan plot coloured by subgenome |
+| `qq_<prefix>.{pdf,svg,png}` | Q–Q plot of the marker P values |
+| `lambda_gc_<prefix>.{pdf,svg,png}` | λ_GC overall and per subgenome |
+| `variance_components_<prefix>.{pdf,svg,png}` | PVE of each subgenome kernel and the residual |
 
-The `p` column in `sumstats` is ready for downstream Manhattan/QQ plotting and
-multiple-testing control. `summary_<prefix>.json` is the machine-readable record
-of the run (variance components, calibration, and whether every acceptance check
-passed).
+Regional plots around chosen loci are drawn afterwards with
+`homoeogwas locus`, and all figures can be regenerated from a finished run with
+`homoeogwas plot` (matplotlib) or `homoeogwas rplot` (R).
+
+### `homoeogwas interact` — interaction workflow
+
+| file | contents |
+|---|---|
+| `interact_<trait>.json` | the run record: number of planned, valid and unestimable groups; experiment-wide test (statistic, bootstrap null model, B, seed, family-wise level, threshold and rejected groups); variance components of the null model; interaction-scan λ; full provenance (software version, input hashes, settings) |
+| `interact_<trait>_ranking_group_<transform>.tsv` | one row per homoeolog group, ranked by P value (columns below) |
+| `provenance/` | launch and input attestations of formal runs |
+
+Columns of the ranking table:
+
+| column | meaning |
+|---|---|
+| `rank`, `hypothesis_id`, `group_id` | rank by `p_interaction` and the group identifier |
+| `gene_A`, `gene_B`, … | the gene copy of each subgenome |
+| `p_interaction` | group-omniB P value: the Cauchy combination of the edge P values, each combining the burden, PC1 and kernel encodings |
+| `p_adjusted_bootstrap_minp` | experiment-wide adjusted P value from the bootstrap minimum-P null |
+| `primary_sig` | 1 when the group is rejected at the family-wise level |
+| `driving_edge`, `driving_component`, `driving_component_p` | the copy pair and encoding with the strongest evidence, and its P value (to localise the signal; not part of the family-wise test) |
+| `p_unestimable` | 1 when the group could not be tested |
+
+### Audit and report card
+
+`homoeogwas audit` checks a finished `fit` or `interact` result against its
+acceptance contract, and the report card (`report_card_<result>.json`) lists the
+numbers to quote, the audit flags and the statements a report must carry. Use it
+as the source for the results paragraph of a paper.
 
 ## Common pitfalls
 

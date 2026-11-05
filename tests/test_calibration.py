@@ -1,4 +1,4 @@
-"""Unit tests for calibration.py — Phase 2 M2.4.3 null-simulation calibration."""
+"""Unit tests for calibration.py — null-simulation calibration."""
 from __future__ import annotations
 
 import numpy as np

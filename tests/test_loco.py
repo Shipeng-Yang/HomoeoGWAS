@@ -1,4 +1,4 @@
-"""Unit tests for LOCO (Phase 3 M3.1) — per-chrom GRM parts + LOCO scan.
+"""Unit tests for LOCO — per-chrom GRM parts + LOCO scan.
 
 Covers the engine surface added in src/homoeogwas/{grm,scan}.py:
   • compute_grm_parts / compute_loco_grm_parts / loco_grm_from_parts

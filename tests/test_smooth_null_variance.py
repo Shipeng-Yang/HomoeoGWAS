@@ -1,4 +1,4 @@
-"""Opt-in smooth PC null-variance bootstrap (HETERO-FIX); homoscedastic default unchanged."""
+"""Opt-in smooth PC null-variance bootstrap; homoscedastic default unchanged."""
 
 from __future__ import annotations
 
@@ -134,11 +134,12 @@ def test_config_validation_of_null_variance():
 
 def _harness():
     import importlib.util
+    import os
     from pathlib import Path
 
-    path = Path("/mnt/7302share/fast_ysp/U7_GWAS/tasks/HETERO-FIX/pilot-v2/pilot_v2.py")
-    if not path.exists():
-        pytest.skip("HETERO-FIX harness not available on this machine")
+    path = Path(os.environ.get("HOMOEOGWAS_SMOOTH_NULL_REFERENCE", "reference-not-set"))
+    if not path.is_file():
+        pytest.skip("set HOMOEOGWAS_SMOOTH_NULL_REFERENCE to the reference variance-fit script")
     spec = importlib.util.spec_from_file_location("hetero_pilot_v2", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -1,4 +1,4 @@
-"""Tests for Phase 5a species YAML schema + validator."""
+"""Tests for the species YAML schema and validator."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -113,7 +113,7 @@ def test_extra_top_level_field_rejected(tmp_path: Path):
 
 # ---------------------------------------------------------------------------
 # 2. Real YAML files for the 3 hardcoded species — schema-only checks
-#    (don't run the cross-file validator since reference fasta is on /mnt/nvme
+#    (don't run the cross-file validator: the reference fasta is a local path
 #    and may not exist on every machine running pytest)
 # ---------------------------------------------------------------------------
 
@@ -162,7 +162,7 @@ def test_donor_metadata_carried_through():
 
 
 def test_strawberry_octoploid_has_four_sub_28_chrom():
-    """Phase 5b Week 1: framework universality smoke test for strawberry 8n."""
+    """Framework universality smoke test for octoploid strawberry."""
     cfg = load_species_config(SPECIES_DIR / "fragaria_ananassa.yaml", validate=False)
     assert cfg.ploidy == 8
     assert {sg.id for sg in cfg.subgenomes} == {"A", "B", "C", "D"}
@@ -174,7 +174,7 @@ def test_strawberry_octoploid_has_four_sub_28_chrom():
 
 
 def test_strawberry_kernel_auto_picks_pairwise_mean():
-    """Phase 5a Step 3 K_hom auto-fallback decision for n_sub=4 = pairwise_mean."""
+    """K_hom auto-fallback for four subgenomes is pairwise_mean."""
     import numpy as np
 
     from homoeogwas.kernel import build_homoeolog_kernel

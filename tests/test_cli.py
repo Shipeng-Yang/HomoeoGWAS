@@ -1,4 +1,4 @@
-"""Unit tests for cli.py — Phase 2 EXIT ``homoeogwas fit``.
+"""Unit tests for cli.py — ``homoeogwas fit``.
 
 Tiny synthetic panels only — no Horvath/wheat data, no GPU, no external
 binaries. Exercises config parsing, the flag budget, the end-to-end fit
@@ -257,7 +257,7 @@ def _assert_fit_outputs(out: Path, prefix: str):
     assert (out / f"manhattan_{prefix}.png").exists()
     assert (out / "resolved_config.yaml").exists()
     assert np.isfinite(summary["lambda_gc"]["all"])
-    card = json.loads((out / f"report_card_summary_{prefix}.json").read_text())   # v2.1.3 item 9
+    card = json.loads((out / f"report_card_summary_{prefix}.json").read_text())
     assert card["command"] == "fit" and card["numbers"]["n"] == summary.get("n", summary.get("n_samples"))
     return summary
 
@@ -339,7 +339,7 @@ def test_fit_missing_config():
 
 
 # ---------------------------------------------------------------------
-# LOCO pipeline (Phase 3 — M3.1)
+# LOCO pipeline
 # ---------------------------------------------------------------------
 
 
@@ -430,7 +430,7 @@ def test_fit_validate_loco_rejects_npz(tmp_path):
 
 
 def test_fit_validate_loco_rejects_fallback_emmax(tmp_path):
-    """fallback=emmax is reserved but unimplemented in Phase 3 M3.1."""
+    """fallback=emmax is reserved but unimplemented."""
     geno_dir, pheno = _make_panel(tmp_path, ["A", "C"], n=40, m=500)
     cfg_path = _write_loco_config(tmp_path, geno_dir, pheno, ["A", "C"])
     cfg = yaml.safe_load(open(cfg_path))
@@ -492,7 +492,7 @@ def test_fit_preflight_reports_missing_fam_or_bim(tmp_path, capsys, ext):
     assert proc.returncode == 1 and f"all{ext}" in text and "Traceback" not in text
 
 
-# --- v2.1.3 item 7: `homoeogwas validate` runs the phenotype checks of fit ---
+# --- `homoeogwas validate` runs the phenotype checks of fit ---
 
 def test_validate_reports_missing_trait_column(tmp_path, capsys):
     geno_dir, pheno = _make_panel(tmp_path, ["A", "C"])

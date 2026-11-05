@@ -1,4 +1,4 @@
-"""Tests for Phase 5c GBLUP module — closed-form correctness + CV pipeline."""
+"""Tests for the GBLUP module: closed-form correctness and the CV pipeline."""
 from __future__ import annotations
 
 import numpy as np

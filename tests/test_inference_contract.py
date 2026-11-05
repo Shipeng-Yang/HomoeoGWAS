@@ -1,4 +1,4 @@
-"""Regression tests for the Task 9 formal inference contract corrections."""
+"""Regression tests for the formal inference contract."""
 
 from __future__ import annotations
 

@@ -49,6 +49,34 @@ phenotype TSV/CSV, config schema, and every output file — is documented in
 **[Inputs & Outputs](io.md)**. The quickest template is the generated
 `demo_run/demo.yaml`.
 
+## Run the homoeolog-group interaction test
+
+The interaction workflow needs two prepared inputs besides the genotypes and
+phenotype: which SNPs belong to which gene, and which genes form a homoeolog
+group. The full guide with options is **[Interaction Inputs](interact_inputs.md)**.
+
+```bash
+# 1. SNP-to-gene blocks for each subgenome (gene body ± flank)
+homoeogwas prep-snps --gff genes.gff3 --subgenome-map subgenome_map.tsv \
+    --bed A=geno/subgenome_A --bed B=geno/subgenome_B \
+    --feature gene --id-attr ID --flank-bp 2000 --out-dir interact_prep
+
+# 2. Homoeolog groups (one gene copy per subgenome per row)
+homoeogwas prep-homoeologs --mode pairwise --subgenomes A,B \
+    --genes interact_prep/genes_{S}.tsv \
+    --from-table orthogroups.tsv --table-format long \
+    --gene-col gene --group-col group --out interact_prep/pairs.tsv
+
+# 3. The experiment-wide interaction test (group-omniB + bootstrap minimum-P)
+homoeogwas validate -c interact.yaml
+homoeogwas interact -c interact.yaml --n-jobs 16
+```
+
+The result is a ranked table of homoeolog groups with experiment-wide adjusted
+P values, plus a JSON run record ([Inputs & Outputs](io.md#homoeogwas-interact-interaction-workflow)).
+`homoeogwas audit` then labels the result as computationally valid, an internal
+discovery, or in need of replication.
+
 ## Add a new species (no framework code change)
 
 ```bash
@@ -73,11 +101,20 @@ the pairwise-mean kernel to avoid off-diagonal rank collapse.
 
 | Command | Purpose |
 |---|---|
-| `homoeogwas fit -c <cfg>` | run the subgenome-stratified LMM GWAS |
-| `homoeogwas validate -c <cfg>` | check config schema + input paths without computing |
+| `homoeogwas fit -c <cfg>` | subgenome-stratified mixed model: variance partition and per-marker scan |
+| `homoeogwas interact -c <cfg>` | homoeolog-group interaction test with experiment-wide error control |
+| `homoeogwas prep-snps` | build SNP-to-gene blocks for `interact` from a GFF and the genotypes |
+| `homoeogwas prep-homoeologs` | build the homoeolog group table for `interact` |
+| `homoeogwas validate -c <cfg>` | check config schema and input paths without computing |
+| `homoeogwas audit <result.json>` | label a finished result: computationally valid, internal discovery or needs replication |
+| `homoeogwas follow-up` | stability and evidence follow-up of significant groups |
+| `homoeogwas plot` / `locus` / `rplot` | redraw figures, regional plots or R figures from a finished run |
+| `homoeogwas predict -c <cfg>` | cross-validated subgenome-stratified genomic prediction |
+| `homoeogwas split` | split a panel VCF into per-subgenome genotype sets |
 | `homoeogwas demo` | generate a tiny dataset and run an end-to-end fit (self-test) |
-| `homoeogwas split --species-yaml <yaml> --vcf <in>` | split a VCF into per-subgenome sets |
-| `homoeogwas interact` | homoeolog-pair interaction scan |
+| `homoeogwas design` | parametric pre-flight for sequencing depth |
+| `homoeogwas registry` | validate or run a cross-species run registry |
+| `homoeogwas mcp` | MCP server for AI assistants (`pip install homoeogwas[mcp]`) |
 
 `fit` flags: `-c/--config` (required), `-o/--out-dir`, `--backend {cpu,gpu,auto}`,
 `--dry-run`, `--force`. Each run writes a `resolved_config.yaml` recording the

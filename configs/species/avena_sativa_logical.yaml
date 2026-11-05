@@ -37,11 +37,11 @@ subgenomes:
   - 5D
   - 6D
   - 7D
-fasta: /mnt/nvme/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
-gff: /mnt/nvme/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
+fasta: data/external/oat_raw/ensembl_ot3098/oat_ot3098_v2.fa
+gff: data/external/oat_raw/ensembl_ot3098/Avena_sativa_ot3098.Oat_OT3098_v2.62.gff3.gz
 chrom_map: data/reference/oat/chrom_map_oat_logical.tsv
 geno:
-  vcf: /mnt/nvme/oat_raw/figshare/oat_old.logical_chrom.vcf.gz
+  vcf: data/external/oat_raw/figshare/oat_old.logical_chrom.vcf.gz
   layout: single
 pheno: data/processed/oat/pheno_clean.tsv
 sample_map: null
