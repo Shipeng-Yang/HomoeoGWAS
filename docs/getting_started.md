@@ -4,13 +4,13 @@
 
 ```bash
 # CPU
-python -m pip install "homoeogwas==2.1.3"
+python -m pip install "homoeogwas==2.1.4"
 # + GPU extras for the per-SNP scan
-python -m pip install "homoeogwas[gpu]==2.1.3"
+python -m pip install "homoeogwas[gpu]==2.1.4"
 ```
 
 The same release can be installed from GitHub:
-`python -m pip install "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.3.tar.gz"`.
+`python -m pip install "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.4.tar.gz"`.
 
 From a checkout (for development):
 

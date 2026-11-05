@@ -1,7 +1,7 @@
 # HomoeoGWAS
 
 Subgenome-aware trait architecture and homoeolog-interaction analysis for
-**allopolyploid crops**. Current release: **v2.1.3** (2026-11-03; `pip install homoeogwas`).
+**allopolyploid crops**. Current release: **v2.1.4** (2026-11-05; `pip install homoeogwas`).
 
 ![HomoeoGWAS workflow: inputs, the additive model, the homoeolog-group interaction test with experiment-wide error control, and the audited output](img/homoeogwas_workflow.png)
 

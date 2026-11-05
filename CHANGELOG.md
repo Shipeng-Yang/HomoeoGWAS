@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## v2.1.4 — MCP dependency pin and documentation (2026-11-05)
+
+### Fixed
+
+- The `mcp` extra is pinned to `mcp>=1.0,<2`. mcp 2.x renamed `FastMCP`, so a
+  fresh `pip install "homoeogwas[mcp]"` could not start `homoeogwas mcp`.
+
+### Changed
+
+- Documentation: the workflow figure, a description of every input and output
+  file of `fit` and `interact`, an interaction quick start, the full command
+  list, and an algorithm page that matches the current methods.
+- Clearer error messages for the pairwise omniB compatibility wrapper and for
+  `scan.loco.fallback=emmax`.
+- Species configs use relative example paths; tests that need local reference
+  data are enabled through environment variables
+  (`HOMOEOGWAS_RAPESEED_RESULT`, `HOMOEOGWAS_PLINK19`,
+  `HOMOEOGWAS_SMOOTH_NULL_REFERENCE`) and are skipped otherwise.
+- Internal development notes were removed from the repository and the source
+  distribution.
+
+No statistical code changed. Estimates, P values and decisions equal v2.1.3.
+
 ## v2.1.3 — deterministic input guards for common analysis traps (2026-11-03)
 
 ### Changed
