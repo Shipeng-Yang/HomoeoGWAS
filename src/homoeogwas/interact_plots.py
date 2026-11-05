@@ -43,6 +43,7 @@ NEUTRAL_DARK = "#6E6862"
 ENCODING_LABELS = {"minor_burden": "burden", "pc1": "PC1 × PC1",
                    "kernel_hadamard": "kernel"}
 MAX_EVIDENCE_GROUPS = 12
+P_FLOOR = np.finfo(float).tiny
 CAPTIONS = (
     ("interaction_scan", "Group −log10 P at the position of every gene copy; magenta, groups "
      "significant at the family-wise level with their copies joined; red dashed line, "
@@ -118,8 +119,12 @@ def _groups_table(primary: dict) -> pd.DataFrame:
     rejected = set(fwer.get("rejected_hypothesis_ids") or [])
     rows = []
     for hid, p, padj in zip(ids, observed, adjusted, strict=True):
-        group = hid.split(":", 1)[1] if ":" in hid else hid
-        rows.append((hid, group, group.split("|"), p, padj, hid in rejected))
+        unit, _, body = hid.partition(":") if ":" in hid else ("group", "", hid)
+        if unit == "edge":
+            genes = body.split(":")[1:]
+        else:
+            genes = body.split("|")
+        rows.append((hid, body, genes, p, padj, hid in rejected))
     return pd.DataFrame(rows, columns=["hypothesis_id", "group_id", "genes",
                                        "p", "p_adjusted", "significant"])
 
@@ -176,8 +181,10 @@ def plot_interaction_scan(primary: dict, positions: pd.DataFrame,
             if gene in pos.index:
                 record = pos.loc[gene]
                 points.append((offsets[record["chrom"]] + record["pos"],
-                               -np.log10(row.p), row.significant, row.group_id))
+                               -np.log10(max(row.p, P_FLOOR)), row.significant, row.group_id))
     frame = pd.DataFrame(points, columns=["x", "y", "significant", "group_id"])
+    if frame.empty:
+        return []
 
     with mpl.rc_context(_PUB_RC):
         fig, ax = plt.subplots(figsize=(7.2, 2.6))
@@ -308,7 +315,7 @@ def plot_interaction_calibration(primary: dict, out_dir: Path,
             ax.set_ylabel("replicates")
         if threshold:
             ax.axvline(-np.log10(threshold), color=THRESHOLD, lw=0.9, ls=(0, (4, 2)))
-        ax.axvline(-np.log10(observed.min()), color=SIGNAL, lw=1.2)
+        ax.axvline(-np.log10(max(observed.min(), P_FLOOR)), color=SIGNAL, lw=1.2)
         _offset_spines(ax, 4)
 
         ax = axes[1]
@@ -320,7 +327,7 @@ def plot_interaction_calibration(primary: dict, out_dir: Path,
         lo = -np.log10(beta.ppf(0.975, k, n - k + 1))
         hi = -np.log10(beta.ppf(0.025, k, n - k + 1))
         ax.fill_between(expected, lo, hi, color="#ECEAE7", lw=0)
-        obs_sorted = -np.log10(np.clip(observed[order], 1e-300, 1.0))
+        obs_sorted = -np.log10(np.clip(observed[order], P_FLOOR, 1.0))
         significant = flags[order] if flags.size else np.zeros(n, bool)
         ax.scatter(expected[~significant], obs_sorted[~significant], s=5, color=NEUTRAL_DARK,
                    lw=0, rasterized=True, zorder=2)
@@ -374,7 +381,11 @@ def make_interact_figures(result_path: str | Path,
     """Write every applicable figure for one ``interact_<trait>.json``."""
     result_path = Path(result_path)
     payload, primary = load_interact_result(result_path)
-    out_dir = Path(out_dir) if out_dir else result_path.parent / "figures"
+    if out_dir is None:
+        out_dir = result_path.parent / "figures"
+        if len(list(result_path.parent.glob("interact_*.json"))) > 1:
+            out_dir = out_dir / str(payload.get("trait") or result_path.stem)
+    out_dir = Path(out_dir)
     config_path = config_path or (payload.get("provenance") or {}).get("config_path")
     written: list[str] = []
     if config_path and Path(config_path).is_file():

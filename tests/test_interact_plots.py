@@ -115,3 +115,29 @@ def test_plot_command_recognises_an_interaction_run(tmp_path, capsys):
     assert cli.main(["plot", str(tmp_path), "--formats", "png"]) == 0
     assert (tmp_path / "figures" / "interaction_calibration.png").exists()
     assert not (tmp_path / "figures" / "interaction_scan.pdf").exists()
+
+
+def test_edge_results_and_zero_p_are_drawn(tmp_path):
+    config, groups = _inputs(tmp_path)
+    payload = _result(groups, smooth=False)
+    fwer = payload["results"]["INT"]["model_diagnostics"]["bootstrap_fwer"]
+    fwer["hypothesis_ids"] = [
+        "edge:AB:" + g.replace("|", ":") for g in groups]
+    fwer["rejected_hypothesis_ids"] = [fwer["hypothesis_ids"][0]]
+    fwer["observed_p"][0] = 0.0
+    result = _write(tmp_path, payload, config)
+    stems = {p.rsplit("/", 1)[1].rsplit(".", 1)[0] for p in P.make_interact_figures(result)}
+    assert {"interaction_scan", "interaction_calibration"} <= stems
+
+
+def test_several_traits_get_their_own_figure_folders(tmp_path):
+    config, groups = _inputs(tmp_path)
+    for trait in ("height", "yield"):
+        payload = _result(groups)
+        payload["trait"] = trait
+        payload["provenance"] = {"config_path": str(config)}
+        (tmp_path / f"interact_{trait}.json").write_text(json.dumps(payload))
+    assert cli.main(["plot", str(tmp_path), "--formats", "png"]) == 0
+    for trait in ("height", "yield"):
+        page = (tmp_path / "figures" / trait / "figures.html").read_text()
+        assert "interaction_scan.png" in page and ".pdf" not in page

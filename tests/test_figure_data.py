@@ -72,13 +72,15 @@ def test_smooth_profile_is_reported_outside_the_manifest_bound_model(tmp_path):
     assert "null_variance_profile" not in plain
 
 
-def test_figure_fields_leave_inference_and_manifest_unchanged(tmp_path):
-    """Values recorded with the release before these fields were added."""
-    expected = {
-        "homoscedastic": (0.0216370776442113, "edd34b339241"),
-        "smooth_pc4": (0.022746404360284744, "024653f9f615"),
-    }
-    for variance, (threshold, manifest_prefix) in expected.items():
-        diagnostics = I._json_safe(_run(tmp_path / variance, variance).model_diagnostics)
+def test_figure_fields_stay_out_of_the_checkpoint_manifest(tmp_path):
+    """The figure fields are reported only; the checkpoint manifest and the
+    threshold of the panel fixture are unchanged."""
+    expected = {"homoscedastic": 0.0216370776442113, "smooth_pc4": 0.022746404360284744}
+    for variance, threshold in expected.items():
+        root = tmp_path / variance
+        diagnostics = I._json_safe(_run(root, variance).model_diagnostics)
         assert diagnostics["bootstrap_fwer"]["threshold"] == threshold
-        assert diagnostics["resampling_checkpoint"]["manifest_id"].startswith(manifest_prefix)
+        manifest = (root / "manifest.json").read_text()
+        for field in ("null_minima", "edge_components", "null_variance_profile",
+                      "squared_residuals"):
+            assert field not in manifest

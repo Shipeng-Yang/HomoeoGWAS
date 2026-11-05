@@ -182,11 +182,14 @@ def write_figure_index(out_dir: Path, title: str,
              if (out_dir / f"{stem}.png").is_file()]
     if not shown:
         return None
+    def links(stem):
+        found = [f'<a href="{html.escape(stem)}.{fmt}">{fmt.upper()}</a>'
+                 for fmt in ("pdf", "svg") if (out_dir / f"{stem}.{fmt}").is_file()]
+        return f" ({', '.join(found)})" if found else ""
+
     blocks = "\n".join(
         f'<figure><img src="{html.escape(stem)}.png" alt="{html.escape(stem)}">'
-        f"<figcaption>{html.escape(caption)} "
-        f'(<a href="{html.escape(stem)}.pdf">PDF</a>, '
-        f'<a href="{html.escape(stem)}.svg">SVG</a>)</figcaption></figure>'
+        f"<figcaption>{html.escape(caption)}{links(stem)}</figcaption></figure>"
         for stem, caption in shown)
     page = (
         "<!doctype html><html><head><meta charset='utf-8'>"

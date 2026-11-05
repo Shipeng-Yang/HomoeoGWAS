@@ -88,6 +88,8 @@ def plot_allele_combinations(prepared, out_dir: Path,
         pc_x = np.asarray(fx[1], float).reshape(-1)
         pc_y = np.asarray(fy[1], float).reshape(-1)
         table = combination_table(pc_x, pc_y, prepared.y_raw)
+        if table["n"].iat[0] < 2:
+            continue
         panels.append((f"{sub_x}{sub_y}", gene_x, gene_y, table))
     if not panels:
         return []
