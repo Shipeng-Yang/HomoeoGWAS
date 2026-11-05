@@ -517,6 +517,8 @@ class OmniBFamilyScores:
     response_diagnostics: OmniBResponseDiagnostics | None = None
     null_variance_weights: np.ndarray | None = field(default=None, repr=False)
     null_variance_model: dict | None = None
+    null_variance_design: np.ndarray | None = field(default=None, repr=False)
+    null_variance_squared_residuals: np.ndarray | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -715,6 +717,8 @@ def fit_smooth_null_variance(scores, n_pcs: int = SMOOTH_VARIANCE_PCS) -> None:
     X = _null_variance_design(scores.null_kernels, n_pcs)
     weights, coef, iterations, converged = _gamma_log_variance(residual ** 2, X)
     scores.null_variance_weights = weights
+    scores.null_variance_design = X
+    scores.null_variance_squared_residuals = residual ** 2
     scores.null_variance_model = {
         "model": "smooth_pc4",
         "family": "gamma_log_link_irls",
@@ -1885,6 +1889,7 @@ def bootstrap_minp_calibration(
         "adjusted_p_local": adjusted,
         "n_degenerate_replicates": int(degenerate.sum()),
         "degenerate_policy": "any_nonfinite_statistic_sets_null_min_to_zero",
+        "null_minima": [float(value) for value in null_min],
     }
 
 
@@ -1963,6 +1968,35 @@ def _group_identity_record(
             }
             for edge_index in edge_indices
         ],
+    }
+
+
+def _group_edge_components(
+    scores: OmniBFamilyScores,
+    expanded: ExpandedEdgeFamily,
+    index: int,
+) -> list[dict]:
+    """Encoding P values of every edge of one group, for reports and figures."""
+    return [
+        {
+            "edge_id": expanded.edges[int(edge_index)].edge_id,
+            "direction": expanded.edges[int(edge_index)].direction,
+        } | _component_localization(scores.edge_components_obs[int(edge_index)])
+        for edge_index in expanded.group_edge_indices[index]
+    ]
+
+
+def _null_variance_profile(scores: OmniBFamilyScores) -> dict | None:
+    """Per-sample weights of the smooth null with the first two eigenvectors."""
+    if scores.null_variance_weights is None or scores.null_variance_design is None:
+        return None
+    design = np.asarray(scores.null_variance_design, float)
+    return {
+        "weights": [float(value) for value in scores.null_variance_weights],
+        "pc1": [float(value) for value in design[:, 1]],
+        "pc2": [float(value) for value in design[:, 2]],
+        "squared_residuals": [
+            float(value) for value in scores.null_variance_squared_residuals],
     }
 
 
@@ -2525,6 +2559,12 @@ def run_group_scan_omnib(
         [records[index] for index in order if index in rejected_set]
         if inferential else None)
     top = [records[index] for index in order if finite[index]][:5]
+    if family_id == "group":
+        reported = {id(record) for record in top} | {id(record) for record in sig or []}
+        for index, record in enumerate(records):
+            if id(record) in reported:
+                record["edge_components"] = _group_edge_components(
+                    scores, expanded, index)
 
     hypothesis_ids = [record["hypothesis_id"] for record in records]
     fwer = {
@@ -2625,6 +2665,8 @@ def run_group_scan_omnib(
         "bootstrap_fwer": fwer,
         **({"null_variance_model": scores.null_variance_model}
            if scores.null_variance_model is not None else {}),
+        **({"null_variance_profile": _null_variance_profile(scores)}
+           if _null_variance_profile(scores) is not None else {}),
         "response_failures": response_failures,
         "family_provenance": family_provenance,
         "parallel_execution": dict(scores.parallel_execution),

@@ -1115,7 +1115,9 @@ def cmd_fit(args) -> int:
             boundary_components=reml.boundary_components,
             lambda_df=lam_df, trait=trait, out_dir=out_dir, prefix=prefix,
             formats=fmts, dpi=int(_get(cfg, "plots.dpi", 300)),
-            top_n=int(_get(cfg, "plots.top_n", 5)))
+            top_n=int(_get(cfg, "plots.top_n", 5)),
+            pve_uncertainty=pve_uncertainty,
+            pve_samples=pve_boot_result.samples if pve_uncertainty else None)
         for pth in plot_paths:
             print(f"  wrote {pth}")
 
@@ -1272,7 +1274,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plt = sub.add_parser("plot", help="regenerate publication figures from a "
                                       "finished run directory (no model refit)")
-    plt.add_argument("results_dir", help="a finished homoeogwas fit output dir")
+    plt.add_argument("results_dir", help="a finished homoeogwas fit or interact output dir")
     plt.add_argument("--prefix", default=None,
                      help="select summary_<prefix>.json (needed if several)")
     plt.add_argument("--formats", default="png,pdf,svg",
@@ -1398,6 +1400,16 @@ def cmd_plot(args) -> int:
     """Regenerate figures from a finished run directory without refitting."""
     from .plots import ALL_FIGURES, plot_from_results
     formats = [f.strip() for f in args.formats.split(",") if f.strip()]
+    interact_results = sorted(Path(args.results_dir).glob("interact_*.json"))
+    if interact_results and not any(Path(args.results_dir).glob("summary_*.json")):
+        from .interact_plots import make_interact_figures
+        paths = []
+        for result in interact_results:
+            paths += make_interact_figures(result, formats=formats)
+        for p in paths:
+            print(f"  wrote {p}")
+        print(f"[plot] {len(paths)} files written")
+        return 0 if paths else 1
     figures = (ALL_FIGURES if args.figures.strip() == "all"
                else tuple(f.strip() for f in args.figures.split(",")
                           if f.strip()))
@@ -1646,9 +1658,12 @@ def _autoplot_interact_figures(out_dir) -> None:
         or any(out_dir.glob("interact_*_ranking_clique_*.tsv")))
     has_canonical_rank = any(
         out_dir.glob("interact_*_ranking_group_*.tsv"))
-    if has_canonical_rank and not has_legacy_rank:
-        print("[interact] canonical group plotting is skipped pending a canonical "
-              "plotting adapter; the ranking data was written")
+    if not has_legacy_rank and (has_canonical_rank or any(out_dir.glob("interact_*.json"))):
+        from .interact_plots import make_interact_figures
+        written = []
+        for result in sorted(out_dir.glob("interact_*.json")):
+            written += make_interact_figures(result)
+        print(f"[interact] {len(written)} figure files written to {out_dir / 'figures'}")
         return
     if not has_legacy_rank:
         print("[interact] figures: no ranking dump (set outputs.full_ranking: "

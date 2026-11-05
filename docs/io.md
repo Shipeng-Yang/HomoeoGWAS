@@ -162,6 +162,8 @@ and PNG.
 | `qq_<prefix>.{pdf,svg,png}` | Q–Q plot of the marker P values |
 | `lambda_gc_<prefix>.{pdf,svg,png}` | λ_GC overall and per subgenome |
 | `variance_components_<prefix>.{pdf,svg,png}` | PVE of each subgenome kernel and the residual |
+| `pve_uncertainty_<prefix>.{pdf,svg,png}` | when `reml.pve_bootstrap` is set: subgenome PVE with bootstrap fits, interval and the probability that each subgenome explains the most variance |
+| `figures_<prefix>.html` | one page showing every figure with a short description |
 
 Regional plots around chosen loci are drawn afterwards with
 `homoeogwas locus`, and all figures can be regenerated from a finished run with
@@ -174,6 +176,11 @@ Regional plots around chosen loci are drawn afterwards with
 | `interact_<trait>.json` | the run record: number of planned, valid and unestimable groups; experiment-wide test (statistic, bootstrap null model, B, seed, family-wise level, threshold and rejected groups); variance components of the null model; interaction-scan λ; full provenance (software version, input hashes, settings) |
 | `interact_<trait>_ranking_group_<transform>.tsv` | one row per homoeolog group, ranked by P value (columns below) |
 | `provenance/` | launch and input attestations of formal runs |
+| `figures/interaction_scan.{pdf,svg,png}` | group −log10 P along the genome at the position of every copy; significant groups highlighted, their copies joined; experiment-wide threshold |
+| `figures/interaction_evidence.{pdf,svg,png}` | for each significant group (or the top groups when none is significant): −log10 P of every encoding on every edge, with the edge P |
+| `figures/interaction_calibration.{pdf,svg,png}` | bootstrap distribution of the family minimum P with the observed minimum and the threshold; Q–Q plot of the group P values |
+| `figures/interaction_null_variance.{pdf,svg,png}` | `smooth_pc4` runs: per-sample variance weights against the first two genomic eigenvectors |
+| `figures/figures.html` | one page showing every figure with a short description |
 
 Columns of the ranking table:
 
@@ -186,6 +193,24 @@ Columns of the ranking table:
 | `primary_sig` | 1 when the group is rejected at the family-wise level |
 | `driving_edge`, `driving_component`, `driving_component_p` | the copy pair and encoding with the strongest evidence, and its P value (to localise the signal; not part of the family-wise test) |
 | `p_unestimable` | 1 when the group could not be tested |
+
+The result JSON also records, for the figures and for your own checks, the
+bootstrap family minima (`model_diagnostics.bootstrap_fwer.null_minima`), the
+encoding P values of every edge of the reported groups (`edge_components`) and,
+for `smooth_pc4`, the per-sample variance profile
+(`model_diagnostics.null_variance_profile`). Redraw the figures at any time with
+`homoeogwas plot <out_dir>`; the scan figure reads gene positions from the
+genotype `.bim` files and SNP-to-gene maps named in the run config.
+
+### `homoeogwas follow-up` — significant groups
+
+Besides its tables, `follow-up` writes `followup_allele_combinations.*` (for the
+driving edge of each significant group, the raw mean phenotype of the four
+combinations of PC1-defined genotype classes of the two copies, relative to the
+low/low class, with the additive expectation; descriptive, not adjusted for
+relatedness), `followup_robustness.*` (nominal P of each group in every
+accession- and environment-deletion reanalysis, with the full-data P) and
+`followup_figures.html`.
 
 ### Audit and report card
 

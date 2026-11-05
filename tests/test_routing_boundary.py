@@ -223,7 +223,7 @@ def test_canonical_group_rejects_nonconforming_null_and_maf_settings(
         I.validate_interact_config(cfg)
 
 
-def test_canonical_group_ranking_skips_incompatible_legacy_plotter(
+def test_canonical_group_ranking_uses_the_group_plotter_not_the_legacy_one(
         monkeypatch, tmp_path, capsys):
     (tmp_path / "interact_trait_ranking_group_INT.tsv").write_text(
         "hypothesis_id\tp_interaction\n")
@@ -234,9 +234,8 @@ def test_canonical_group_ranking_skips_incompatible_legacy_plotter(
     CLI._autoplot_interact_figures(tmp_path)
 
     output = capsys.readouterr().out
-    assert "canonical group plotting is skipped" in output
-    assert "pending a canonical plotting adapter" in output
-    assert "figures written" not in output
+    assert "figure files written to" in output
+    assert "Rscript" not in output
 
 
 def test_cmd_group_qa_b19_loads_family_once_and_serializes_no_authority(

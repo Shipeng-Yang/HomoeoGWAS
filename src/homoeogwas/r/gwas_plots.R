@@ -205,7 +205,7 @@ if (length(dist_kinds) > 0) {
   `%||%` <- function(a, b) if (is.null(a)) b else a
   trait <- args[["trait"]] %||% prefix
   topn <- as.integer(args[["top-n"]] %||% "6")
-  SUBCOL <- c(A = "#1F577B", B = "#E07370", C = "#368650", D = "#FCBC10",
+  SUBCOL <- c(A = "#2F6DB5", B = "#E08A1E", C = "#8B4FB0", D = "#2E9466",
               homoeolog = "#A56BA7", residual = "#B8B8B8")
   theme_omic <- function() {
     theme_classic(base_size = 11) +

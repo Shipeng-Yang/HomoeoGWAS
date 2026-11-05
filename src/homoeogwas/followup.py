@@ -1118,6 +1118,35 @@ def _open_followup_generation(
     return None
 
 
+def _write_followup_figures(prepared, stability, material, environment, out: Path) -> None:
+    """Best-effort figures next to the tables; a plotting failure never fails the run."""
+    try:
+        from .followup_plots import plot_allele_combinations, plot_robustness
+
+        written = plot_allele_combinations(prepared, out)
+        written += plot_robustness(
+            stability, material, None if environment.empty else environment, out)
+        from .plots import write_figure_index
+
+        index = write_figure_index(out, "HomoeoGWAS follow-up of significant groups", (
+            ("followup_allele_combinations", "Driving edge of each significant group: raw mean "
+             "phenotype of the four combinations of PC1-defined genotype classes relative to "
+             "–/–, with 95% t intervals of the class means and the additive expectation "
+             "(dashed); light hatched bars, fewer than 10 accessions; descriptive, not "
+             "adjusted for relatedness."),
+            ("followup_robustness", "Nominal −log10 P of each group in accession-deletion folds "
+             "(grey) and environment-deletion reanalyses (triangles), with the full-data P "
+             "(diamond); dashed line, P = 0.05; right, reanalyses with P < 0.05."),
+        ), name="followup_figures.html")
+        if index:
+            written.append(index)
+    except Exception as exc:  # pragma: no cover - plotting is optional
+        print(f"[follow-up] figures skipped: {exc}")
+        return
+    if written:
+        print(f"[follow-up] {len(written)} figure files written")
+
+
 def _complete_followup_generation(out: Path, identity: str, payload: dict) -> None:
     inventory = [
         {
@@ -1327,6 +1356,7 @@ def run_followup(
     if not environment.empty:
         outputs["environment_deletion"] = _write_tsv(
             environment, out / "environment_deletion.tsv")
+    _write_followup_figures(prepared, stability, material, environment, out)
     _atomic_text(
         out / "evidence_provenance.json",
         json.dumps(evidence_provenance, indent=2, ensure_ascii=False) + "\n")

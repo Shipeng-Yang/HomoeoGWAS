@@ -38,12 +38,12 @@ from .jsonutil import dumps_strict
 DEFAULT_FORMATS: tuple[str, ...] = ("png", "pdf", "svg")
 ALL_FIGURES: tuple[str, ...] = ("pve", "manhattan", "qq", "lambda")
 
-# omicverse-inspired muted palette (sc_color / blue_color family), assigned to
-# subgenomes by position. Chosen for a polished, desaturated look while staying
-# as distinguishable as practical (it is no longer the strictly colourblind-safe
-# Okabe-Ito set).
-_SUBG_PALETTE = ["#1F577B", "#E07370", "#368650", "#FCBC10", "#5E4D9A",
-                 "#01A0A7", "#D48F3E", "#941456"]
+# Subgenome colours follow the letter (A blue, B ochre, C purple, D green) so a
+# subgenome keeps its colour across species and figures; other labels take the
+# remaining colours by position.
+_SUBG_BY_LETTER = {"A": "#2F6DB5", "B": "#E08A1E", "C": "#8B4FB0", "D": "#2E9466"}
+_SUBG_PALETTE = ["#2F6DB5", "#E08A1E", "#8B4FB0", "#2E9466", "#C0504D",
+                 "#01A0A7", "#7F6A4F", "#941456"]
 _HOM_COLOR = "#A56BA7"      # homoeolog Hadamard kernel (omicverse muted purple)
 _RESID_COLOR = "#B8B8B8"    # residual variance (soft grey)
 _GW_LINE = "#CB3E35"        # genome-wide threshold (omicverse muted red)
@@ -108,9 +108,17 @@ def is_hom_kernel(name: str) -> bool:
 
 
 def subgenome_palette(subg: Sequence[str]) -> dict[str, str]:
-    """Map each subgenome label to a stable muted colour (by position)."""
-    return {sg: _SUBG_PALETTE[i % len(_SUBG_PALETTE)]
-            for i, sg in enumerate(subg)}
+    """Map each subgenome label to a stable colour (by letter, then by position)."""
+    spare = [c for c in _SUBG_PALETTE if c not in
+             {_SUBG_BY_LETTER.get(str(sg).upper()) for sg in subg}]
+    palette, k = {}, 0
+    for sg in subg:
+        colour = _SUBG_BY_LETTER.get(str(sg).upper())
+        if colour is None:
+            colour = spare[k % len(spare)]
+            k += 1
+        palette[sg] = colour
+    return palette
 
 
 def _offset_spines(ax, outward: int = 10) -> None:
@@ -161,6 +169,36 @@ def save_figure(fig, out_dir: Path, stem: str,
         fig.savefig(path, format=fmt, dpi=dpi if fmt == "png" else None)
         written.append(str(path))
     return written
+
+
+def write_figure_index(out_dir: Path, title: str,
+                       entries: Sequence[tuple[str, str]],
+                       name: str = "figures.html") -> str | None:
+    """One HTML page showing every PNG in ``entries`` (file stem, caption)."""
+    import html
+
+    out_dir = Path(out_dir)
+    shown = [(stem, caption) for stem, caption in entries
+             if (out_dir / f"{stem}.png").is_file()]
+    if not shown:
+        return None
+    blocks = "\n".join(
+        f'<figure><img src="{html.escape(stem)}.png" alt="{html.escape(stem)}">'
+        f"<figcaption>{html.escape(caption)} "
+        f'(<a href="{html.escape(stem)}.pdf">PDF</a>, '
+        f'<a href="{html.escape(stem)}.svg">SVG</a>)</figcaption></figure>'
+        for stem, caption in shown)
+    page = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(title)}</title><style>"
+        "body{font-family:Arial,Helvetica,sans-serif;max-width:980px;margin:24px auto;"
+        "padding:0 16px;color:#222}figure{margin:0 0 36px}img{max-width:100%}"
+        "figcaption{font-size:13px;color:#444;margin-top:6px}h1{font-size:20px}"
+        "</style></head><body>"
+        f"<h1>{html.escape(title)}</h1>{blocks}</body></html>\n")
+    path = out_dir / name
+    path.write_text(page, encoding="utf-8")
+    return str(path)
 
 
 # ----------------------------------------------------------------------
@@ -495,7 +533,7 @@ def plot_qq(df: pd.DataFrame,
             ex = -np.log10((ranks - 0.5) / n_sg)
             lam = lambda_by_level.get(sg)
             lab = sg + (f" (λ={lam:.3f})" if lam is not None else "")
-            ax.scatter(ex, lp, s=6, color=palette.get(sg, "#1F577B"),
+            ax.scatter(ex, lp, s=6, color=palette.get(sg, "#2F6DB5"),
                        label=lab, alpha=0.7, linewidths=0, rasterized=True)
 
         ax.set_xlim(0, lim)
@@ -972,7 +1010,9 @@ def make_all_plots(plot_df: pd.DataFrame,
                    formats: Sequence[str] = DEFAULT_FORMATS,
                    dpi: int = 300,
                    top_n: int = 5,
-                   figures: Sequence[str] = ALL_FIGURES) -> list[str]:
+                   figures: Sequence[str] = ALL_FIGURES,
+                   pve_uncertainty: Mapping | None = None,
+                   pve_samples: pd.DataFrame | None = None) -> list[str]:
     """Render the full figure set; return all written paths.
 
     ``lambda_df`` has columns ``scope/level/n_markers/lambda_gc`` (the same
@@ -995,6 +1035,10 @@ def make_all_plots(plot_df: pd.DataFrame,
             sigma2, pve, subg, boundary_components=boundary_components,
             out_dir=out_dir, prefix=prefix, trait=trait, formats=formats,
             dpi=dpi)
+        if pve_uncertainty:
+            paths += plot_pve_uncertainty(
+                pve_uncertainty, subg, samples=pve_samples, out_dir=out_dir,
+                prefix=prefix, formats=formats, dpi=dpi)
     if "manhattan" in figures:
         paths += plot_manhattan(
             plot_df, subg, out_dir=out_dir, prefix=prefix, trait=trait,
@@ -1007,12 +1051,82 @@ def make_all_plots(plot_df: pd.DataFrame,
         paths += plot_lambda_gc(
             lambda_df, subg, out_dir=out_dir, prefix=prefix, trait=trait,
             formats=formats, dpi=dpi)
+    if "png" in formats:
+        index = write_figure_index(out_dir, f"HomoeoGWAS additive results: {trait or prefix}", (
+            (f"variance_components_{prefix}", "Variance components of each subgenome kernel and "
+             "the residual (left) and the proportion of phenotypic variance explained (right); "
+             "hatched, boundary estimates."),
+            (f"pve_uncertainty_{prefix}", "Subgenome PVE: grey points, bootstrap fits; coloured "
+             "point and bar, estimate and bootstrap interval; right, probability that the "
+             "subgenome explains the most variance."),
+            (f"manhattan_{prefix}", "Per-marker association by subgenome; lines, genome-wide and "
+             "suggestive thresholds."),
+            (f"qq_{prefix}", "Q–Q plot of marker P values by subgenome."),
+            (f"lambda_gc_{prefix}", "Genomic inflation factor overall and per subgenome."),
+        ), name=f"figures_{prefix}.html")
+        if index:
+            print(f"  wrote {index}")
+    return paths
+
+
+def plot_pve_uncertainty(uncertainty: Mapping,
+                         subg: Sequence[str],
+                         *,
+                         samples: pd.DataFrame | None = None,
+                         out_dir: Path,
+                         prefix: str,
+                         formats: Sequence[str] = DEFAULT_FORMATS,
+                         dpi: int = 300) -> list[str]:
+    """Subgenome PVE with its bootstrap interval and the probability that
+    each subgenome explains the most variance."""
+    components = uncertainty.get("components") or {}
+    names = [c for c in subg if c in components]
+    names += [c for c in components if c not in names and c != "e"]
+    if "e" in components:
+        names.append("e")
+    if not names:
+        return []
+    plt, _ = _import_mpl()
+    palette = subgenome_palette(subg)
+    top = uncertainty.get("top_genetic_component_probability") or {}
+    rng = np.random.default_rng(0)
+    with plt.rc_context(_PUB_RC):
+        fig, ax = plt.subplots(figsize=(3.6, 0.42 * len(names) + 0.9))
+        for i, name in enumerate(names):
+            y = len(names) - 1 - i
+            colour = component_color(name, palette)
+            if samples is not None and name in samples.columns:
+                values = samples[name].to_numpy(float)
+                ax.scatter(values, y + rng.uniform(-0.18, 0.18, values.size), s=3,
+                           color="#C9C4BE", lw=0, zorder=1, rasterized=True)
+            summary = components[name]
+            ax.plot([summary["ci_low"], summary["ci_high"]], [y, y], color=colour,
+                    lw=1.6, solid_capstyle="round", zorder=2)
+            ax.scatter([summary["estimate"]], [y], s=26, color=colour,
+                       edgecolor="white", linewidth=0.6, zorder=3)
+            if name in top:
+                ax.text(1.04, y, f"{top[name]:.2f}", transform=ax.get_yaxis_transform(),
+                        va="center", ha="left", fontsize=7)
+        ax.text(1.04, len(names) - 0.35, "P(top)", transform=ax.get_yaxis_transform(),
+                va="bottom", ha="left", fontsize=7, color="#555555")
+        ax.set_yticks(range(len(names)))
+        ax.set_yticklabels(["residual" if n == "e" else n for n in reversed(names)])
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("proportion of phenotypic variance explained")
+        _offset_spines(ax, 4)
+        fig.tight_layout()
+        paths = save_figure(fig, out_dir, f"pve_uncertainty_{prefix}", formats, dpi)
+        plt.close(fig)
     return paths
 
 
 # ----------------------------------------------------------------------
 # reconstruct a finished run for the `plot` subcommand (no refit)
 # ----------------------------------------------------------------------
+
+def _read_pve_samples(path: Path) -> pd.DataFrame | None:
+    return pd.read_csv(path, sep="\t") if Path(path).is_file() else None
+
 
 def _discover_summary(results_dir: Path, prefix: str | None) -> Path:
     """Locate ``summary_<prefix>.json`` inside a finished run directory."""
@@ -1149,7 +1263,8 @@ def plot_from_results(results_dir: Path,
         plot_df, subg, sigma2=sigma2, pve=pve, boundary_components=boundary,
         lambda_df=lambda_df, trait=trait, out_dir=results_dir,
         prefix=run_prefix, formats=formats, dpi=dpi, top_n=top_n,
-        figures=figures)
+        figures=figures, pve_uncertainty=reml.get("pve_uncertainty"),
+        pve_samples=_read_pve_samples(results_dir / f"pve_bootstrap_{run_prefix}.tsv"))
 
     if update_summary:
         summary.setdefault("outputs", {})["plots"] = paths
