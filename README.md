@@ -1,13 +1,18 @@
-# HomoeoGWAS
+<div align="center">
+
+<pre>
+    __  __                                 _______       _____   _____
+   / / / /___  ____ ___  ____  ___  ____  / ____/ |     / /   | / ___/
+  / /_/ / __ \/ __ `__ \/ __ \/ _ \/ __ \/ / __ | | /| / / /| | \__ \ 
+ / __  / /_/ / / / / / / /_/ /  __/ /_/ / /_/ / | |/ |/ / ___ |___/ / 
+/_/ /_/\____/_/ /_/ /_/\____/\___/\____/\____/  |__/|__/_/  |_/____/  
+</pre>
 
 **Subgenome-aware trait architecture and homoeolog-interaction analysis for allopolyploid crops.**
 
-[![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20668367.svg)](https://doi.org/10.5281/zenodo.20668367)
+[![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml) [![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](pyproject.toml) [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20668367.svg)](https://doi.org/10.5281/zenodo.20668367)
+
+</div>
 
 > **Current release: [v2.2.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.2.0), on [PyPI](https://pypi.org/project/homoeogwas/2.2.0/).**
 > `interact` and `fit` now write publication-ready figures (genome-wide
@@ -237,16 +242,22 @@ not have a cross-subgenome homoeolog interaction.
 
 The framework has been run end-to-end on six allopolyploid crops, from tetraploid
 to octoploid, through the same code path; this list is illustrative, not a limit
-on supported species.
+on supported species. The applications in the accompanying manuscript use the
+wheat, cotton, rapeseed and peanut panels; oat and strawberry were run with
+earlier releases. The table lists the assemblies of those analyses.
 
 | Species | Subgenomes | Reference assembly |
 |---|---|---|
-| Wheat (*Triticum aestivum*)     | AABBDD (6n) | IWGSC RefSeq v1.0 |
-| Cotton (*Gossypium hirsutum*)   | AADD (4n)   | HBAU NDM8 |
-| Rapeseed (*Brassica napus*)     | AACC (4n)   | Darmor v4.1 |
+| Wheat (*Triticum aestivum*)     | AABBDD (6n) | IWGSC RefSeq v1.0 (v1.1 gene models) |
+| Cotton (*Gossypium hirsutum*)   | AADD (4n)   | Gh_CRI v1 (CottonGVD panel) |
+| Rapeseed (*Brassica napus*)     | AACC (4n)   | Darmor-bzh v4.1 |
 | Peanut (*Arachis hypogaea*)     | AABB (4n)   | NDH108 (PeanutPan) |
 | Oat (*Avena sativa*)            | AACCDD (6n) | OT3098 v2 |
 | Strawberry (*Fragaria × ananassa*) | octoploid (4 subgenomes) | NIHHS Seolhyang |
+
+The species configs in `configs/species/` are templates and may name another
+assembly: the cotton config uses HBAU NDM8, and the rapeseed config uses
+Bra_napus_v2.0, the NCBI release of Darmor-bzh v4.1.
 
 ## Package layout
 
@@ -267,7 +278,11 @@ src/homoeogwas/
 ├── followup.py          # stability and evidence follow-up
 ├── audit.py             # evidence/status audit of finished runs
 ├── run_registry.py      # multi-species production registry
-├── plots.py             # publication figures from finished runs
+├── plots.py             # figures for fit runs (Manhattan, Q–Q, PVE)
+├── interact_plots.py    # figures for interact runs (scan, evidence, calibration)
+├── followup_plots.py    # follow-up figures (allele combinations, robustness)
+├── input_qc.py          # input checks before a run
+├── report_card.py       # per-result report card
 ├── workflow.py          # high-level orchestration used by the agent tools
 └── mcp_server.py        # MCP server for AI agents
 ```

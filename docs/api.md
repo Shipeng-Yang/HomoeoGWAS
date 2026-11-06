@@ -1,6 +1,6 @@
 # API Reference
 
-The Python package lives at `src/homoeogwas/`. This page summarizes the module-level surface; for full docstrings, browse the source or build the docs locally with mkdocstrings (planned for v1.0).
+The Python package lives at `src/homoeogwas/`. This page summarizes the module-level surface; for full docstrings, browse the source.
 
 ## Top-level entry points
 
