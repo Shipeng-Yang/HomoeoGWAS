@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## v2.2.0 — output figures (2026-11-06)
+
+### Added
+
+- `interact` writes figures to `figures/` at the end of a run: the genome-wide
+  group scan at the position of every gene copy, an evidence figure (P of every
+  encoding on every edge) for up to 12 significant groups, or the top three
+  groups when none is significant, a calibration figure (bootstrap
+  family-minimum null with the observed minimum and the threshold; Q–Q plot of
+  the group P values) and, for `smooth_pc4`, the per-sample variance weights
+  against the first two genomic eigenvectors. `figures/figures.html` shows them
+  on one page with a short description of each.
+- `fit` draws the subgenome PVE with its bootstrap interval when
+  `reml.pve_bootstrap` is set, and writes `figures_<prefix>.html`.
+- `homoeogwas follow-up` draws allele-combination means for significant groups
+  and the nominal P across accession-deletion folds.
+- `homoeogwas plot <dir>` also regenerates the figures of an `interact` output
+  directory.
+- The result JSON records the values the figures need:
+  `model_diagnostics.bootstrap_fwer.null_minima`, `edge_components` for
+  reported groups and `model_diagnostics.null_variance_profile`. They are not part of the
+  checkpoint manifest.
+
+### Changed
+
+- Where figures colour-code subgenomes, colours follow the subgenome letter
+  (A blue, B orange, C purple, D green).
+
+No statistical code changed. Estimates, P values and decisions equal v2.1.4.
+
 ## v2.1.4 — MCP dependency pin and documentation (2026-11-05)
 
 ### Fixed

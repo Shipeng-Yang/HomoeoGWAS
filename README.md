@@ -5,15 +5,16 @@
 [![CI](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml/badge.svg)](https://github.com/Shipeng-Yang/HomoeoGWAS/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.1.4-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen.svg)](#testing)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20668367.svg)](https://doi.org/10.5281/zenodo.20668367)
 
-> **Current release: [v2.1.4](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.4), on [PyPI](https://pypi.org/project/homoeogwas/2.1.4/).**
-> A patch release: the optional MCP interface is pinned to `mcp<2`, whose 2.x
-> series renamed the server API, and the documentation describes every input
-> and output file. No statistical code changed since v2.1.0. See the
-> [release notes](docs/releases/v2.1.4.md), the [release history](#release-history)
+> **Current release: [v2.2.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.2.0), on [PyPI](https://pypi.org/project/homoeogwas/2.2.0/).**
+> `interact` and `fit` now write publication-ready figures (genome-wide
+> interaction scan, per-group evidence, calibration, PVE with bootstrap
+> intervals) and the follow-up command draws allele combinations and
+> robustness. No statistical code changed since v2.1.0. See the
+> [release notes](docs/releases/v2.2.0.md), the [release history](#release-history)
 > below and the [changelog](CHANGELOG.md).
 
 HomoeoGWAS runs GWAS on **allopolyploid crops** (wheat, cotton, rapeseed, oat,
@@ -47,7 +48,7 @@ evidence without a frozen benchmark.
 
 ```bash
 # 1. Install the current release (CPU)
-python -m pip install "homoeogwas==2.1.4"
+python -m pip install "homoeogwas==2.2.0"
 # Contributors may instead use: python -m pip install -e ".[dev]"
 
 # 2. Verify the install end-to-end (~2 s): synthesise a tiny dataset + run a fit
@@ -59,11 +60,11 @@ homoeogwas fit -c my_run.yaml -o results/my_run
 homoeogwas audit results/my_run       # validity, uncertainty and evidence limits
 
 # (Optional) GPU extras for the per-SNP scan
-python -m pip install "homoeogwas[gpu]==2.1.4"
+python -m pip install "homoeogwas[gpu]==2.2.0"
 ```
 
 The same release is available from GitHub:
-`python -m pip install "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.1.4.tar.gz"`.
+`python -m pip install "homoeogwas @ https://github.com/Shipeng-Yang/HomoeoGWAS/archive/refs/tags/v2.2.0.tar.gz"`.
 
 See [`examples/minimal/`](examples/minimal/) for the demo dataset + an annotated
 config, and [the I/O contract](docs/io.md) for input/output formats. Main CLI
@@ -126,7 +127,7 @@ to connect, pick whichever matches the agent you already use:
 
 # ── Option B · Any MCP client (Cursor, Cline, Windsurf, Claude Desktop, …) ─────
 # Install the current release with the MCP dependency:
-python -m pip install "homoeogwas[mcp]==2.1.4"
+python -m pip install "homoeogwas[mcp]==2.2.0"
 homoeogwas mcp                    # starts the MCP server (stdio)
 # Then register this server in your client's MCP config. Minimal entry:
 #   {"mcpServers": {"homoeogwas": {"command": "homoeogwas", "args": ["mcp"]}}}
@@ -297,7 +298,7 @@ Until the preprint is available, please cite the software release you used:
   title   = {HomoeoGWAS: subgenome-aware trait architecture and homoeolog-interaction
              analysis for allopolyploid crops},
   year    = {2026},
-  version = {2.1.4},
+  version = {2.2.0},
   url     = {https://github.com/Shipeng-Yang/HomoeoGWAS}
 }
 ```
@@ -311,6 +312,7 @@ Full details are in the [changelog](CHANGELOG.md) and the
 
 | Version | Date | Main changes |
 |---|---|---|
+| [v2.2.0](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.2.0) | 2026-11-06 | Output figures: interaction scan, evidence, calibration and smooth_pc4 null-variance figures after `interact`; PVE with bootstrap intervals after `fit`; follow-up allele combinations and robustness; one HTML page per figure set; `homoeogwas plot` accepts `interact` directories. Released on PyPI. |
 | [v2.1.4](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.4) | 2026-11-05 | MCP extra pinned to `mcp<2`; documentation of every input and output file, the workflow figure and the current algorithm. Released on PyPI. |
 | [v2.1.3](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.3) | 2026-11-03 | Deterministic input guards: duplicated homoeolog genes can only be waived by the data owner, sample-ID join loss and ID-normalisation mismatches, protein-FASTA alphabet checks and bounded DIAMOND runs, PLINK-file and chromosome-name preflight, raw trial-average warning; `report_card` JSON per result. Released on PyPI. |
 | [v2.1.2](https://github.com/Shipeng-Yang/HomoeoGWAS/releases/tag/v2.1.2) | 2026-10-13 | Phenotype screen for extreme values; homoeolog tables that repeat a gene across groups stop at preflight. |

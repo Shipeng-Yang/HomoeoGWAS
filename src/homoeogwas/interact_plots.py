@@ -52,7 +52,10 @@ CAPTIONS = (
      "(columns), with the edge omniB −log10 P above."),
     ("interaction_calibration", "Left, bootstrap distribution of the family minimum P (grey) "
      "with the experiment-wide threshold (red dashed) and the observed minimum (magenta). "
-     "Right, Q–Q plot of group P values with the pointwise 95% band; magenta, significant groups."),
+     "Right, Q–Q plot of group P values against the uniform expectation; grey band, pointwise "
+     "95% interval for independent P values (groups sharing gene copies or linked regions are "
+     "correlated, so the band is not a family-wise bound); red dashed line, experiment-wide "
+     "threshold; magenta, significant groups."),
     ("interaction_null_variance", "smooth_pc4 null: per-sample variance weights against the "
      "first two genomic eigenvectors; dashed line, weight 1."),
 )
