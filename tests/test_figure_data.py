@@ -79,7 +79,8 @@ def test_figure_fields_stay_out_of_the_checkpoint_manifest(tmp_path):
     for variance, threshold in expected.items():
         root = tmp_path / variance
         diagnostics = I._json_safe(_run(root, variance).model_diagnostics)
-        assert diagnostics["bootstrap_fwer"]["threshold"] == threshold
+        # last-bit differences between numpy builds are not a change in the threshold
+        assert diagnostics["bootstrap_fwer"]["threshold"] == pytest.approx(threshold, rel=1e-12)
         manifest = (root / "manifest.json").read_text()
         for field in ("null_minima", "edge_components", "null_variance_profile",
                       "squared_residuals"):
