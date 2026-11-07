@@ -36,10 +36,21 @@ nav:
   - Getting Started: getting_started.md
   - Inputs & Outputs: io.md
   - Interaction Inputs: interact_inputs.md
+  - Follow-up: followup.md
+  - Run Registry: run_registry.md
+  - Data-owner Waivers: data_owner_waivers.md
   - Examples:
       - Strawberry Octoploid: examples/strawberry_octoploid.md
   - Algorithm: algorithm.md
   - API Reference: api.md
+  - Release Notes:
+      - v2.2.0: releases/v2.2.0.md
+      - v2.1.4: releases/v2.1.4.md
+      - v2.1.3: releases/v2.1.3.md
+      - v2.1.2: releases/v2.1.2.md
+      - v2.1.1: releases/v2.1.1.md
+      - v2.1.0: releases/v2.1.0.md
+      - v2.0.1: releases/v2.0.1.md
 
 docs_dir: docs
 

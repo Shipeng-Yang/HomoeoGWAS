@@ -320,6 +320,9 @@ Until the preprint is available, please cite the software release you used:
 
 See [`CITATION.cff`](CITATION.cff) for machine-readable metadata.
 
+Scripts, configurations, preregistrations and source data behind the figures and tables of the preprint
+are in [HomoeoGWAS-reproducibility](https://github.com/Shipeng-Yang/HomoeoGWAS-reproducibility).
+
 ## Release history
 
 Full details are in the [changelog](CHANGELOG.md) and the
